@@ -1,0 +1,6 @@
+name: LowkeyCore
+version: 0.1.0
+main: nl.lowkey.core.LowkeyCore
+api-version: '26.1'
+description: LowkeySMP chat tags, join/leave messages and elimination effects
+authors: [LowkeySMP]

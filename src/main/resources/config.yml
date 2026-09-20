@@ -1,0 +1,11 @@
+# Spelers die de CREW-badge krijgen (Minecraft-naam, hoofdletters maken niet uit).
+# Na een wijziging: server herstarten.
+crew:
+  - R3ktify
+
+# true  = bij een dood word je spectator op de plek waar je stierf (hardcore-stijl)
+# false = alleen het bericht, de titel en het bloed, zodat je kunt testen zonder eliminatie
+eliminate-on-death: true
+
+# Tekst achter de naam in het rode bericht
+eliminated-suffix: " is uitgeschakeld!"
