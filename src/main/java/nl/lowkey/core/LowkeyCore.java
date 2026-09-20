@@ -95,7 +95,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (!isCrew(player)) {
             return;
         }
-        Component badge = glyph(CREW_BADGE).append(Component.space());
+        // NB: appending to the glyph itself would make the space/name inherit the "lowkey:tags" font
+        // (that showed up as empty squares). Build the pieces as siblings instead.
+        Component badge = Component.text()
+                .append(glyph(CREW_BADGE))
+                .append(Component.space())
+                .build();
 
         // nametag above the head
         Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
@@ -107,7 +112,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         team.addEntry(player.getName());
 
         // tab list
-        player.playerListName(badge.append(Component.text(player.getName(), NamedTextColor.WHITE)));
+        player.playerListName(Component.text()
+                .append(badge)
+                .append(Component.text(player.getName(), NamedTextColor.WHITE))
+                .build());
     }
 
     // ------------------------------------------------------------------ join / leave
@@ -118,7 +126,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         event.joinMessage(Component.text()
                 .append(glyph(JOIN_ICON))
                 .append(Component.space())
-                .append(Component.text(player.getName(), NamedTextColor.WHITE))
+                .append(Component.text(player.getName(), NamedTextColor.GREEN))
                 .build());
         applyCrew(player);
     }
@@ -129,7 +137,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         event.quitMessage(Component.text()
                 .append(glyph(LEAVE_ICON))
                 .append(Component.space())
-                .append(Component.text(player.getName(), NamedTextColor.WHITE))
+                .append(Component.text(player.getName(), NamedTextColor.RED))
                 .build());
     }
 
@@ -223,3 +231,4 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }.runTaskTimer(this, 0L, 2L);
     }
 }
+
