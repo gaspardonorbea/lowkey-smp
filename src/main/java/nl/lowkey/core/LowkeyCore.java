@@ -27,6 +27,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -128,6 +129,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** name of the scoreboard team each online player is currently in */
     private final Map<UUID, String> teamNames = new HashMap<>();
 
+    /** server closed for maintenance? Only the names in "closed-access" can join. Saved in state.yml. */
+    private volatile boolean serverClosed;
+    private volatile Set<String> closedAccess = Set.of();
+
     /** is the Nether open? saved in state.yml so it survives restarts */
     private boolean netherOpen;
     private File stateFile;
@@ -147,7 +152,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveDefaultConfig();
         loadSettings();
         stateFile = new File(getDataFolder(), "state.yml");
-        netherOpen = YamlConfiguration.loadConfiguration(stateFile).getBoolean("nether-open", false);
+        YamlConfiguration state = YamlConfiguration.loadConfiguration(stateFile);
+        netherOpen = state.getBoolean("nether-open", false);
+        serverClosed = state.getBoolean("server-closed", false);
         graceKey = new NamespacedKey(this, "grace_left");
         sideKey = new NamespacedKey(this, "side");
 
@@ -173,6 +180,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         for (String name : getConfig().getStringList("crew")) {
             crew.add(name.toLowerCase(Locale.ROOT));
         }
+        Set<String> access = new HashSet<>();
+        for (String name : getConfig().getStringList("closed-access")) {
+            access.add(name.toLowerCase(Locale.ROOT));
+        }
+        closedAccess = access;
         graceMillis = Math.max(0L, getConfig().getLong("grace-minutes", 60L)) * 60_000L;
         eliminateOnDeath = getConfig().getBoolean("eliminate-on-death", true);
         eliminatedSuffix = getConfig().getString("eliminated-suffix", " is uitgeschakeld!");
@@ -588,11 +600,46 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }.runTaskTimer(this, 0L, 2L);
     }
 
+    // ------------------------------------------------------------------ server open / closed (maintenance)
+
+    private boolean hasClosedAccess(String name) {
+        return closedAccess.contains(name.toLowerCase(Locale.ROOT));
+    }
+
+    private Component closedMessage() {
+        return Component.text("De server is tijdelijk gesloten. Kom later terug!", NamedTextColor.RED);
+    }
+
+    /**
+     * Closing does NOT use the ban list: it only blocks logging in (except for the names in
+     * "closed-access") and kicks everybody else who is online. Opening just lifts the block,
+     * so real bans are never touched. The state is saved, so a restart keeps the server closed.
+     */
+    private void setServerClosed(boolean closed) {
+        serverClosed = closed;
+        saveState();
+        if (closed) {
+            for (Player player : new ArrayList<>(getServer().getOnlinePlayers())) {
+                if (!hasClosedAccess(player.getName())) {
+                    player.kick(closedMessage());
+                }
+            }
+        }
+    }
+
+    @EventHandler
+    public void onPreLogin(AsyncPlayerPreLoginEvent event) {
+        if (serverClosed && !hasClosedAccess(event.getName())) {
+            event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, closedMessage());
+        }
+    }
+
     // ------------------------------------------------------------------ Nether open / closed
 
     private void saveState() {
         YamlConfiguration state = new YamlConfiguration();
         state.set("nether-open", netherOpen);
+        state.set("server-closed", serverClosed);
         try {
             getDataFolder().mkdirs();
             state.save(stateFile);
@@ -659,6 +706,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey grace <speler> <minuten> : zet de resterende grace tijd (0 = grace beeindigen)
      * /lowkey team <speler> <noord|zuid|geen> : zet de speler in Noord, Zuid of geen team
      * /lowkey nether <open|close> : opent of sluit de Nether (bij openen: titel + bericht voor iedereen)
+     * /lowkey server <open|close> : sluit de server voor iedereen behalve 'closed-access' (geen bans), of maakt hem weer open
      */
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -704,6 +752,33 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     target.getName() + " zit nu in team " + side.id + ".", NamedTextColor.GREEN));
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("server")) {
+            if (args.length == 2 && args[1].equalsIgnoreCase("close")) {
+                if (sender instanceof Player) {
+                    Player senderPlayer = (Player) sender;
+                    if (!hasClosedAccess(senderPlayer.getName())) {
+                        sender.sendMessage(Component.text(
+                                "Je staat zelf niet in 'closed-access' in config.yml, dan zou je jezelf buitensluiten. "
+                                        + "Voeg je naam eerst toe of sluit de server via de console.", NamedTextColor.RED));
+                        return true;
+                    }
+                }
+                setServerClosed(true);
+                sender.sendMessage(Component.text(
+                        "De server is nu gesloten. Alleen deze spelers kunnen joinen: "
+                                + String.join(", ", getConfig().getStringList("closed-access")), NamedTextColor.GREEN));
+                return true;
+            }
+            if (args.length == 2 && args[1].equalsIgnoreCase("open")) {
+                setServerClosed(false);
+                sender.sendMessage(Component.text("De server is weer open voor iedereen.", NamedTextColor.GREEN));
+                return true;
+            }
+            sender.sendMessage(Component.text(
+                    "De server is nu " + (serverClosed ? "gesloten" : "open") + ". Gebruik: /lowkey server <open|close>",
+                    NamedTextColor.GRAY));
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("nether")) {
             if (args.length == 2 && args[1].equalsIgnoreCase("open")) {
                 setNether(true);
@@ -721,7 +796,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey nether <open|close>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -739,13 +814,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("grace");
             options.add("team");
             options.add("nether");
+            options.add("server");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
             if (sub.equals("grace") || sub.equals("team")) {
                 for (Player player : getServer().getOnlinePlayers()) {
                     options.add(player.getName());
                 }
-            } else if (sub.equals("nether")) {
+            } else if (sub.equals("nether") || sub.equals("server")) {
                 options.add("open");
                 options.add("close");
             }
