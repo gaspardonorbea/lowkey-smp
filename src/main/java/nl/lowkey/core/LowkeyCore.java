@@ -46,10 +46,12 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * LowkeySMP visuals and rules:
@@ -76,6 +78,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** -1 px space: pieces of a wide picture are joined with this so there is no seam */
     private static final String SPACER = "\uE010";
+    /** +1 px space: the small gap between two icons (a normal space is 4 px, too wide) */
+    private static final String THIN_GAP = "\uE011";
     /** the tab list logo (2 pieces) and the big UITGESCHAKELD title (3 pieces) */
     private static final String LOGO = "\uE020" + SPACER + "\uE021";
     private static final String TITLE_GLYPH = "\uE030" + SPACER + "\uE031" + SPACER + "\uE032";
@@ -117,6 +121,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** grace time left in ms, as of the timestamp in graceLast (only for online players) */
     private final Map<UUID, Long> graceLeft = new HashMap<>();
     private final Map<UUID, Long> graceLast = new HashMap<>();
+
+    /** side of every online player, readable from the async chat thread */
+    private final Map<UUID, Side> sideCache = new ConcurrentHashMap<>();
 
     /** name of the scoreboard team each online player is currently in */
     private final Map<UUID, String> teamNames = new HashMap<>();
@@ -323,15 +330,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         UUID id = player.getUniqueId();
         Side side = getSide(player);
 
-        TextComponent.Builder prefix = Component.text();
+        sideCache.put(id, side);
+
+        List<String> parts = new ArrayList<>();
         if (isCrew(player)) {
-            prefix.append(glyph(CREW_ICON)).append(Component.space());
+            parts.add(CREW_ICON);
         }
         if (graceRemaining(player) > 0L) {
-            prefix.append(glyph(GRACE_ICON)).append(Component.space());
+            parts.add(GRACE_ICON);
         }
         if (side.icon != null) {
-            prefix.append(glyph(side.icon)).append(Component.space());
+            parts.add(side.icon);
+        }
+        // small gap between the icons, a normal space between the last icon and the name
+        TextComponent.Builder prefix = Component.text();
+        for (int i = 0; i < parts.size(); i++) {
+            prefix.append(glyph(parts.get(i)));
+            prefix.append(i < parts.size() - 1 ? glyph(THIN_GAP) : Component.space());
         }
         Component icons = prefix.build();
 
@@ -443,6 +458,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         graceLeft.remove(player.getUniqueId());
         graceLast.remove(player.getUniqueId());
         netherNotice.remove(player.getUniqueId());
+        sideCache.remove(player.getUniqueId());
         removeTeam(player);
         getServer().getScheduler().runTask(this, this::updateTablist); // count is right one tick later
     }
@@ -452,12 +468,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     @EventHandler
     public void onChat(AsyncChatEvent event) {
         final boolean isCrew = isCrew(event.getPlayer());
+        final Side side = sideCache.getOrDefault(event.getPlayer().getUniqueId(), Side.NONE);
         event.renderer(ChatRenderer.viewerUnaware((source, sourceDisplayName, message) -> {
             Component line = Component.empty();
             if (isCrew) {
                 line = line.append(glyph(CREW_ICON)).append(Component.space());
             }
-            return line.append(sourceDisplayName)
+            // Noord = red name, Zuid = blue name
+            Component name = side == Side.NONE ? sourceDisplayName : sourceDisplayName.color(TextColor.color(side.rgb));
+            return line.append(name)
                     .append(Component.text(": ", NamedTextColor.GRAY))
                     .append(message);
         }));
@@ -705,5 +724,51 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey nether <open|close>",
                 NamedTextColor.GRAY));
         return true;
+    }
+
+    // ------------------------------------------------------------------ tab completion
+
+    /** Typing /lowkey (and pressing space / tab) suggests every possibility. */
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (!command.getName().equalsIgnoreCase("lowkey") || !sender.hasPermission("lowkey.admin")) {
+            return List.of();
+        }
+        List<String> options = new ArrayList<>();
+        if (args.length == 1) {
+            options.add("grace");
+            options.add("team");
+            options.add("nether");
+        } else if (args.length == 2) {
+            String sub = args[0].toLowerCase(Locale.ROOT);
+            if (sub.equals("grace") || sub.equals("team")) {
+                for (Player player : getServer().getOnlinePlayers()) {
+                    options.add(player.getName());
+                }
+            } else if (sub.equals("nether")) {
+                options.add("open");
+                options.add("close");
+            }
+        } else if (args.length == 3) {
+            String sub = args[0].toLowerCase(Locale.ROOT);
+            if (sub.equals("team")) {
+                options.add("noord");
+                options.add("zuid");
+                options.add("geen");
+            } else if (sub.equals("grace")) {
+                options.add("0");
+                options.add("1");
+                options.add("10");
+                options.add("60");
+            }
+        }
+        String typed = args.length == 0 ? "" : args[args.length - 1].toLowerCase(Locale.ROOT);
+        List<String> result = new ArrayList<>();
+        for (String option : options) {
+            if (option.toLowerCase(Locale.ROOT).startsWith(typed)) {
+                result.add(option);
+            }
+        }
+        return result;
     }
 }
