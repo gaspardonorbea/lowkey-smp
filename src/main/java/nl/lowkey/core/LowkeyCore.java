@@ -1,10 +1,17 @@
 package nl.lowkey.core;
 
 import io.papermc.paper.chat.ChatRenderer;
+import io.papermc.paper.dialog.Dialog;
 import io.papermc.paper.event.player.AsyncChatEvent;
+import io.papermc.paper.registry.data.dialog.ActionButton;
+import io.papermc.paper.registry.data.dialog.DialogBase;
+import io.papermc.paper.registry.data.dialog.action.DialogAction;
+import io.papermc.paper.registry.data.dialog.body.DialogBody;
+import io.papermc.paper.registry.data.dialog.type.DialogType;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
+import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -53,6 +60,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * LowkeySMP visuals and rules:
@@ -703,6 +711,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     // ------------------------------------------------------------------ admin command
 
     /**
+     * /lowkey  (of /lowkey menu) : opent het beheerpaneel met knoppen
      * /lowkey grace <speler> <minuten> : zet de resterende grace tijd (0 = grace beeindigen)
      * /lowkey team <speler> <noord|zuid|geen> : zet de speler in Noord, Zuid of geen team
      * /lowkey nether <open|close> : opent of sluit de Nether (bij openen: titel + bericht voor iedereen)
@@ -715,6 +724,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         if (!sender.hasPermission("lowkey.admin")) {
             sender.sendMessage(Component.text("Je hebt hier geen toegang toe.", NamedTextColor.RED));
+            return true;
+        }
+        if (sender instanceof Player && (args.length == 0 || (args.length == 1 && args[0].equalsIgnoreCase("menu")))) {
+            openMenu((Player) sender);
             return true;
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("grace")) {
@@ -801,6 +814,200 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return true;
     }
 
+    // ------------------------------------------------------------------ admin panel (dialog menus)
+
+    private static final ClickCallback.Options CLICK_OPTIONS =
+            ClickCallback.Options.builder().uses(1).lifetime(Duration.ofMinutes(10)).build();
+
+    /**
+     * One clickable button in a dialog. The action runs on the main thread and only when the person
+     * who clicked really has the lowkey.admin permission (so a menu can never be abused).
+     */
+    private ActionButton button(Component label, String tooltip, int width, Runnable action) {
+        DialogAction dialogAction = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!clicker.hasPermission("lowkey.admin")) {
+                return;
+            }
+            getServer().getScheduler().runTask(this, action);
+        }, CLICK_OPTIONS);
+        return ActionButton.create(label, Component.text(tooltip), width, dialogAction);
+    }
+
+    private Component statusText() {
+        return Component.text()
+                .append(Component.text("Server: ", NamedTextColor.GRAY))
+                .append(Component.text(serverClosed ? "gesloten" : "open",
+                        serverClosed ? NamedTextColor.RED : NamedTextColor.GREEN))
+                .append(Component.newline())
+                .append(Component.text("Nether: ", NamedTextColor.GRAY))
+                .append(Component.text(netherOpen ? "open" : "dicht",
+                        netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED))
+                .append(Component.newline())
+                .append(Component.text("Online: ", NamedTextColor.GRAY))
+                .append(Component.text(String.valueOf(getServer().getOnlinePlayers().size()), NamedTextColor.WHITE))
+                .build();
+    }
+
+    /** The main menu, opened with /lowkey. */
+    private void openMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+
+        if (serverClosed) {
+            buttons.add(button(Component.text("Server openen", NamedTextColor.GREEN),
+                    "Maak de server weer open voor iedereen.", 150, () -> {
+                        setServerClosed(false);
+                        admin.sendMessage(Component.text("De server is weer open voor iedereen.", NamedTextColor.GREEN));
+                        openMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(Component.text("Server sluiten", NamedTextColor.RED),
+                    "Kickt iedereen behalve de spelers bij closed-access.", 150, () -> confirm(admin,
+                            "Server sluiten?",
+                            "Iedereen behalve " + String.join(", ", getConfig().getStringList("closed-access")) + " wordt gekickt.",
+                            "De server blijft dicht tot je hem weer opent.",
+                            Component.text("Ja, sluiten", NamedTextColor.RED),
+                            () -> {
+                                if (!hasClosedAccess(admin.getName())) {
+                                    admin.sendMessage(Component.text(
+                                            "Je staat zelf niet in 'closed-access' in config.yml, dan zou je jezelf buitensluiten.",
+                                            NamedTextColor.RED));
+                                } else {
+                                    setServerClosed(true);
+                                    admin.sendMessage(Component.text("De server is nu gesloten.", NamedTextColor.GREEN));
+                                }
+                                openMenu(admin);
+                            })));
+        }
+
+        if (netherOpen) {
+            buttons.add(button(Component.text("Nether sluiten", NamedTextColor.RED),
+                    "Sluit de Nether weer. Wie erin zit kan er nog uit.", 150, () -> {
+                        setNether(false);
+                        openMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(Component.text("Nether openen", NamedTextColor.GREEN),
+                    "Opent de Nether voor iedereen, met titel en bericht.", 150, () -> confirm(admin,
+                            "Nether openen?",
+                            "Iedereen krijgt de titel en het bericht dat de Nether open is.",
+                            "Je kunt hem later weer sluiten.",
+                            Component.text("Ja, openen", NamedTextColor.GREEN),
+                            () -> {
+                                setNether(true);
+                                openMenu(admin);
+                            })));
+        }
+
+        buttons.add(button(Component.text("Team instellen..."), "Zet een speler in Noord, Zuid of geen team.", 150,
+                () -> pickPlayer(admin, "Team instellen", target -> pickTeam(admin, target))));
+        buttons.add(button(Component.text("Grace instellen..."), "Zet de grace tijd van een speler.", 150,
+                () -> pickPlayer(admin, "Grace instellen", target -> pickGrace(admin, target))));
+
+        ActionButton close = ActionButton.create(Component.text("Sluiten"), Component.text("Sluit dit menu."), 150, null);
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("LowkeySMP Beheer"))
+                        .body(List.of(DialogBody.plainMessage(statusText())))
+                        .build())
+                .type(DialogType.multiAction(buttons, close, 2)));
+        admin.showDialog(dialog);
+    }
+
+    /** A yes / no screen. "Annuleren" goes back to the main menu. */
+    private void confirm(Player admin, String title, String line1, String line2, Component yesLabel, Runnable yes) {
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text(title, NamedTextColor.RED))
+                        .body(List.of(
+                                DialogBody.plainMessage(Component.text(line1, NamedTextColor.WHITE)),
+                                DialogBody.plainMessage(Component.text(line2, NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.confirmation(
+                        button(yesLabel, "Bevestigen", 150, yes),
+                        button(Component.text("Annuleren"), "Terug naar het menu.", 150, () -> openMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+    /** A list with one button per online player; clicking one continues with `next`. */
+    private void pickPlayer(Player admin, String title, Consumer<Player> next) {
+        List<ActionButton> buttons = new ArrayList<>();
+        for (Player online : getServer().getOnlinePlayers()) {
+            buttons.add(button(Component.text(online.getName()), "Kies " + online.getName() + ".", 100, () -> {
+                if (online.isOnline()) {
+                    next.accept(online);
+                } else {
+                    admin.sendMessage(Component.text("Die speler is niet meer online.", NamedTextColor.RED));
+                    openMenu(admin);
+                }
+            }));
+        }
+        ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text(title))
+                        .body(List.of(DialogBody.plainMessage(Component.text("Kies een speler:", NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.multiAction(buttons, back, 3)));
+        admin.showDialog(dialog);
+    }
+
+    private void pickTeam(Player admin, Player target) {
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(teamButton(admin, target, Side.NOORD, "Noord", NamedTextColor.RED));
+        buttons.add(teamButton(admin, target, Side.ZUID, "Zuid", NamedTextColor.BLUE));
+        buttons.add(teamButton(admin, target, Side.NONE, "Geen team", NamedTextColor.GRAY));
+        ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("Team voor " + target.getName()))
+                        .body(List.of(DialogBody.plainMessage(
+                                Component.text("Nu: " + getSide(target).id, NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.multiAction(buttons, back, 3)));
+        admin.showDialog(dialog);
+    }
+
+    private ActionButton teamButton(Player admin, Player target, Side side, String label, NamedTextColor color) {
+        return button(Component.text(label, color), target.getName() + " in " + label + " zetten.", 100, () -> {
+            setSide(target, side);
+            admin.sendMessage(Component.text(target.getName() + " zit nu in team " + side.id + ".", NamedTextColor.GREEN));
+            openMenu(admin);
+        });
+    }
+
+    private void pickGrace(Player admin, Player target) {
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(graceButton(admin, target, 0, "Beeindigen"));
+        buttons.add(graceButton(admin, target, 10, "10 minuten"));
+        buttons.add(graceButton(admin, target, 30, "30 minuten"));
+        buttons.add(graceButton(admin, target, 60, "60 minuten"));
+        ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
+
+        long leftMinutes = (graceRemaining(target) + 59_999L) / 60_000L;
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("Grace voor " + target.getName()))
+                        .body(List.of(DialogBody.plainMessage(
+                                Component.text("Nu nog: " + leftMinutes + " minuten", NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.multiAction(buttons, back, 2)));
+        admin.showDialog(dialog);
+    }
+
+    private ActionButton graceButton(Player admin, Player target, int minutes, String label) {
+        return button(Component.text(label), "Zet de grace van " + target.getName() + " op " + minutes + " minuten.", 100, () -> {
+            setGrace(target, minutes * 60_000L);
+            admin.sendMessage(Component.text(
+                    "Grace van " + target.getName() + " staat nu op " + minutes + " minuten.", NamedTextColor.GREEN));
+            openMenu(admin);
+        });
+    }
+
     // ------------------------------------------------------------------ tab completion
 
     /** Typing /lowkey (and pressing space / tab) suggests every possibility. */
@@ -811,6 +1018,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         List<String> options = new ArrayList<>();
         if (args.length == 1) {
+            options.add("menu");
             options.add("grace");
             options.add("team");
             options.add("nether");
