@@ -3,8 +3,31 @@
 crew:
   - R3ktify
 
-# true  = bij een dood word je spectator op de plek waar je stierf (hardcore-stijl)
-# false = alleen het bericht, de titel en het bloed, zodat je kunt testen zonder eliminatie
+# Spelers die nog kunnen joinen als de server gesloten is met /lowkey server close
+# (bijvoorbeeld om te bouwen). Hoofdletters maken niet uit.
+closed-access:
+  - R3ktify
+
+# Lobby: een aparte, lege wereld met twee draaiende wereldbollen. Instellen doe je met
+# /lowkey lobby ... of via het Lobby-menu in /lowkey. Hier stel je alleen de vorm bij.
+lobby:
+  # naam van de aparte lobby-wereld (wordt automatisch aangemaakt)
+  world: lowkey_lobby
+  # straal van de wereldbollen in blokken
+  globe-radius: 4
+  # hoe snel ze draaien, in graden per stap
+  rotation-speed-degrees: 4
+  # hoe vaak ze een stapje draaien, in ticks (20 ticks = 1 seconde). Lager = vloeiender maar zwaarder.
+  rotation-interval-ticks: 2
+
+# Grace tijd per speler, in minuten speeltijd (telt alleen terwijl je online bent).
+# Begint bij de eerste keer dat iemand joint. In die tijd respawn je gewoon normaal.
+# 0 = geen grace tijd.
+grace-minutes: 60
+
+# true  = na de grace tijd: geen respawn-scherm, je gaat direct naar spectator op de plek waar je stierf
+#         (je loot valt op de grond)
+# false = testmodus: je krijgt het bericht, de titel en het bloed, maar blijft gewoon leven
 eliminate-on-death: true
 
 # Tekst achter de naam in het rode bericht
