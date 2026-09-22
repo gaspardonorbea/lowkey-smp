@@ -21,24 +21,33 @@ import org.bukkit.Color;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.Difficulty;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
+import org.bukkit.WorldCreator;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.BlockDisplay;
+import org.bukkit.entity.Display;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.ExperienceOrb;
+import org.bukkit.entity.Interaction;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
+import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.generator.ChunkGenerator;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
@@ -47,6 +56,7 @@ import org.bukkit.potion.PotionEffect;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
+import org.bukkit.util.Vector;
 
 import java.io.File;
 import java.io.IOException;
@@ -60,6 +70,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 
 /**
@@ -149,9 +160,65 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private NamespacedKey graceKey;
     private NamespacedKey sideKey;
+    private NamespacedKey eliminatedKey;
+    private NamespacedKey globeTypeKey;
     private long graceMillis;
     private boolean eliminateOnDeath;
     private String eliminatedSuffix;
+
+    // ------------------------------------------------------------------ lobby (globes + teleports)
+
+    /** locations saved for the lobby: where you land, the two globe centres, and the two destinations */
+    private Location lobbySpawn;
+    private Location gameSpawn;
+    private Location loserSpawn;
+    private Location mainGlobeCenter;
+    private Location loserGlobeCenter;
+
+    private final List<BlockDisplay> mainGlobeBlocks = new ArrayList<>();
+    private final List<Vector> mainGlobeOffsets = new ArrayList<>();
+    private final List<BlockDisplay> loserGlobeBlocks = new ArrayList<>();
+    private final List<Vector> loserGlobeOffsets = new ArrayList<>();
+    private double globeAngle;
+    private org.bukkit.scheduler.BukkitTask globeSpinTask;
+
+    /** an empty world, generates nothing at all: used for the lobby */
+    private static final class VoidGenerator extends ChunkGenerator {
+        @Override
+        public boolean shouldGenerateNoise() {
+            return false;
+        }
+
+        @Override
+        public boolean shouldGenerateSurface() {
+            return false;
+        }
+
+        @Override
+        public boolean shouldGenerateBedrock() {
+            return false;
+        }
+
+        @Override
+        public boolean shouldGenerateCaves() {
+            return false;
+        }
+
+        @Override
+        public boolean shouldGenerateDecorations() {
+            return false;
+        }
+
+        @Override
+        public boolean shouldGenerateMobs() {
+            return false;
+        }
+
+        @Override
+        public boolean shouldGenerateStructures() {
+            return false;
+        }
+    }
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -160,24 +227,38 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveDefaultConfig();
         loadSettings();
         stateFile = new File(getDataFolder(), "state.yml");
+        loadLobbyWorldIfExists(); // must happen before locations are resolved below
         YamlConfiguration state = YamlConfiguration.loadConfiguration(stateFile);
         netherOpen = state.getBoolean("nether-open", false);
         serverClosed = state.getBoolean("server-closed", false);
+        lobbySpawn = loadLocationFrom(state, "lobby-spawn");
+        gameSpawn = loadLocationFrom(state, "game-spawn");
+        loserSpawn = loadLocationFrom(state, "loser-spawn");
+        mainGlobeCenter = loadLocationFrom(state, "main-globe");
+        loserGlobeCenter = loadLocationFrom(state, "loser-globe");
         graceKey = new NamespacedKey(this, "grace_left");
         sideKey = new NamespacedKey(this, "side");
+        eliminatedKey = new NamespacedKey(this, "eliminated");
+        globeTypeKey = new NamespacedKey(this, "globe_type");
 
         cleanupTeams();
         getServer().getPluginManager().registerEvents(this, this);
+        rebuildGlobeTracking();
 
         for (Player player : getServer().getOnlinePlayers()) {
             startTracking(player, false);
         }
         getServer().getScheduler().runTaskTimer(this, this::tickGrace, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::updateTablist, 20L, 100L);
+        int spinInterval = Math.max(1, getConfig().getInt("lobby.rotation-interval-ticks", 2));
+        globeSpinTask = getServer().getScheduler().runTaskTimer(this, this::tickGlobes, 40L, spinInterval);
     }
 
     @Override
     public void onDisable() {
+        if (globeSpinTask != null) {
+            globeSpinTask.cancel();
+        }
         for (Player player : getServer().getOnlinePlayers()) {
             persist(player);
         }
@@ -540,6 +621,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         event.setReviveHealth(20.0);
 
         if (eliminateOnDeath && world != null) {
+            setEliminated(player, true);
             if (!event.getKeepInventory()) {
                 for (ItemStack drop : event.getDrops()) {
                     if (drop != null && !drop.getType().isAir()) {
@@ -575,6 +657,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 player.teleport(safe);
                 player.setGameMode(GameMode.SPECTATOR);
+                // 10 seconds to take it in, then off to the lobby (if one is set up)
+                getServer().getScheduler().runTaskLater(this, () -> {
+                    if (player.isOnline() && lobbySpawn != null) {
+                        player.teleport(lobbySpawn);
+                    }
+                }, 200L);
             }
 
             player.showTitle(Title.title(
@@ -582,6 +670,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     Component.empty(),
                     Title.Times.times(Duration.ofMillis(150), Duration.ofMillis(3000), Duration.ofMillis(1000))));
         });
+    }
+
+    private boolean isEliminated(Player player) {
+        Boolean value = player.getPersistentDataContainer().get(eliminatedKey, PersistentDataType.BOOLEAN);
+        return value != null && value;
+    }
+
+    private void setEliminated(Player player, boolean value) {
+        player.getPersistentDataContainer().set(eliminatedKey, PersistentDataType.BOOLEAN, value);
     }
 
     private void bloodBurst(Location location) {
@@ -648,6 +745,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         YamlConfiguration state = new YamlConfiguration();
         state.set("nether-open", netherOpen);
         state.set("server-closed", serverClosed);
+        saveLocationTo(state, "lobby-spawn", lobbySpawn);
+        saveLocationTo(state, "game-spawn", gameSpawn);
+        saveLocationTo(state, "loser-spawn", loserSpawn);
+        saveLocationTo(state, "main-globe", mainGlobeCenter);
+        saveLocationTo(state, "loser-globe", loserGlobeCenter);
         try {
             getDataFolder().mkdirs();
             state.save(stateFile);
@@ -708,6 +810,332 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    // ------------------------------------------------------------------ lobby world + globes
+
+    private void saveLocationTo(YamlConfiguration cfg, String path, Location loc) {
+        if (loc == null || loc.getWorld() == null) {
+            cfg.set(path, null);
+            return;
+        }
+        cfg.set(path + ".world", loc.getWorld().getName());
+        cfg.set(path + ".x", loc.getX());
+        cfg.set(path + ".y", loc.getY());
+        cfg.set(path + ".z", loc.getZ());
+        cfg.set(path + ".yaw", (double) loc.getYaw());
+        cfg.set(path + ".pitch", (double) loc.getPitch());
+    }
+
+    private Location loadLocationFrom(YamlConfiguration cfg, String path) {
+        if (!cfg.isConfigurationSection(path)) {
+            return null;
+        }
+        String worldName = cfg.getString(path + ".world");
+        World world = worldName == null ? null : getServer().getWorld(worldName);
+        if (world == null) {
+            return null; // world not loaded (yet) - caller just treats it as "not set"
+        }
+        return new Location(world, cfg.getDouble(path + ".x"), cfg.getDouble(path + ".y"), cfg.getDouble(path + ".z"),
+                (float) cfg.getDouble(path + ".yaw"), (float) cfg.getDouble(path + ".pitch"));
+    }
+
+    /** Loads the lobby world back in on startup, but only if it was ever created (its folder exists). */
+    private void loadLobbyWorldIfExists() {
+        String name = getConfig().getString("lobby.world", "lowkey_lobby");
+        if (getServer().getWorld(name) != null) {
+            return;
+        }
+        File dir = new File(getServer().getWorldContainer(), name);
+        if (dir.isDirectory()) {
+            new WorldCreator(name).generator(new VoidGenerator()).environment(World.Environment.NORMAL).createWorld();
+        }
+    }
+
+    /** Creates the (empty, void) lobby world the first time, or just returns it if it already exists. */
+    private World ensureLobbyWorld() {
+        String name = getConfig().getString("lobby.world", "lowkey_lobby");
+        World world = getServer().getWorld(name);
+        if (world != null) {
+            return world;
+        }
+        world = new WorldCreator(name).generator(new VoidGenerator()).environment(World.Environment.NORMAL).createWorld();
+        if (world == null) {
+            return null;
+        }
+        world.setDifficulty(Difficulty.PEACEFUL);
+        world.setSpawnFlags(false, false);
+        // a simple round platform to stand on; build the rest yourself around it
+        int r = 12;
+        for (int x = -r; x <= r; x++) {
+            for (int z = -r; z <= r; z++) {
+                if (x * x + z * z <= r * r) {
+                    world.getBlockAt(x, 63, z).setType(Material.SMOOTH_QUARTZ);
+                }
+            }
+        }
+        world.setSpawnLocation(0, 64, 0);
+        return world;
+    }
+
+    private void loadOrCreateLobbyWorld(Player admin) {
+        World world = ensureLobbyWorld();
+        if (world == null) {
+            admin.sendMessage(Component.text("Aanmaken van de lobby-wereld is mislukt.", NamedTextColor.RED));
+        } else {
+            admin.teleport(world.getSpawnLocation());
+            admin.sendMessage(Component.text("Je staat nu in de lobby-wereld.", NamedTextColor.GREEN));
+        }
+        openLobbyMenu(admin);
+    }
+
+    private void lobbySetSpawn(Player admin) {
+        lobbySpawn = admin.getLocation().clone();
+        saveState();
+        admin.sendMessage(Component.text("Lobby-spawn ingesteld.", NamedTextColor.GREEN));
+        openLobbyMenu(admin);
+    }
+
+    private void lobbySetGameSpawn(Player admin) {
+        gameSpawn = admin.getLocation().clone();
+        saveState();
+        admin.sendMessage(Component.text("Spel-spawn ingesteld (dit is waar de blauwe wereldbol je heen stuurt).",
+                NamedTextColor.GREEN));
+        openLobbyMenu(admin);
+    }
+
+    private void lobbySetLoserSpawn(Player admin) {
+        loserSpawn = admin.getLocation().clone();
+        saveState();
+        admin.sendMessage(Component.text(
+                "Verliezerseiland-spawn ingesteld (dit is waar de grijze wereldbol je heen stuurt).", NamedTextColor.GREEN));
+        openLobbyMenu(admin);
+    }
+
+    private void lobbySetGlobe(Player admin, boolean gray) {
+        Location center = admin.getLocation().clone();
+        spawnGlobe(center, gray);
+        if (gray) {
+            loserGlobeCenter = center;
+        } else {
+            mainGlobeCenter = center;
+        }
+        saveState();
+        admin.sendMessage(Component.text((gray ? "Grijze" : "Blauwe") + " wereldbol geplaatst.", NamedTextColor.GREEN));
+        openLobbyMenu(admin);
+    }
+
+    /** Every voxel on the surface shell of a sphere with this radius, as offsets from the centre. */
+    private List<Vector> sphereShellOffsets(int radius) {
+        List<Vector> offsets = new ArrayList<>();
+        for (int x = -radius; x <= radius; x++) {
+            for (int y = -radius; y <= radius; y++) {
+                for (int z = -radius; z <= radius; z++) {
+                    double d = Math.sqrt(x * x + y * y + z * z);
+                    if (d <= radius + 0.3 && d >= radius - 1.2) {
+                        offsets.add(new Vector(x, y, z));
+                    }
+                }
+            }
+        }
+        return offsets;
+    }
+
+    /** Crude "earth" pattern: blue ocean, green/lime land, white-ish ice near the poles. Fully my own design. */
+    private BlockData pickGlobeBlock(Vector offset, int radius, boolean gray) {
+        double nx = offset.getX() / radius;
+        double ny = offset.getY() / radius;
+        double nz = offset.getZ() / radius;
+        if (gray) {
+            boolean light = Math.sin(nx * 3.1 + ny * 1.7) * Math.cos(nz * 2.3 + nx * 0.9) > 0.2;
+            return (light ? Material.LIGHT_GRAY_CONCRETE : Material.GRAY_CONCRETE).createBlockData();
+        }
+        if (Math.abs(ny) > 0.85) {
+            return Material.WHITE_CONCRETE.createBlockData();
+        }
+        double landMask = Math.sin(nx * 3.1 + ny * 1.7) * Math.cos(nz * 2.3 + nx * 0.9) + Math.sin(ny * 4.0 - nz * 2.1);
+        boolean land = landMask > 0.35;
+        Material mat = land
+                ? (ThreadLocalRandom.current().nextBoolean() ? Material.GREEN_CONCRETE : Material.LIME_CONCRETE)
+                : (ThreadLocalRandom.current().nextBoolean() ? Material.LIGHT_BLUE_CONCRETE : Material.BLUE_CONCRETE);
+        return mat.createBlockData();
+    }
+
+    /** Removes any existing globe of this type, then builds a fresh voxel sphere plus its click target. */
+    private void spawnGlobe(Location center, boolean gray) {
+        World world = center.getWorld();
+        String tag = gray ? "loser" : "main";
+        for (Entity entity : new ArrayList<>(world.getEntities())) {
+            if (tag.equals(entity.getPersistentDataContainer().get(globeTypeKey, PersistentDataType.STRING))) {
+                entity.remove();
+            }
+        }
+
+        int radius = Math.max(1, getConfig().getInt("lobby.globe-radius", 4));
+        List<Vector> offsets = sphereShellOffsets(radius);
+        List<BlockDisplay> blocks = new ArrayList<>();
+        for (Vector offset : offsets) {
+            Location loc = center.clone().add(offset);
+            BlockData data = pickGlobeBlock(offset, radius, gray);
+            BlockDisplay display = world.spawn(loc, BlockDisplay.class, d -> {
+                d.setBlock(data);
+                d.setBillboard(Display.Billboard.FIXED);
+                d.setPersistent(true);
+                d.getPersistentDataContainer().set(globeTypeKey, PersistentDataType.STRING, tag);
+            });
+            blocks.add(display);
+        }
+        float size = radius * 2f + 1f;
+        Interaction interaction = world.spawn(center, Interaction.class, i -> {
+            i.setInteractionWidth(size);
+            i.setInteractionHeight(size);
+            i.setPersistent(true);
+            i.getPersistentDataContainer().set(globeTypeKey, PersistentDataType.STRING, tag);
+        });
+
+        if (gray) {
+            loserGlobeBlocks.clear();
+            loserGlobeBlocks.addAll(blocks);
+            loserGlobeOffsets.clear();
+            loserGlobeOffsets.addAll(offsets);
+        } else {
+            mainGlobeBlocks.clear();
+            mainGlobeBlocks.addAll(blocks);
+            mainGlobeOffsets.clear();
+            mainGlobeOffsets.addAll(offsets);
+        }
+    }
+
+    /** After a restart the entities themselves still exist in the world; find them again by their tag. */
+    private void rebuildGlobeTracking() {
+        mainGlobeBlocks.clear();
+        mainGlobeOffsets.clear();
+        loserGlobeBlocks.clear();
+        loserGlobeOffsets.clear();
+        if (mainGlobeCenter != null) {
+            collectGlobe(mainGlobeCenter, false);
+        }
+        if (loserGlobeCenter != null) {
+            collectGlobe(loserGlobeCenter, true);
+        }
+    }
+
+    private void collectGlobe(Location center, boolean gray) {
+        World world = center.getWorld();
+        if (world == null) {
+            return;
+        }
+        String tag = gray ? "loser" : "main";
+        for (Entity entity : world.getEntities()) {
+            if (!(entity instanceof BlockDisplay)) {
+                continue;
+            }
+            if (!tag.equals(entity.getPersistentDataContainer().get(globeTypeKey, PersistentDataType.STRING))) {
+                continue;
+            }
+            Vector offset = entity.getLocation().toVector().subtract(center.toVector());
+            if (gray) {
+                loserGlobeBlocks.add((BlockDisplay) entity);
+                loserGlobeOffsets.add(offset);
+            } else {
+                mainGlobeBlocks.add((BlockDisplay) entity);
+                mainGlobeOffsets.add(offset);
+            }
+        }
+    }
+
+    /** Spins both globes a little further, by moving every voxel along a circle around the centre. */
+    private void tickGlobes() {
+        double speed = getConfig().getDouble("lobby.rotation-speed-degrees", 4.0);
+        globeAngle = (globeAngle + speed) % 360.0;
+        rotateGlobe(mainGlobeCenter, mainGlobeBlocks, mainGlobeOffsets);
+        rotateGlobe(loserGlobeCenter, loserGlobeBlocks, loserGlobeOffsets);
+    }
+
+    private void rotateGlobe(Location center, List<BlockDisplay> blocks, List<Vector> offsets) {
+        if (center == null || blocks.isEmpty()) {
+            return;
+        }
+        double rad = Math.toRadians(globeAngle);
+        double cos = Math.cos(rad);
+        double sin = Math.sin(rad);
+        for (int i = 0; i < blocks.size(); i++) {
+            BlockDisplay display = blocks.get(i);
+            if (!display.isValid()) {
+                continue;
+            }
+            Vector offset = offsets.get(i);
+            double x = offset.getX() * cos - offset.getZ() * sin;
+            double z = offset.getX() * sin + offset.getZ() * cos;
+            display.teleport(center.clone().add(x, offset.getY(), z));
+        }
+    }
+
+    /** Right-click on a globe: the blue one sends you to the game, the grey one to the loser island. */
+    @EventHandler
+    public void onGlobeClick(PlayerInteractEntityEvent event) {
+        if (event.getHand() != EquipmentSlot.HAND || !(event.getRightClicked() instanceof Interaction)) {
+            return;
+        }
+        String type = event.getRightClicked().getPersistentDataContainer().get(globeTypeKey, PersistentDataType.STRING);
+        if (type == null) {
+            return;
+        }
+        event.setCancelled(true);
+        Player player = event.getPlayer();
+
+        if (type.equals("main")) {
+            if (gameSpawn == null) {
+                if (player.hasPermission("lowkey.admin")) {
+                    player.sendMessage(Component.text(
+                            "Er is nog geen spel-spawn ingesteld (/lowkey lobby setgamespawn).", NamedTextColor.RED));
+                }
+                return;
+            }
+            player.teleport(gameSpawn);
+        } else if (type.equals("loser")) {
+            if (!isEliminated(player)) {
+                player.sendMessage(Component.text("Je bent nog niet dood!", NamedTextColor.RED));
+                player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 1.0f);
+                return;
+            }
+            if (loserSpawn == null) {
+                if (player.hasPermission("lowkey.admin")) {
+                    player.sendMessage(Component.text(
+                            "Er is nog geen verliezerseiland-spawn ingesteld (/lowkey lobby setloserspawn).",
+                            NamedTextColor.RED));
+                }
+                return;
+            }
+            player.teleport(loserSpawn);
+        }
+    }
+
+    /** Submenu for the lobby, opened from the main menu's "Lobby..." button. */
+    private void openLobbyMenu(Player admin) {
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(Component.text("Lobby-wereld"), "Maakt de lobby-wereld aan (indien nodig) en tp't je erheen.",
+                150, () -> loadOrCreateLobbyWorld(admin)));
+        buttons.add(button(Component.text("Hier: lobby spawn"), "Zet de lobby-spawn op je huidige plek.", 150,
+                () -> lobbySetSpawn(admin)));
+        buttons.add(button(Component.text("Hier: hoofd-wereldbol"), "Plaatst de blauwe wereldbol op je plek.", 150,
+                () -> lobbySetGlobe(admin, false)));
+        buttons.add(button(Component.text("Hier: spel-spawn"), "Waar de blauwe wereldbol je naartoe stuurt.", 150,
+                () -> lobbySetGameSpawn(admin)));
+        buttons.add(button(Component.text("Hier: verliezer-wereldbol"), "Plaatst de grijze wereldbol op je plek.", 150,
+                () -> lobbySetGlobe(admin, true)));
+        buttons.add(button(Component.text("Hier: verliezerseiland-spawn"), "Waar de grijze wereldbol je naartoe stuurt.",
+                150, () -> lobbySetLoserSpawn(admin)));
+
+        ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("Lobby instellen"))
+                        .body(List.of(DialogBody.plainMessage(
+                                Component.text("Sta op de gewenste plek en kies een knop.", NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.multiAction(buttons, back, 2)));
+        admin.showDialog(dialog);
+    }
+
     // ------------------------------------------------------------------ admin command
 
     /**
@@ -716,6 +1144,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey team <speler> <noord|zuid|geen> : zet de speler in Noord, Zuid of geen team
      * /lowkey nether <open|close> : opent of sluit de Nether (bij openen: titel + bericht voor iedereen)
      * /lowkey server <open|close> : sluit de server voor iedereen behalve 'closed-access' (geen bans), of maakt hem weer open
+ * /lowkey lobby <world|setspawn|setmainglobe|setgamespawn|setloserglobe|setloserspawn> : lobby-wereld en wereldbollen instellen
      */
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -765,6 +1194,40 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     target.getName() + " zit nu in team " + side.id + ".", NamedTextColor.GREEN));
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("lobby")) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage(Component.text(
+                        "Dit commando werkt alleen als speler (je moet ergens staan).", NamedTextColor.RED));
+                return true;
+            }
+            Player lobbyPlayer = (Player) sender;
+            String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+            switch (action) {
+                case "world":
+                    loadOrCreateLobbyWorld(lobbyPlayer);
+                    return true;
+                case "setspawn":
+                    lobbySetSpawn(lobbyPlayer);
+                    return true;
+                case "setmainglobe":
+                    lobbySetGlobe(lobbyPlayer, false);
+                    return true;
+                case "setgamespawn":
+                    lobbySetGameSpawn(lobbyPlayer);
+                    return true;
+                case "setloserglobe":
+                    lobbySetGlobe(lobbyPlayer, true);
+                    return true;
+                case "setloserspawn":
+                    lobbySetLoserSpawn(lobbyPlayer);
+                    return true;
+                default:
+                    sender.sendMessage(Component.text(
+                            "Gebruik: /lowkey lobby <world|setspawn|setmainglobe|setgamespawn|setloserglobe|setloserspawn>",
+                            NamedTextColor.GRAY));
+                    return true;
+            }
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("server")) {
             if (args.length == 2 && args[1].equalsIgnoreCase("close")) {
                 if (sender instanceof Player) {
@@ -809,7 +1272,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -909,6 +1372,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 () -> pickPlayer(admin, "Team instellen", target -> pickTeam(admin, target))));
         buttons.add(button(Component.text("Grace instellen..."), "Zet de grace tijd van een speler.", 150,
                 () -> pickPlayer(admin, "Grace instellen", target -> pickGrace(admin, target))));
+        buttons.add(button(Component.text("Lobby..."), "Lobby-wereld en wereldbollen instellen.", 150,
+                () -> openLobbyMenu(admin)));
 
         ActionButton close = ActionButton.create(Component.text("Sluiten"), Component.text("Sluit dit menu."), 150, null);
 
@@ -1023,6 +1488,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("team");
             options.add("nether");
             options.add("server");
+            options.add("lobby");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
             if (sub.equals("grace") || sub.equals("team")) {
@@ -1032,6 +1498,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             } else if (sub.equals("nether") || sub.equals("server")) {
                 options.add("open");
                 options.add("close");
+            } else if (sub.equals("lobby")) {
+                options.add("world");
+                options.add("setspawn");
+                options.add("setmainglobe");
+                options.add("setgamespawn");
+                options.add("setloserglobe");
+                options.add("setloserspawn");
             }
         } else if (args.length == 3) {
             String sub = args[0].toLowerCase(Locale.ROOT);
