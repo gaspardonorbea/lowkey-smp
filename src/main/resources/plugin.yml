@@ -1,5 +1,5 @@
 name: LowkeyCore
-version: 0.7.0
+version: 0.10.0
 main: nl.lowkey.core.LowkeyCore
 api-version: '26.1'
 description: LowkeySMP chat tags, join/leave messages, grace period and elimination effects
@@ -7,7 +7,7 @@ authors: [LowkeySMP]
 commands:
   lowkey:
     description: LowkeySMP admin commando
-    usage: /lowkey grace <speler> <minuten> | /lowkey team <speler> <noord|zuid|geen> | /lowkey nether <open|close> | /lowkey server <open|close> | /lowkey lobby <...>
+    usage: /lowkey grace <speler> <minuten> | /lowkey team <speler> <noord|zuid|geen> | /lowkey nether <open|close> | /lowkey server <open|close> | /lowkey lobby <...> | /lowkey lowkeyblock [aantal] | /lowkey border <open|close>
 permissions:
   lowkey.admin:
     description: Toegang tot /lowkey
