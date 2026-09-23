@@ -70,7 +70,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 
 /**
@@ -95,6 +94,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private static final String GRACE_ICON = "\uE005";
     private static final String NOORD_ICON = "\uE006";
     private static final String ZUID_ICON = "\uE007";
+    private static final String LOSER_ICON = "\uE008";
+    /** dark brown/grey, used for the name and badge once someone is permanently eliminated */
+    private static final TextColor LOSER_COLOR = TextColor.color(0x8C7A66);
 
     /** -1 px space: pieces of a wide picture are joined with this so there is no seam */
     private static final String SPACER = "\uE010";
@@ -152,6 +154,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private volatile boolean serverClosed;
     private volatile Set<String> closedAccess = Set.of();
 
+    /**
+     * true once the borders between Noord and Zuid are dropped: from then on chat is global again.
+     * Until then, Noord and Zuid only see their own team's chat (the lobby is always global). Saved in state.yml.
+     */
+    private boolean bordersDropped;
+
     /** is the Nether open? saved in state.yml so it survives restarts */
     private boolean netherOpen;
     private File stateFile;
@@ -162,6 +170,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private NamespacedKey sideKey;
     private NamespacedKey eliminatedKey;
     private NamespacedKey globeTypeKey;
+    private NamespacedKey lastGameLocKey;
     private long graceMillis;
     private boolean eliminateOnDeath;
     private String eliminatedSuffix;
@@ -231,6 +240,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         YamlConfiguration state = YamlConfiguration.loadConfiguration(stateFile);
         netherOpen = state.getBoolean("nether-open", false);
         serverClosed = state.getBoolean("server-closed", false);
+        bordersDropped = state.getBoolean("borders-dropped", false);
         lobbySpawn = loadLocationFrom(state, "lobby-spawn");
         gameSpawn = loadLocationFrom(state, "game-spawn");
         loserSpawn = loadLocationFrom(state, "loser-spawn");
@@ -240,6 +250,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         sideKey = new NamespacedKey(this, "side");
         eliminatedKey = new NamespacedKey(this, "eliminated");
         globeTypeKey = new NamespacedKey(this, "globe_type");
+        lastGameLocKey = new NamespacedKey(this, "last_game_loc");
 
         cleanupTeams();
         getServer().getPluginManager().registerEvents(this, this);
@@ -415,9 +426,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ nametag + tab list entry
 
-    /** Scoreboard team name: "lk" + side digit + player name. The tab list sorts on this name. */
-    private static String teamNameFor(Player player, Side side) {
-        String name = "lk" + side.sortKey + player.getName().toLowerCase(Locale.ROOT);
+    /** Scoreboard team name: "lk" + sort digit + player name. The tab list sorts on this name. */
+    private static String teamNameFor(Player player, char sortKey) {
+        String name = "lk" + sortKey + player.getName().toLowerCase(Locale.ROOT);
         return name.length() > 16 ? name.substring(0, 16) : name;
     }
 
@@ -430,6 +441,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void refreshTags(Player player) {
         UUID id = player.getUniqueId();
         Side side = getSide(player);
+        boolean eliminated = isEliminated(player);
 
         sideCache.put(id, side);
 
@@ -437,10 +449,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (isCrew(player)) {
             parts.add(CREW_ICON);
         }
-        if (graceRemaining(player) > 0L) {
+        if (!eliminated && graceRemaining(player) > 0L) {
             parts.add(GRACE_ICON);
         }
-        if (side.icon != null) {
+        if (eliminated) {
+            parts.add(LOSER_ICON); // once eliminated, this replaces the Noord/Zuid icon
+        } else if (side.icon != null) {
             parts.add(side.icon);
         }
         // small gap between the icons, a normal space between the last icon and the name
@@ -451,9 +465,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         Component icons = prefix.build();
 
+        // eliminated players sort to the bottom of the tab list, below Noord, Zuid and the unassigned
+        char sortKey = eliminated ? '9' : side.sortKey;
+
         // one small scoreboard team per player: gives the nametag prefix and the tab list order
         Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
-        String wanted = teamNameFor(player, side);
+        String wanted = teamNameFor(player, sortKey);
         String old = teamNames.get(id);
         if (old != null && !old.equals(wanted)) {
             Team oldTeam = board.getTeam(old);
@@ -464,7 +481,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Team team = board.getTeam(wanted);
         if (team != null && !team.hasEntry(player.getName()) && !team.getEntries().isEmpty()) {
             // two long names that start the same: fall back to a name based on the UUID
-            wanted = "lk" + side.sortKey + id.toString().substring(0, 8);
+            wanted = "lk" + sortKey + id.toString().substring(0, 8);
             team = board.getTeam(wanted);
         }
         if (team == null) {
@@ -474,8 +491,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         team.addEntry(player.getName());
         teamNames.put(id, wanted);
 
-        // tab list entry: icons + name in the colour of the team
-        TextColor nameColor = side == Side.NONE ? NamedTextColor.WHITE : TextColor.color(side.rgb);
+        // tab list entry: icons + name in the colour of the badge (loser badge wins over team colour)
+        TextColor nameColor = eliminated ? LOSER_COLOR : (side == Side.NONE ? NamedTextColor.WHITE : TextColor.color(side.rgb));
         player.playerListName(Component.text()
                 .append(icons)
                 .append(Component.text(player.getName(), nameColor))
@@ -544,6 +561,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build());
         startTracking(player, true);
         getServer().getScheduler().runTask(this, this::updateTablist);
+
+        // every join goes straight to the lobby; wherever they were is remembered for the globe to send them back to
+        if (lobbySpawn != null) {
+            captureLastGameLocation(player);
+            getServer().getScheduler().runTask(this, () -> {
+                if (player.isOnline()) {
+                    player.teleport(lobbySpawn);
+                }
+            });
+        }
     }
 
     @EventHandler
@@ -568,19 +595,39 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onChat(AsyncChatEvent event) {
-        final boolean isCrew = isCrew(event.getPlayer());
-        final Side side = sideCache.getOrDefault(event.getPlayer().getUniqueId(), Side.NONE);
+        final Player sender = event.getPlayer();
+        final Side side = sideCache.getOrDefault(sender.getUniqueId(), Side.NONE);
+        final boolean eliminated = isEliminated(sender);
+        // chat only ever shows the Noord/Zuid badge or, once eliminated, the loser-island badge -
+        // never crew or grace here, those stay in the nametag/tablist only
+        final String statusIcon = eliminated ? LOSER_ICON : side.icon;
+        final TextColor nameColor = eliminated ? LOSER_COLOR : (side == Side.NONE ? null : TextColor.color(side.rgb));
         event.renderer(ChatRenderer.viewerUnaware((source, sourceDisplayName, message) -> {
             Component line = Component.empty();
-            if (isCrew) {
-                line = line.append(glyph(CREW_ICON)).append(Component.space());
+            if (statusIcon != null) {
+                line = line.append(glyph(statusIcon)).append(Component.space());
             }
-            // Noord = red name, Zuid = blue name
-            Component name = side == Side.NONE ? sourceDisplayName : sourceDisplayName.color(TextColor.color(side.rgb));
+            Component name = nameColor == null ? sourceDisplayName : sourceDisplayName.color(nameColor);
             return line.append(name)
                     .append(Component.text(": ", NamedTextColor.GRAY))
                     .append(message);
         }));
+
+        // Noord/Zuid chat is separate until the borders drop; the lobby always has normal, global chat
+        boolean global = bordersDropped || side == Side.NONE || isInLobbyWorld(sender);
+        if (!global) {
+            event.viewers().removeIf(viewer -> {
+                if (!(viewer instanceof Player) || viewer.equals(sender)) {
+                    return false;
+                }
+                Player viewerPlayer = (Player) viewer;
+                if (viewerPlayer.hasPermission("lowkey.admin")) {
+                    return false; // staff always sees both team chats
+                }
+                Side viewerSide = sideCache.getOrDefault(viewerPlayer.getUniqueId(), Side.NONE);
+                return viewerSide != side;
+            });
+        }
     }
 
     // ------------------------------------------------------------------ death
@@ -622,6 +669,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         if (eliminateOnDeath && world != null) {
             setEliminated(player, true);
+            refreshTags(player); // nametag/tablist show the loser badge immediately
             if (!event.getKeepInventory()) {
                 for (ItemStack drop : event.getDrops()) {
                     if (drop != null && !drop.getType().isAir()) {
@@ -657,12 +705,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 player.teleport(safe);
                 player.setGameMode(GameMode.SPECTATOR);
-                // 10 seconds to take it in, then off to the lobby (if one is set up)
+                // 3 minutes to take it in, then off to the lobby (if one is set up)
                 getServer().getScheduler().runTaskLater(this, () -> {
                     if (player.isOnline() && lobbySpawn != null) {
+                        captureLastGameLocation(player);
                         player.teleport(lobbySpawn);
                     }
-                }, 200L);
+                }, 3600L);
             }
 
             player.showTitle(Title.title(
@@ -679,6 +728,41 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private void setEliminated(Player player, boolean value) {
         player.getPersistentDataContainer().set(eliminatedKey, PersistentDataType.BOOLEAN, value);
+    }
+
+    /** True while the player is standing in the lobby world (compares by world name, not object identity). */
+    private boolean isInLobbyWorld(Player player) {
+        String lobbyWorldName = getConfig().getString("lobby.world", "lowkey_lobby");
+        return player.getWorld().getName().equals(lobbyWorldName);
+    }
+
+    /** Remembers where the player was, so the main globe can send them back there later instead of a fixed spot. */
+    private void captureLastGameLocation(Player player) {
+        if (isInLobbyWorld(player)) {
+            return; // already in the lobby: don't overwrite a real position with lobby coordinates
+        }
+        Location loc = player.getLocation();
+        String value = loc.getWorld().getName() + "," + loc.getX() + "," + loc.getY() + "," + loc.getZ()
+                + "," + loc.getYaw() + "," + loc.getPitch();
+        player.getPersistentDataContainer().set(lastGameLocKey, PersistentDataType.STRING, value);
+    }
+
+    private Location getLastGameLocation(Player player) {
+        String value = player.getPersistentDataContainer().get(lastGameLocKey, PersistentDataType.STRING);
+        if (value == null) {
+            return null;
+        }
+        String[] parts = value.split(",");
+        World world = getServer().getWorld(parts[0]);
+        if (world == null || parts.length != 6) {
+            return null;
+        }
+        try {
+            return new Location(world, Double.parseDouble(parts[1]), Double.parseDouble(parts[2]),
+                    Double.parseDouble(parts[3]), Float.parseFloat(parts[4]), Float.parseFloat(parts[5]));
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private void bloodBurst(Location location) {
@@ -745,6 +829,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         YamlConfiguration state = new YamlConfiguration();
         state.set("nether-open", netherOpen);
         state.set("server-closed", serverClosed);
+        state.set("borders-dropped", bordersDropped);
         saveLocationTo(state, "lobby-spawn", lobbySpawn);
         saveLocationTo(state, "game-spawn", gameSpawn);
         saveLocationTo(state, "loser-spawn", loserSpawn);
@@ -781,6 +866,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 player.showTitle(title);
                 player.playSound(player.getLocation(), Sound.BLOCK_END_PORTAL_SPAWN, 0.6f, 1.0f);
             }
+        }
+    }
+
+    /** Drops (or restores) the borders between Noord and Zuid chat. Does not touch the world border itself. */
+    private void setBordersDropped(boolean dropped) {
+        bordersDropped = dropped;
+        saveState();
+        Component message = dropped
+                ? Component.text("De grenzen zijn open! Noord en Zuid kunnen nu bij elkaar in de chat.", NamedTextColor.GREEN)
+                : Component.text("De grenzen zijn weer dicht: Noord en Zuid zien alleen hun eigen chat.", NamedTextColor.RED);
+        for (Player player : getServer().getOnlinePlayers()) {
+            player.sendMessage(message);
         }
     }
 
@@ -923,14 +1020,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         openLobbyMenu(admin);
     }
 
-    /** Every voxel on the surface shell of a sphere with this radius, as offsets from the centre. */
+    /**
+     * A proper 1-voxel-thick shell: every voxel that is inside a solid sphere of this radius but has
+     * at least one of its 6 neighbours outside it. This gives an even, gap-free surface, unlike a
+     * "distance band" test which tends to leave lumps and holes.
+     */
     private List<Vector> sphereShellOffsets(int radius) {
         List<Vector> offsets = new ArrayList<>();
         for (int x = -radius; x <= radius; x++) {
             for (int y = -radius; y <= radius; y++) {
                 for (int z = -radius; z <= radius; z++) {
-                    double d = Math.sqrt(x * x + y * y + z * z);
-                    if (d <= radius + 0.3 && d >= radius - 1.2) {
+                    if (!insideSphere(x, y, z, radius)) {
+                        continue;
+                    }
+                    boolean surrounded = insideSphere(x + 1, y, z, radius) && insideSphere(x - 1, y, z, radius)
+                            && insideSphere(x, y + 1, z, radius) && insideSphere(x, y - 1, z, radius)
+                            && insideSphere(x, y, z + 1, radius) && insideSphere(x, y, z - 1, radius);
+                    if (!surrounded) {
                         offsets.add(new Vector(x, y, z));
                     }
                 }
@@ -939,24 +1045,29 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return offsets;
     }
 
-    /** Crude "earth" pattern: blue ocean, green/lime land, white-ish ice near the poles. Fully my own design. */
+    private boolean insideSphere(int x, int y, int z, int radius) {
+        return x * x + y * y + z * z <= radius * radius;
+    }
+
+    /**
+     * Two-tone "earth" pattern using our own reskinned blocks (see the resourcepack): a clean ocean and
+     * land colour, plus ice near the poles. One deterministic mask decides land vs ocean per voxel, so
+     * continents form clean blobs instead of speckled noise.
+     */
     private BlockData pickGlobeBlock(Vector offset, int radius, boolean gray) {
         double nx = offset.getX() / radius;
         double ny = offset.getY() / radius;
         double nz = offset.getZ() / radius;
+
         if (gray) {
-            boolean light = Math.sin(nx * 3.1 + ny * 1.7) * Math.cos(nz * 2.3 + nx * 0.9) > 0.2;
-            return (light ? Material.LIGHT_GRAY_CONCRETE : Material.GRAY_CONCRETE).createBlockData();
+            double mask = Math.sin(nx * 3.1 + ny * 1.7) * Math.cos(nz * 2.3 + nx * 0.9) + Math.sin(ny * 4.0 - nz * 2.1);
+            return (mask > 0.35 ? Material.IRON_BLOCK : Material.COAL_BLOCK).createBlockData();
         }
         if (Math.abs(ny) > 0.85) {
-            return Material.WHITE_CONCRETE.createBlockData();
+            return Material.DIAMOND_BLOCK.createBlockData(); // ice caps
         }
         double landMask = Math.sin(nx * 3.1 + ny * 1.7) * Math.cos(nz * 2.3 + nx * 0.9) + Math.sin(ny * 4.0 - nz * 2.1);
-        boolean land = landMask > 0.35;
-        Material mat = land
-                ? (ThreadLocalRandom.current().nextBoolean() ? Material.GREEN_CONCRETE : Material.LIME_CONCRETE)
-                : (ThreadLocalRandom.current().nextBoolean() ? Material.LIGHT_BLUE_CONCRETE : Material.BLUE_CONCRETE);
-        return mat.createBlockData();
+        return (landMask > 0.35 ? Material.EMERALD_BLOCK : Material.LAPIS_BLOCK).createBlockData();
     }
 
     /** Removes any existing globe of this type, then builds a fresh voxel sphere plus its click target. */
@@ -1083,14 +1194,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Player player = event.getPlayer();
 
         if (type.equals("main")) {
-            if (gameSpawn == null) {
+            Location destination = getLastGameLocation(player);
+            if (destination == null) {
+                destination = gameSpawn; // never been in the game before: fall back to the spel-spawn
+            }
+            if (destination == null) {
                 if (player.hasPermission("lowkey.admin")) {
                     player.sendMessage(Component.text(
                             "Er is nog geen spel-spawn ingesteld (/lowkey lobby setgamespawn).", NamedTextColor.RED));
                 }
                 return;
             }
-            player.teleport(gameSpawn);
+            player.teleport(destination);
         } else if (type.equals("loser")) {
             if (!isEliminated(player)) {
                 player.sendMessage(Component.text("Je bent nog niet dood!", NamedTextColor.RED));
@@ -1124,6 +1239,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 () -> lobbySetGlobe(admin, true)));
         buttons.add(button(Component.text("Hier: verliezerseiland-spawn"), "Waar de grijze wereldbol je naartoe stuurt.",
                 150, () -> lobbySetLoserSpawn(admin)));
+        buttons.add(button(Component.text("Alle wereldbollen verwijderen", NamedTextColor.RED),
+                "Verwijdert alle wereldbol-entiteiten, overal, ook oude/losse.", 150, () -> confirm(admin,
+                        "Alle wereldbollen verwijderen?",
+                        "Dit verwijdert elke wereldbol (blauw en grijs), overal, ook oude losse exemplaren.",
+                        "Je kunt daarna opnieuw beginnen met plaatsen.",
+                        Component.text("Ja, verwijderen", NamedTextColor.RED),
+                        () -> {
+                            int removed = clearAllGlobes();
+                            admin.sendMessage(Component.text(
+                                    removed + " wereldbol-entiteiten verwijderd.", NamedTextColor.GREEN));
+                            openLobbyMenu(admin);
+                        })));
 
         ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
 
@@ -1136,6 +1263,42 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         admin.showDialog(dialog);
     }
 
+    /**
+     * Removes every globe entity (block displays + interaction) tagged by this plugin, in every loaded
+     * world. Also resets the saved globe locations, so /lowkey lobby setmainglobe / setloserglobe start fresh.
+     * Use this to clean up globes from earlier testing, including ones that got orphaned before this
+     * command existed.
+     */
+    private int clearAllGlobes() {
+        int removed = 0;
+        for (World world : getServer().getWorlds()) {
+            for (Entity entity : new ArrayList<>(world.getEntities())) {
+                if (entity.getPersistentDataContainer().has(globeTypeKey, PersistentDataType.STRING)) {
+                    entity.remove();
+                    removed++;
+                }
+            }
+        }
+        mainGlobeBlocks.clear();
+        mainGlobeOffsets.clear();
+        loserGlobeBlocks.clear();
+        loserGlobeOffsets.clear();
+        mainGlobeCenter = null;
+        loserGlobeCenter = null;
+        saveState();
+        return removed;
+    }
+
+    /** Gives the admin a stack of the reskinned "Lowkey Block" (a Netherite Block with our own texture). */
+    private void giveLowkeyBlock(Player admin, int amount) {
+        ItemStack stack = new ItemStack(Material.NETHERITE_BLOCK, Math.max(1, Math.min(64, amount)));
+        stack.editMeta(meta -> meta.displayName(
+                Component.text("Lowkey Block", NamedTextColor.LIGHT_PURPLE).decoration(TextDecoration.ITALIC, false)));
+        admin.getInventory().addItem(stack);
+        admin.sendMessage(Component.text(
+                "Je hebt " + stack.getAmount() + "x Lowkey Block gekregen.", NamedTextColor.GREEN));
+    }
+
     // ------------------------------------------------------------------ admin command
 
     /**
@@ -1144,7 +1307,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey team <speler> <noord|zuid|geen> : zet de speler in Noord, Zuid of geen team
      * /lowkey nether <open|close> : opent of sluit de Nether (bij openen: titel + bericht voor iedereen)
      * /lowkey server <open|close> : sluit de server voor iedereen behalve 'closed-access' (geen bans), of maakt hem weer open
- * /lowkey lobby <world|setspawn|setmainglobe|setgamespawn|setloserglobe|setloserspawn> : lobby-wereld en wereldbollen instellen
+ * /lowkey lobby <world|setspawn|setmainglobe|setgamespawn|setloserglobe|setloserspawn|clear> : lobby-wereld en wereldbollen instellen
+ * /lowkey lowkeyblock [aantal] : geeft de speler Lowkey Blocks (herskinde Netherite Blocks)
+ * /lowkey border <open|close> : opent of sluit de grenzen tussen Noord- en Zuid-chat (lobby is altijd globaal)
      */
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -1221,12 +1386,34 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 case "setloserspawn":
                     lobbySetLoserSpawn(lobbyPlayer);
                     return true;
+                case "clear":
+                    int removed = clearAllGlobes();
+                    lobbyPlayer.sendMessage(Component.text(
+                            removed + " wereldbol-entiteiten verwijderd.", NamedTextColor.GREEN));
+                    return true;
                 default:
                     sender.sendMessage(Component.text(
                             "Gebruik: /lowkey lobby <world|setspawn|setmainglobe|setgamespawn|setloserglobe|setloserspawn>",
                             NamedTextColor.GRAY));
                     return true;
             }
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("lowkeyblock")) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage(Component.text("Dit commando werkt alleen als speler.", NamedTextColor.RED));
+                return true;
+            }
+            int amount = 1;
+            if (args.length == 2) {
+                try {
+                    amount = Integer.parseInt(args[1]);
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(Component.text("Geef een geldig aantal.", NamedTextColor.RED));
+                    return true;
+                }
+            }
+            giveLowkeyBlock((Player) sender, amount);
+            return true;
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("server")) {
             if (args.length == 2 && args[1].equalsIgnoreCase("close")) {
@@ -1255,6 +1442,24 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     NamedTextColor.GRAY));
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("border")) {
+            if (args.length == 2 && args[1].equalsIgnoreCase("open")) {
+                setBordersDropped(true);
+                sender.sendMessage(Component.text(
+                        "De grenzen zijn open: chat is weer voor iedereen zichtbaar.", NamedTextColor.GREEN));
+                return true;
+            }
+            if (args.length == 2 && args[1].equalsIgnoreCase("close")) {
+                setBordersDropped(false);
+                sender.sendMessage(Component.text(
+                        "De grenzen zijn weer dicht: Noord en Zuid zien alleen hun eigen chat.", NamedTextColor.GREEN));
+                return true;
+            }
+            sender.sendMessage(Component.text(
+                    "Grenzen zijn nu " + (bordersDropped ? "open" : "dicht") + ". Gebruik: /lowkey border <open|close>",
+                    NamedTextColor.GRAY));
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("nether")) {
             if (args.length == 2 && args[1].equalsIgnoreCase("open")) {
                 setNether(true);
@@ -1272,7 +1477,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>  |  /lowkey lowkeyblock [aantal]  |  /lowkey border <open|close>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -1368,12 +1573,31 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             })));
         }
 
+        if (bordersDropped) {
+            buttons.add(button(Component.text("Grenzen weer dicht", NamedTextColor.RED),
+                    "Noord en Zuid zien daarna weer alleen hun eigen chat.", 150, () -> {
+                        setBordersDropped(false);
+                        openMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(Component.text("Grenzen droppen", NamedTextColor.GREEN),
+                    "Chat van Noord en Zuid wordt weer een gedeelde chat.", 150, () -> {
+                        setBordersDropped(true);
+                        openMenu(admin);
+                    }));
+        }
+
         buttons.add(button(Component.text("Team instellen..."), "Zet een speler in Noord, Zuid of geen team.", 150,
                 () -> pickPlayer(admin, "Team instellen", target -> pickTeam(admin, target))));
         buttons.add(button(Component.text("Grace instellen..."), "Zet de grace tijd van een speler.", 150,
                 () -> pickPlayer(admin, "Grace instellen", target -> pickGrace(admin, target))));
         buttons.add(button(Component.text("Lobby..."), "Lobby-wereld en wereldbollen instellen.", 150,
                 () -> openLobbyMenu(admin)));
+        buttons.add(button(Component.text("Geef Lowkey Block"), "Geeft jezelf 16 Lowkey Blocks (herskinde Netherite Blocks).",
+                150, () -> {
+                    giveLowkeyBlock(admin, 16);
+                    openMenu(admin);
+                }));
 
         ActionButton close = ActionButton.create(Component.text("Sluiten"), Component.text("Sluit dit menu."), 150, null);
 
@@ -1489,13 +1713,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("nether");
             options.add("server");
             options.add("lobby");
+            options.add("lowkeyblock");
+            options.add("border");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
             if (sub.equals("grace") || sub.equals("team")) {
                 for (Player player : getServer().getOnlinePlayers()) {
                     options.add(player.getName());
                 }
-            } else if (sub.equals("nether") || sub.equals("server")) {
+            } else if (sub.equals("nether") || sub.equals("server") || sub.equals("border")) {
                 options.add("open");
                 options.add("close");
             } else if (sub.equals("lobby")) {
@@ -1505,6 +1731,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("setgamespawn");
                 options.add("setloserglobe");
                 options.add("setloserspawn");
+                options.add("clear");
+            } else if (sub.equals("lowkeyblock")) {
+                options.add("16");
+                options.add("64");
             }
         } else if (args.length == 3) {
             String sub = args[0].toLowerCase(Locale.ROOT);
