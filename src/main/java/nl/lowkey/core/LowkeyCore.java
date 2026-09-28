@@ -31,23 +31,17 @@ import org.bukkit.block.data.BlockData;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
-import org.bukkit.entity.BlockDisplay;
-import org.bukkit.entity.Display;
-import org.bukkit.entity.Entity;
 import org.bukkit.entity.ExperienceOrb;
-import org.bukkit.entity.Interaction;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
-import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.generator.ChunkGenerator;
-import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
@@ -56,10 +50,12 @@ import org.bukkit.potion.PotionEffect;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
-import org.bukkit.util.Vector;
+import com.destroystokyo.paper.event.server.PaperServerListPingEvent;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -67,6 +63,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -169,27 +166,42 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private NamespacedKey graceKey;
     private NamespacedKey sideKey;
     private NamespacedKey eliminatedKey;
-    private NamespacedKey globeTypeKey;
     private NamespacedKey lastGameLocKey;
     private long graceMillis;
     private boolean eliminateOnDeath;
     private String eliminatedSuffix;
 
-    // ------------------------------------------------------------------ lobby (globes + teleports)
+    // ------------------------------------------------------------------ lobby (teleports)
 
-    /** locations saved for the lobby: where you land, the two globe centres, and the two destinations */
+    /** locations saved for the lobby: where you land, and the two destinations (game / verliezerseiland) */
     private Location lobbySpawn;
     private Location gameSpawn;
     private Location loserSpawn;
-    private Location mainGlobeCenter;
-    private Location loserGlobeCenter;
 
-    private final List<BlockDisplay> mainGlobeBlocks = new ArrayList<>();
-    private final List<Vector> mainGlobeOffsets = new ArrayList<>();
-    private final List<BlockDisplay> loserGlobeBlocks = new ArrayList<>();
-    private final List<Vector> loserGlobeOffsets = new ArrayList<>();
-    private double globeAngle;
-    private org.bukkit.scheduler.BukkitTask globeSpinTask;
+    // ------------------------------------------------------------------ server hours (09:00 - 00:00)
+
+    private static final ZoneId LOWKEY_ZONE = ZoneId.of("Europe/Brussels");
+    private static final int HOURS_OPEN_FROM = 9; // 09:00
+    /** current cached state: is the server within opening hours right now? */
+    private boolean hoursOpen = true;
+    /** so the per-second check only does real work once per calendar minute */
+    private int lastCheckedMinuteOfDay = -1;
+
+    // ------------------------------------------------------------------ donation broadcaster
+
+    private final Random random = new Random();
+    private static final List<String> DONATION_MESSAGES = List.of(
+            "Stuur Gaspard een privebericht voor een donatie te doen. Elke cent helpt.",
+            "Donaties houden LowkeySMP draaiende. Elke cent helpt.",
+            "Vind je LowkeySMP leuk? Een kleine donatie wordt gewaardeerd.",
+            "Elke cent helpt om de server draaiende te houden.",
+            "Wil je bijdragen aan de server? Elke donatie helpt, hoe klein ook.",
+            "Steun LowkeySMP met een donatie, elke cent helpt.",
+            "Stuur Gaspard een privebericht als je wil doneren.",
+            "Achter de schermen kost een server geld. Elke donatie helpt.",
+            "LowkeySMP draait dankzij mensen zoals jij. Elke cent helpt.",
+            "Wil je doneren? Stuur Gaspard een privebericht."
+    );
 
     /** an empty world, generates nothing at all: used for the lobby */
     private static final class VoidGenerator extends ChunkGenerator {
@@ -244,32 +256,31 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         lobbySpawn = loadLocationFrom(state, "lobby-spawn");
         gameSpawn = loadLocationFrom(state, "game-spawn");
         loserSpawn = loadLocationFrom(state, "loser-spawn");
-        mainGlobeCenter = loadLocationFrom(state, "main-globe");
-        loserGlobeCenter = loadLocationFrom(state, "loser-globe");
         graceKey = new NamespacedKey(this, "grace_left");
         sideKey = new NamespacedKey(this, "side");
         eliminatedKey = new NamespacedKey(this, "eliminated");
-        globeTypeKey = new NamespacedKey(this, "globe_type");
         lastGameLocKey = new NamespacedKey(this, "last_game_loc");
 
         cleanupTeams();
         getServer().getPluginManager().registerEvents(this, this);
-        rebuildGlobeTracking();
+
+        LocalTime startupTime = LocalTime.now(LOWKEY_ZONE);
+        hoursOpen = startupTime.getHour() >= HOURS_OPEN_FROM;
+        lastCheckedMinuteOfDay = startupTime.getHour() * 60 + startupTime.getMinute();
 
         for (Player player : getServer().getOnlinePlayers()) {
             startTracking(player, false);
         }
         getServer().getScheduler().runTaskTimer(this, this::tickGrace, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::updateTablist, 20L, 100L);
-        int spinInterval = Math.max(1, getConfig().getInt("lobby.rotation-interval-ticks", 2));
-        globeSpinTask = getServer().getScheduler().runTaskTimer(this, this::tickGlobes, 40L, spinInterval);
+        getServer().getScheduler().runTaskTimer(this, this::tickServerHours, 20L, 20L);
+        long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
+        getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
+                donationIntervalTicks, donationIntervalTicks);
     }
 
     @Override
     public void onDisable() {
-        if (globeSpinTask != null) {
-            globeSpinTask.cancel();
-        }
         for (Player player : getServer().getOnlinePlayers()) {
             persist(player);
         }
@@ -298,6 +309,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private boolean isCrew(Player player) {
         return crew.contains(player.getName().toLowerCase(Locale.ROOT));
+    }
+
+    /** Adds or removes a player's crew status, persists it to config.yml, and refreshes their tags. */
+    private void setCrew(CommandSender admin, Player target, boolean crewStatus) {
+        String name = target.getName().toLowerCase(Locale.ROOT);
+        if (crewStatus) {
+            crew.add(name);
+        } else {
+            crew.remove(name);
+        }
+        getConfig().set("crew", new ArrayList<>(crew));
+        saveConfig();
+        refreshTags(target);
+        if (admin != null) {
+            admin.sendMessage(Component.text(
+                    target.getName() + (crewStatus ? " is nu crew." : " is geen crew meer."), NamedTextColor.GREEN));
+        }
     }
 
     // ------------------------------------------------------------------ side (Noord / Zuid)
@@ -562,7 +590,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         startTracking(player, true);
         getServer().getScheduler().runTask(this, this::updateTablist);
 
-        // every join goes straight to the lobby; wherever they were is remembered for the globe to send them back to
+        // every join goes straight to the lobby; wherever they were is remembered so /lowkey lobby teleport can send them back
         if (lobbySpawn != null) {
             captureLastGameLocation(player);
             getServer().getScheduler().runTask(this, () -> {
@@ -598,9 +626,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         final Player sender = event.getPlayer();
         final Side side = sideCache.getOrDefault(sender.getUniqueId(), Side.NONE);
         final boolean eliminated = isEliminated(sender);
-        // chat only ever shows the Noord/Zuid badge or, once eliminated, the loser-island badge -
-        // never crew or grace here, those stay in the nametag/tablist only
-        final String statusIcon = eliminated ? LOSER_ICON : side.icon;
+        // chat only ever shows Noord/Zuid, or once eliminated the loser-island badge - grace never
+        // shows here. Crew only shows here when the player has no team and isn't eliminated (otherwise
+        // the team/loser badge takes priority, crew still shows in the tab list either way).
+        final String statusIcon;
+        if (eliminated) {
+            statusIcon = LOSER_ICON;
+        } else if (side != Side.NONE) {
+            statusIcon = side.icon;
+        } else if (isCrew(sender)) {
+            statusIcon = CREW_ICON;
+        } else {
+            statusIcon = null;
+        }
         final TextColor nameColor = eliminated ? LOSER_COLOR : (side == Side.NONE ? null : TextColor.color(side.rgb));
         event.renderer(ChatRenderer.viewerUnaware((source, sourceDisplayName, message) -> {
             Component line = Component.empty();
@@ -730,13 +768,22 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         player.getPersistentDataContainer().set(eliminatedKey, PersistentDataType.BOOLEAN, value);
     }
 
+    /**
+     * Fully undoes elimination: clears the "dood"/uitgeschakeld status and the loser badge everywhere
+     * (nametag, tab list, chat). Mainly for testing. Does not touch team, grace, location or inventory.
+     */
+    private void clearEliminated(Player target) {
+        setEliminated(target, false);
+        refreshTags(target);
+    }
+
     /** True while the player is standing in the lobby world (compares by world name, not object identity). */
     private boolean isInLobbyWorld(Player player) {
         String lobbyWorldName = getConfig().getString("lobby.world", "lowkey_lobby");
         return player.getWorld().getName().equals(lobbyWorldName);
     }
 
-    /** Remembers where the player was, so the main globe can send them back there later instead of a fixed spot. */
+    /** Remembers where the player was, so a teleport back to the game can return them there instead of a fixed spot. */
     private void captureLastGameLocation(Player player) {
         if (isInLobbyWorld(player)) {
             return; // already in the lobby: don't overwrite a real position with lobby coordinates
@@ -820,7 +867,110 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     public void onPreLogin(AsyncPlayerPreLoginEvent event) {
         if (serverClosed && !hasClosedAccess(event.getName())) {
             event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, closedMessage());
+            return;
         }
+        if (!hoursOpen && !crew.contains(event.getName().toLowerCase(Locale.ROOT))) {
+            event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, hoursClosedMessage());
+        }
+    }
+
+    // ------------------------------------------------------------------ server hours (09:00 - 00:00, crew always welcome)
+
+    private Component hoursClosedMessage() {
+        return Component.text("De server is open van 09:00 tot 00:00. Kom later terug", NamedTextColor.RED);
+    }
+
+    private Component closingWarningMessage(int minutesLeft) {
+        String unit = minutesLeft == 1 ? "minuut" : "minuten";
+        return Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text("De server sluit over ", NamedTextColor.RED))
+                .append(Component.text(minutesLeft + " " + unit, NamedTextColor.WHITE, TextDecoration.BOLD))
+                .append(Component.text(".", NamedTextColor.RED))
+                .build();
+    }
+
+    /**
+     * Runs every second, but only does real work once a calendar minute actually changes (in the
+     * Europe/Brussels zone). Kicks everyone except crew the moment the clock hits 00:00, and warns
+     * everyone online 10, 3 and 1 minute before that happens.
+     */
+    private void tickServerHours() {
+        LocalTime now = LocalTime.now(LOWKEY_ZONE);
+        int minuteOfDay = now.getHour() * 60 + now.getMinute();
+        if (minuteOfDay == lastCheckedMinuteOfDay) {
+            return;
+        }
+        lastCheckedMinuteOfDay = minuteOfDay;
+
+        boolean shouldBeOpen = now.getHour() >= HOURS_OPEN_FROM;
+        if (shouldBeOpen != hoursOpen) {
+            hoursOpen = shouldBeOpen;
+            if (!hoursOpen) {
+                for (Player player : new ArrayList<>(getServer().getOnlinePlayers())) {
+                    if (!isCrew(player)) {
+                        player.kick(hoursClosedMessage());
+                    }
+                }
+            }
+        }
+
+        if (!hoursOpen) {
+            return;
+        }
+        int minutesToClose = (24 * 60) - minuteOfDay; // minutes left until the next 00:00
+        if (minutesToClose == 10 || minutesToClose == 3 || minutesToClose == 1) {
+            Component warning = closingWarningMessage(minutesToClose);
+            for (Player player : getServer().getOnlinePlayers()) {
+                player.sendMessage(warning);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ donation broadcaster
+
+    private void broadcastRandomDonationMessage() {
+        if (getServer().getOnlinePlayers().isEmpty()) {
+            return;
+        }
+        sendDonationMessage(null);
+    }
+
+    /** Sends one random donation message. If `only` is null it goes to everyone, otherwise just to that player. */
+    private void sendDonationMessage(Player only) {
+        String text = DONATION_MESSAGES.get(random.nextInt(DONATION_MESSAGES.size()));
+        Component message = Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text(text, NamedTextColor.GOLD))
+                .build();
+        if (only != null) {
+            only.sendMessage(message);
+        } else {
+            for (Player player : getServer().getOnlinePlayers()) {
+                player.sendMessage(message);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ MOTD (fully automatic, no manual edits)
+
+    @EventHandler
+    public void onServerListPing(PaperServerListPingEvent event) {
+        Component line1 = Component.text("LowkeySMP", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD)
+                .append(Component.text(" - Lowkey Peak", NamedTextColor.GRAY));
+        Component line2;
+        if (!hoursOpen) {
+            line2 = Component.text("Gesloten - open om 09:00", NamedTextColor.RED);
+        } else if (serverClosed) {
+            line2 = Component.text("Tijdelijk gesloten voor onderhoud", NamedTextColor.RED);
+        } else {
+            int online = getServer().getOnlinePlayers().size();
+            line2 = Component.text("Open! ", NamedTextColor.GREEN)
+                    .append(Component.text(online + " online", NamedTextColor.WHITE));
+        }
+        event.motd(line1.append(Component.newline()).append(line2));
     }
 
     // ------------------------------------------------------------------ Nether open / closed
@@ -833,8 +983,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveLocationTo(state, "lobby-spawn", lobbySpawn);
         saveLocationTo(state, "game-spawn", gameSpawn);
         saveLocationTo(state, "loser-spawn", loserSpawn);
-        saveLocationTo(state, "main-globe", mainGlobeCenter);
-        saveLocationTo(state, "loser-globe", loserGlobeCenter);
         try {
             getDataFolder().mkdirs();
             state.save(stateFile);
@@ -907,7 +1055,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    // ------------------------------------------------------------------ lobby world + globes
+    // ------------------------------------------------------------------ lobby world
 
     private void saveLocationTo(YamlConfiguration cfg, String path, Location loc) {
         if (loc == null || loc.getWorld() == null) {
@@ -994,7 +1142,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void lobbySetGameSpawn(Player admin) {
         gameSpawn = admin.getLocation().clone();
         saveState();
-        admin.sendMessage(Component.text("Spel-spawn ingesteld (dit is waar de blauwe wereldbol je heen stuurt).",
+        admin.sendMessage(Component.text("Spel-spawn ingesteld (dit is waar /lowkey lobby teleport <speler> main je heen stuurt).",
                 NamedTextColor.GREEN));
         openLobbyMenu(admin);
     }
@@ -1003,226 +1151,40 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         loserSpawn = admin.getLocation().clone();
         saveState();
         admin.sendMessage(Component.text(
-                "Verliezerseiland-spawn ingesteld (dit is waar de grijze wereldbol je heen stuurt).", NamedTextColor.GREEN));
-        openLobbyMenu(admin);
-    }
-
-    private void lobbySetGlobe(Player admin, boolean gray) {
-        Location center = admin.getLocation().clone();
-        spawnGlobe(center, gray);
-        if (gray) {
-            loserGlobeCenter = center;
-        } else {
-            mainGlobeCenter = center;
-        }
-        saveState();
-        admin.sendMessage(Component.text((gray ? "Grijze" : "Blauwe") + " wereldbol geplaatst.", NamedTextColor.GREEN));
+                "Verliezerseiland-spawn ingesteld (dit is waar /lowkey lobby teleport <speler> loser je heen stuurt).",
+                NamedTextColor.GREEN));
         openLobbyMenu(admin);
     }
 
     /**
-     * A proper 1-voxel-thick shell: every voxel that is inside a solid sphere of this radius but has
-     * at least one of its 6 neighbours outside it. This gives an even, gap-free surface, unlike a
-     * "distance band" test which tends to leave lumps and holes.
+     * Admin utility: teleports a player either to the game world (their last known position there,
+     * or the game-spawn if they've never been in the game) or to the verliezerseiland-spawn.
      */
-    private List<Vector> sphereShellOffsets(int radius) {
-        List<Vector> offsets = new ArrayList<>();
-        for (int x = -radius; x <= radius; x++) {
-            for (int y = -radius; y <= radius; y++) {
-                for (int z = -radius; z <= radius; z++) {
-                    if (!insideSphere(x, y, z, radius)) {
-                        continue;
-                    }
-                    boolean surrounded = insideSphere(x + 1, y, z, radius) && insideSphere(x - 1, y, z, radius)
-                            && insideSphere(x, y + 1, z, radius) && insideSphere(x, y - 1, z, radius)
-                            && insideSphere(x, y, z + 1, radius) && insideSphere(x, y, z - 1, radius);
-                    if (!surrounded) {
-                        offsets.add(new Vector(x, y, z));
-                    }
-                }
+    private void teleportPlayer(Player admin, Player target, boolean toLoser) {
+        Location destination;
+        if (toLoser) {
+            destination = loserSpawn;
+            if (destination == null) {
+                admin.sendMessage(Component.text(
+                        "Er is nog geen verliezerseiland-spawn ingesteld.", NamedTextColor.RED));
+                return;
             }
-        }
-        return offsets;
-    }
-
-    private boolean insideSphere(int x, int y, int z, int radius) {
-        return x * x + y * y + z * z <= radius * radius;
-    }
-
-    /**
-     * Two-tone "earth" pattern using our own reskinned blocks (see the resourcepack): a clean ocean and
-     * land colour, plus ice near the poles. One deterministic mask decides land vs ocean per voxel, so
-     * continents form clean blobs instead of speckled noise.
-     */
-    private BlockData pickGlobeBlock(Vector offset, int radius, boolean gray) {
-        double nx = offset.getX() / radius;
-        double ny = offset.getY() / radius;
-        double nz = offset.getZ() / radius;
-
-        if (gray) {
-            double mask = Math.sin(nx * 3.1 + ny * 1.7) * Math.cos(nz * 2.3 + nx * 0.9) + Math.sin(ny * 4.0 - nz * 2.1);
-            return (mask > 0.35 ? Material.IRON_BLOCK : Material.COAL_BLOCK).createBlockData();
-        }
-        if (Math.abs(ny) > 0.85) {
-            return Material.DIAMOND_BLOCK.createBlockData(); // ice caps
-        }
-        double landMask = Math.sin(nx * 3.1 + ny * 1.7) * Math.cos(nz * 2.3 + nx * 0.9) + Math.sin(ny * 4.0 - nz * 2.1);
-        return (landMask > 0.35 ? Material.EMERALD_BLOCK : Material.LAPIS_BLOCK).createBlockData();
-    }
-
-    /** Removes any existing globe of this type, then builds a fresh voxel sphere plus its click target. */
-    private void spawnGlobe(Location center, boolean gray) {
-        World world = center.getWorld();
-        String tag = gray ? "loser" : "main";
-        for (Entity entity : new ArrayList<>(world.getEntities())) {
-            if (tag.equals(entity.getPersistentDataContainer().get(globeTypeKey, PersistentDataType.STRING))) {
-                entity.remove();
-            }
-        }
-
-        int radius = Math.max(1, getConfig().getInt("lobby.globe-radius", 4));
-        List<Vector> offsets = sphereShellOffsets(radius);
-        List<BlockDisplay> blocks = new ArrayList<>();
-        for (Vector offset : offsets) {
-            Location loc = center.clone().add(offset);
-            BlockData data = pickGlobeBlock(offset, radius, gray);
-            BlockDisplay display = world.spawn(loc, BlockDisplay.class, d -> {
-                d.setBlock(data);
-                d.setBillboard(Display.Billboard.FIXED);
-                d.setPersistent(true);
-                d.getPersistentDataContainer().set(globeTypeKey, PersistentDataType.STRING, tag);
-            });
-            blocks.add(display);
-        }
-        float size = radius * 2f + 1f;
-        Interaction interaction = world.spawn(center, Interaction.class, i -> {
-            i.setInteractionWidth(size);
-            i.setInteractionHeight(size);
-            i.setPersistent(true);
-            i.getPersistentDataContainer().set(globeTypeKey, PersistentDataType.STRING, tag);
-        });
-
-        if (gray) {
-            loserGlobeBlocks.clear();
-            loserGlobeBlocks.addAll(blocks);
-            loserGlobeOffsets.clear();
-            loserGlobeOffsets.addAll(offsets);
         } else {
-            mainGlobeBlocks.clear();
-            mainGlobeBlocks.addAll(blocks);
-            mainGlobeOffsets.clear();
-            mainGlobeOffsets.addAll(offsets);
-        }
-    }
-
-    /** After a restart the entities themselves still exist in the world; find them again by their tag. */
-    private void rebuildGlobeTracking() {
-        mainGlobeBlocks.clear();
-        mainGlobeOffsets.clear();
-        loserGlobeBlocks.clear();
-        loserGlobeOffsets.clear();
-        if (mainGlobeCenter != null) {
-            collectGlobe(mainGlobeCenter, false);
-        }
-        if (loserGlobeCenter != null) {
-            collectGlobe(loserGlobeCenter, true);
-        }
-    }
-
-    private void collectGlobe(Location center, boolean gray) {
-        World world = center.getWorld();
-        if (world == null) {
-            return;
-        }
-        String tag = gray ? "loser" : "main";
-        for (Entity entity : world.getEntities()) {
-            if (!(entity instanceof BlockDisplay)) {
-                continue;
-            }
-            if (!tag.equals(entity.getPersistentDataContainer().get(globeTypeKey, PersistentDataType.STRING))) {
-                continue;
-            }
-            Vector offset = entity.getLocation().toVector().subtract(center.toVector());
-            if (gray) {
-                loserGlobeBlocks.add((BlockDisplay) entity);
-                loserGlobeOffsets.add(offset);
-            } else {
-                mainGlobeBlocks.add((BlockDisplay) entity);
-                mainGlobeOffsets.add(offset);
-            }
-        }
-    }
-
-    /** Spins both globes a little further, by moving every voxel along a circle around the centre. */
-    private void tickGlobes() {
-        double speed = getConfig().getDouble("lobby.rotation-speed-degrees", 4.0);
-        globeAngle = (globeAngle + speed) % 360.0;
-        rotateGlobe(mainGlobeCenter, mainGlobeBlocks, mainGlobeOffsets);
-        rotateGlobe(loserGlobeCenter, loserGlobeBlocks, loserGlobeOffsets);
-    }
-
-    private void rotateGlobe(Location center, List<BlockDisplay> blocks, List<Vector> offsets) {
-        if (center == null || blocks.isEmpty()) {
-            return;
-        }
-        double rad = Math.toRadians(globeAngle);
-        double cos = Math.cos(rad);
-        double sin = Math.sin(rad);
-        for (int i = 0; i < blocks.size(); i++) {
-            BlockDisplay display = blocks.get(i);
-            if (!display.isValid()) {
-                continue;
-            }
-            Vector offset = offsets.get(i);
-            double x = offset.getX() * cos - offset.getZ() * sin;
-            double z = offset.getX() * sin + offset.getZ() * cos;
-            display.teleport(center.clone().add(x, offset.getY(), z));
-        }
-    }
-
-    /** Right-click on a globe: the blue one sends you to the game, the grey one to the loser island. */
-    @EventHandler
-    public void onGlobeClick(PlayerInteractEntityEvent event) {
-        if (event.getHand() != EquipmentSlot.HAND || !(event.getRightClicked() instanceof Interaction)) {
-            return;
-        }
-        String type = event.getRightClicked().getPersistentDataContainer().get(globeTypeKey, PersistentDataType.STRING);
-        if (type == null) {
-            return;
-        }
-        event.setCancelled(true);
-        Player player = event.getPlayer();
-
-        if (type.equals("main")) {
-            Location destination = getLastGameLocation(player);
+            destination = getLastGameLocation(target);
             if (destination == null) {
-                destination = gameSpawn; // never been in the game before: fall back to the spel-spawn
+                destination = gameSpawn;
             }
             if (destination == null) {
-                if (player.hasPermission("lowkey.admin")) {
-                    player.sendMessage(Component.text(
-                            "Er is nog geen spel-spawn ingesteld (/lowkey lobby setgamespawn).", NamedTextColor.RED));
-                }
+                admin.sendMessage(Component.text("Er is nog geen spel-spawn ingesteld.", NamedTextColor.RED));
                 return;
             }
-            player.teleport(destination);
-        } else if (type.equals("loser")) {
-            if (!isEliminated(player)) {
-                player.sendMessage(Component.text("Je bent nog niet dood!", NamedTextColor.RED));
-                player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 1.0f);
-                return;
-            }
-            if (loserSpawn == null) {
-                if (player.hasPermission("lowkey.admin")) {
-                    player.sendMessage(Component.text(
-                            "Er is nog geen verliezerseiland-spawn ingesteld (/lowkey lobby setloserspawn).",
-                            NamedTextColor.RED));
-                }
-                return;
-            }
-            player.teleport(loserSpawn);
         }
+        target.teleport(destination);
+        admin.sendMessage(Component.text(
+                target.getName() + " is naar " + (toLoser ? "het verliezerseiland" : "de spel-wereld")
+                        + " getpt.", NamedTextColor.GREEN));
     }
+
 
     /** Submenu for the lobby, opened from the main menu's "Lobby..." button. */
     private void openLobbyMenu(Player admin) {
@@ -1231,26 +1193,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 150, () -> loadOrCreateLobbyWorld(admin)));
         buttons.add(button(Component.text("Hier: lobby spawn"), "Zet de lobby-spawn op je huidige plek.", 150,
                 () -> lobbySetSpawn(admin)));
-        buttons.add(button(Component.text("Hier: hoofd-wereldbol"), "Plaatst de blauwe wereldbol op je plek.", 150,
-                () -> lobbySetGlobe(admin, false)));
-        buttons.add(button(Component.text("Hier: spel-spawn"), "Waar de blauwe wereldbol je naartoe stuurt.", 150,
+        buttons.add(button(Component.text("Hier: spel-spawn"), "Zet de spel-spawn op je huidige plek.", 150,
                 () -> lobbySetGameSpawn(admin)));
-        buttons.add(button(Component.text("Hier: verliezer-wereldbol"), "Plaatst de grijze wereldbol op je plek.", 150,
-                () -> lobbySetGlobe(admin, true)));
-        buttons.add(button(Component.text("Hier: verliezerseiland-spawn"), "Waar de grijze wereldbol je naartoe stuurt.",
-                150, () -> lobbySetLoserSpawn(admin)));
-        buttons.add(button(Component.text("Alle wereldbollen verwijderen", NamedTextColor.RED),
-                "Verwijdert alle wereldbol-entiteiten, overal, ook oude/losse.", 150, () -> confirm(admin,
-                        "Alle wereldbollen verwijderen?",
-                        "Dit verwijdert elke wereldbol (blauw en grijs), overal, ook oude losse exemplaren.",
-                        "Je kunt daarna opnieuw beginnen met plaatsen.",
-                        Component.text("Ja, verwijderen", NamedTextColor.RED),
-                        () -> {
-                            int removed = clearAllGlobes();
-                            admin.sendMessage(Component.text(
-                                    removed + " wereldbol-entiteiten verwijderd.", NamedTextColor.GREEN));
-                            openLobbyMenu(admin);
-                        })));
+        buttons.add(button(Component.text("Hier: verliezerseiland-spawn"),
+                "Zet de verliezerseiland-spawn op je huidige plek.", 150, () -> lobbySetLoserSpawn(admin)));
+        buttons.add(button(Component.text("Teleporteer speler..."),
+                "Stuur een speler naar de spel-wereld of het verliezerseiland.", 150,
+                () -> pickPlayer(admin, "Teleporteer speler", target -> pickLobbyDestination(admin, target))));
 
         ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
 
@@ -1263,40 +1212,27 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         admin.showDialog(dialog);
     }
 
-    /**
-     * Removes every globe entity (block displays + interaction) tagged by this plugin, in every loaded
-     * world. Also resets the saved globe locations, so /lowkey lobby setmainglobe / setloserglobe start fresh.
-     * Use this to clean up globes from earlier testing, including ones that got orphaned before this
-     * command existed.
-     */
-    private int clearAllGlobes() {
-        int removed = 0;
-        for (World world : getServer().getWorlds()) {
-            for (Entity entity : new ArrayList<>(world.getEntities())) {
-                if (entity.getPersistentDataContainer().has(globeTypeKey, PersistentDataType.STRING)) {
-                    entity.remove();
-                    removed++;
-                }
-            }
-        }
-        mainGlobeBlocks.clear();
-        mainGlobeOffsets.clear();
-        loserGlobeBlocks.clear();
-        loserGlobeOffsets.clear();
-        mainGlobeCenter = null;
-        loserGlobeCenter = null;
-        saveState();
-        return removed;
-    }
+    /** Second step of "Teleporteer speler...": pick the destination for the player chosen in the first step. */
+    private void pickLobbyDestination(Player admin, Player target) {
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(Component.text("Spel-wereld"), "Stuur " + target.getName() + " naar de spel-wereld.", 150,
+                () -> {
+                    teleportPlayer(admin, target, false);
+                    openMenu(admin);
+                }));
+        buttons.add(button(Component.text("Verliezerseiland"),
+                "Stuur " + target.getName() + " naar het verliezerseiland.", 150, () -> {
+                    teleportPlayer(admin, target, true);
+                    openMenu(admin);
+                }));
+        ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
 
-    /** Gives the admin a stack of the reskinned "Lowkey Block" (a Netherite Block with our own texture). */
-    private void giveLowkeyBlock(Player admin, int amount) {
-        ItemStack stack = new ItemStack(Material.NETHERITE_BLOCK, Math.max(1, Math.min(64, amount)));
-        stack.editMeta(meta -> meta.displayName(
-                Component.text("Lowkey Block", NamedTextColor.LIGHT_PURPLE).decoration(TextDecoration.ITALIC, false)));
-        admin.getInventory().addItem(stack);
-        admin.sendMessage(Component.text(
-                "Je hebt " + stack.getAmount() + "x Lowkey Block gekregen.", NamedTextColor.GREEN));
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("Teleporteer " + target.getName()))
+                        .body(List.of(DialogBody.plainMessage(Component.text("Waarheen?", NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.multiAction(buttons, back, 2)));
+        admin.showDialog(dialog);
     }
 
     // ------------------------------------------------------------------ admin command
@@ -1307,9 +1243,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey team <speler> <noord|zuid|geen> : zet de speler in Noord, Zuid of geen team
      * /lowkey nether <open|close> : opent of sluit de Nether (bij openen: titel + bericht voor iedereen)
      * /lowkey server <open|close> : sluit de server voor iedereen behalve 'closed-access' (geen bans), of maakt hem weer open
- * /lowkey lobby <world|setspawn|setmainglobe|setgamespawn|setloserglobe|setloserspawn|clear> : lobby-wereld en wereldbollen instellen
- * /lowkey lowkeyblock [aantal] : geeft de speler Lowkey Blocks (herskinde Netherite Blocks)
- * /lowkey border <open|close> : opent of sluit de grenzen tussen Noord- en Zuid-chat (lobby is altijd globaal)
+     * /lowkey lobby <world|setspawn|setgamespawn|setloserspawn|teleport> : lobby-wereld en spawnpunten instellen
+     * /lowkey border <open|close> : opent of sluit de grenzen tussen Noord- en Zuid-chat (lobby is altijd globaal)
+     * /lowkey revive <speler> : verwijdert de dood/uitgeschakeld-status van een speler (vooral voor testen)
+     * /lowkey donate : stuurt meteen een willekeurig donatiebericht (voor testen)
      */
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -1359,6 +1296,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     target.getName() + " zit nu in team " + side.id + ".", NamedTextColor.GREEN));
             return true;
         }
+        if (args.length == 3 && args[0].equalsIgnoreCase("crew")) {
+            Player target = getServer().getPlayerExact(args[1]);
+            if (target == null) {
+                sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
+                return true;
+            }
+            String choice = args[2].toLowerCase(Locale.ROOT);
+            if (!choice.equals("aan") && !choice.equals("uit")) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey crew <speler> <aan|uit>", NamedTextColor.GRAY));
+                return true;
+            }
+            setCrew(sender, target, choice.equals("aan"));
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("lobby")) {
             if (!(sender instanceof Player)) {
                 sender.sendMessage(Component.text(
@@ -1367,6 +1318,25 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
             Player lobbyPlayer = (Player) sender;
             String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+            if (action.equals("teleport")) {
+                if (args.length != 4) {
+                    sender.sendMessage(Component.text(
+                            "Gebruik: /lowkey lobby teleport <speler> <main|loser>", NamedTextColor.GRAY));
+                    return true;
+                }
+                Player target = getServer().getPlayerExact(args[2]);
+                if (target == null) {
+                    sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
+                    return true;
+                }
+                String destination = args[3].toLowerCase(Locale.ROOT);
+                if (!destination.equals("main") && !destination.equals("loser")) {
+                    sender.sendMessage(Component.text("Kies main of loser.", NamedTextColor.RED));
+                    return true;
+                }
+                teleportPlayer(lobbyPlayer, target, destination.equals("loser"));
+                return true;
+            }
             switch (action) {
                 case "world":
                     loadOrCreateLobbyWorld(lobbyPlayer);
@@ -1374,45 +1344,33 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 case "setspawn":
                     lobbySetSpawn(lobbyPlayer);
                     return true;
-                case "setmainglobe":
-                    lobbySetGlobe(lobbyPlayer, false);
-                    return true;
                 case "setgamespawn":
                     lobbySetGameSpawn(lobbyPlayer);
-                    return true;
-                case "setloserglobe":
-                    lobbySetGlobe(lobbyPlayer, true);
                     return true;
                 case "setloserspawn":
                     lobbySetLoserSpawn(lobbyPlayer);
                     return true;
-                case "clear":
-                    int removed = clearAllGlobes();
-                    lobbyPlayer.sendMessage(Component.text(
-                            removed + " wereldbol-entiteiten verwijderd.", NamedTextColor.GREEN));
-                    return true;
                 default:
                     sender.sendMessage(Component.text(
-                            "Gebruik: /lowkey lobby <world|setspawn|setmainglobe|setgamespawn|setloserglobe|setloserspawn>",
+                            "Gebruik: /lowkey lobby <world|setspawn|setgamespawn|setloserspawn|teleport <speler> <main|loser>>",
                             NamedTextColor.GRAY));
                     return true;
             }
         }
-        if (args.length >= 1 && args[0].equalsIgnoreCase("lowkeyblock")) {
-            if (!(sender instanceof Player)) {
-                sender.sendMessage(Component.text("Dit commando werkt alleen als speler.", NamedTextColor.RED));
+        if (args.length == 2 && args[0].equalsIgnoreCase("revive")) {
+            Player target = getServer().getPlayerExact(args[1]);
+            if (target == null) {
+                sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
                 return true;
             }
-            int amount = 1;
-            if (args.length == 2) {
-                try {
-                    amount = Integer.parseInt(args[1]);
-                } catch (NumberFormatException e) {
-                    sender.sendMessage(Component.text("Geef een geldig aantal.", NamedTextColor.RED));
-                    return true;
-                }
-            }
-            giveLowkeyBlock((Player) sender, amount);
+            clearEliminated(target);
+            sender.sendMessage(Component.text(
+                    "Dood-status van " + target.getName() + " is verwijderd.", NamedTextColor.GREEN));
+            return true;
+        }
+        if (args.length == 1 && args[0].equalsIgnoreCase("donate")) {
+            sender.sendMessage(Component.text("Donatiebericht verstuurd.", NamedTextColor.GREEN));
+            broadcastRandomDonationMessage();
             return true;
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("server")) {
@@ -1477,7 +1435,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>  |  /lowkey lowkeyblock [aantal]  |  /lowkey border <open|close>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -1589,13 +1547,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         buttons.add(button(Component.text("Team instellen..."), "Zet een speler in Noord, Zuid of geen team.", 150,
                 () -> pickPlayer(admin, "Team instellen", target -> pickTeam(admin, target))));
+        buttons.add(button(Component.text("Crew badge..."), "Geef of verwijder de crew-badge van een speler.", 150,
+                () -> pickPlayer(admin, "Crew badge", target -> pickCrew(admin, target))));
         buttons.add(button(Component.text("Grace instellen..."), "Zet de grace tijd van een speler.", 150,
                 () -> pickPlayer(admin, "Grace instellen", target -> pickGrace(admin, target))));
-        buttons.add(button(Component.text("Lobby..."), "Lobby-wereld en wereldbollen instellen.", 150,
+        buttons.add(button(Component.text("Lobby..."), "Lobby-wereld en spawnpunten instellen.", 150,
                 () -> openLobbyMenu(admin)));
-        buttons.add(button(Component.text("Geef Lowkey Block"), "Geeft jezelf 16 Lowkey Blocks (herskinde Netherite Blocks).",
-                150, () -> {
-                    giveLowkeyBlock(admin, 16);
+        buttons.add(button(Component.text("Dood-status verwijderen..."),
+                "Verwijdert de uitgeschakeld-status van een speler (vooral voor testen).", 150,
+                () -> pickPlayer(admin, "Dood-status verwijderen", target -> {
+                    clearEliminated(target);
+                    admin.sendMessage(Component.text(
+                            "Dood-status van " + target.getName() + " is verwijderd.", NamedTextColor.GREEN));
+                    openMenu(admin);
+                })));
+        buttons.add(button(Component.text("Donatiebericht (test)"),
+                "Stuurt meteen een willekeurig donatiebericht naar iedereen.", 150, () -> {
+                    broadcastRandomDonationMessage();
                     openMenu(admin);
                 }));
 
@@ -1670,6 +1638,29 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         });
     }
 
+    private void pickCrew(Player admin, Player target) {
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(Component.text("Crew geven", NamedTextColor.GOLD), target.getName() + " crew maken.", 100,
+                () -> {
+                    setCrew(admin, target, true);
+                    openMenu(admin);
+                }));
+        buttons.add(button(Component.text("Crew verwijderen", NamedTextColor.GRAY),
+                target.getName() + " geen crew meer maken.", 100, () -> {
+                    setCrew(admin, target, false);
+                    openMenu(admin);
+                }));
+        ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("Crew badge voor " + target.getName()))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Nu: " + (isCrew(target) ? "crew" : "geen crew"), NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.multiAction(buttons, back, 2)));
+        admin.showDialog(dialog);
+    }
+
     private void pickGrace(Player admin, Player target) {
         List<ActionButton> buttons = new ArrayList<>();
         buttons.add(graceButton(admin, target, 0, "Beeindigen"));
@@ -1710,14 +1701,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("menu");
             options.add("grace");
             options.add("team");
+            options.add("crew");
             options.add("nether");
             options.add("server");
             options.add("lobby");
-            options.add("lowkeyblock");
             options.add("border");
+            options.add("revive");
+            options.add("donate");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
-            if (sub.equals("grace") || sub.equals("team")) {
+            if (sub.equals("grace") || sub.equals("team") || sub.equals("revive") || sub.equals("crew")) {
                 for (Player player : getServer().getOnlinePlayers()) {
                     options.add(player.getName());
                 }
@@ -1727,14 +1720,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             } else if (sub.equals("lobby")) {
                 options.add("world");
                 options.add("setspawn");
-                options.add("setmainglobe");
                 options.add("setgamespawn");
-                options.add("setloserglobe");
                 options.add("setloserspawn");
-                options.add("clear");
-            } else if (sub.equals("lowkeyblock")) {
-                options.add("16");
-                options.add("64");
+                options.add("teleport");
             }
         } else if (args.length == 3) {
             String sub = args[0].toLowerCase(Locale.ROOT);
@@ -1747,6 +1735,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("1");
                 options.add("10");
                 options.add("60");
+            } else if (sub.equals("crew")) {
+                options.add("aan");
+                options.add("uit");
+            } else if (sub.equals("lobby") && args[1].equalsIgnoreCase("teleport")) {
+                for (Player player : getServer().getOnlinePlayers()) {
+                    options.add(player.getName());
+                }
+            }
+        } else if (args.length == 4) {
+            String sub = args[0].toLowerCase(Locale.ROOT);
+            if (sub.equals("lobby") && args[1].equalsIgnoreCase("teleport")) {
+                options.add("main");
+                options.add("loser");
             }
         }
         String typed = args.length == 0 ? "" : args[args.length - 1].toLowerCase(Locale.ROOT);
