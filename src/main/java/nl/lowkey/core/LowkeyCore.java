@@ -31,10 +31,12 @@ import org.bukkit.block.data.BlockData;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.EntityType;
 import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
@@ -249,6 +251,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         loadSettings();
         stateFile = new File(getDataFolder(), "state.yml");
         loadLobbyWorldIfExists(); // must happen before locations are resolved below
+        loadLoserWorldIfExists();
         YamlConfiguration state = YamlConfiguration.loadConfiguration(stateFile);
         netherOpen = state.getBoolean("nether-open", false);
         serverClosed = state.getBoolean("server-closed", false);
@@ -256,6 +259,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         lobbySpawn = loadLocationFrom(state, "lobby-spawn");
         gameSpawn = loadLocationFrom(state, "game-spawn");
         loserSpawn = loadLocationFrom(state, "loser-spawn");
+        loserIslandOpenedAt = state.getLong("loser-island-opened-at", 0L);
+        loserPhantomsEnabled = state.getBoolean("loser-phantoms-enabled", false);
         graceKey = new NamespacedKey(this, "grace_left");
         sideKey = new NamespacedKey(this, "side");
         eliminatedKey = new NamespacedKey(this, "eliminated");
@@ -1028,6 +1033,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveLocationTo(state, "lobby-spawn", lobbySpawn);
         saveLocationTo(state, "game-spawn", gameSpawn);
         saveLocationTo(state, "loser-spawn", loserSpawn);
+        state.set("loser-island-opened-at", loserIslandOpenedAt);
+        state.set("loser-phantoms-enabled", loserPhantomsEnabled);
         try {
             getDataFolder().mkdirs();
             state.save(stateFile);
@@ -1175,6 +1182,171 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             admin.sendMessage(Component.text("Je staat nu in de lobby-wereld.", NamedTextColor.GREEN));
         }
         openLobbyMenu(admin);
+    }
+
+    // ------------------------------------------------------------------ verliezerseiland (its own world)
+
+    private static final String LOSER_WORLD_NAME = "lowkey_loser_island";
+
+    /** millis timestamp of when the current verliezerseiland was created; 0 if there isn't one */
+    private long loserIslandOpenedAt = 0L;
+    /** manual on/off switch, only ever relevant on the verliezerseiland world - off by default */
+    private boolean loserPhantomsEnabled = false;
+
+    private World getLoserWorld() {
+        return getServer().getWorld(LOSER_WORLD_NAME);
+    }
+
+    /** Loads the verliezerseiland world back in on startup, but only if it was ever created (its folder exists). */
+    private void loadLoserWorldIfExists() {
+        if (getServer().getWorld(LOSER_WORLD_NAME) != null) {
+            return;
+        }
+        File dir = new File(getServer().getWorldContainer(), LOSER_WORLD_NAME);
+        if (dir.isDirectory()) {
+            new WorldCreator(LOSER_WORLD_NAME).environment(World.Environment.NORMAL).createWorld();
+        }
+    }
+
+    private static void deleteRecursively(File file) {
+        if (file == null || !file.exists()) {
+            return;
+        }
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                deleteRecursively(child);
+            }
+        }
+        file.delete();
+    }
+
+    /** Submenu for the verliezerseiland, opened from the main menu's "Verliezerseiland..." button. */
+    private void openLoserIslandMenu(Player admin) {
+        boolean exists = getLoserWorld() != null;
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(Component.text("Eiland aanmaken"),
+                exists ? "Er bestaat al een verliezerseiland - verwijder die eerst."
+                        : "Maakt een gloednieuwe wereld aan met een willekeurige seed.",
+                150, () -> loserIslandCreate(admin)));
+        buttons.add(button(Component.text("Huidig eiland verwijderen", NamedTextColor.RED),
+                "Verwijdert de verliezerseiland-wereld volledig, inclusief alles wat erop staat.", 150,
+                () -> confirm(admin, "Verliezerseiland verwijderen?",
+                        "Dit verwijdert de hele wereld, alles wat erop gebouwd is inbegrepen.",
+                        "Dit kan niet ongedaan gemaakt worden.",
+                        Component.text("Ja, verwijderen", NamedTextColor.RED),
+                        () -> loserIslandDelete(admin))));
+        buttons.add(button(Component.text("Teleporteer naar eiland"),
+                "Tp't je naar de verliezerseiland-spawn (of de wereld-spawn als die nog niet gezet is).", 150,
+                () -> loserIslandTeleport(admin)));
+        buttons.add(button(Component.text("Hier: verliezerseiland-spawn"),
+                "Zet de verliezerseiland-spawn op je huidige plek (moet in die wereld staan).", 150,
+                () -> lobbySetLoserSpawn(admin)));
+        buttons.add(button(Component.text("Phantoms aanzetten", NamedTextColor.GREEN),
+                "Phantoms mogen vanaf nu spawnen op het verliezerseiland." + (loserPhantomsEnabled ? " (al aan)" : ""),
+                150, () -> setLoserPhantomsEnabled(admin, true)));
+        buttons.add(button(Component.text("Phantoms uitzetten", NamedTextColor.GRAY),
+                "Phantoms spawnen niet meer op het verliezerseiland." + (!loserPhantomsEnabled ? " (al uit)" : ""),
+                150, () -> setLoserPhantomsEnabled(admin, false)));
+
+        ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("Verliezerseiland"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                exists ? "Wereld bestaat." : "Wereld bestaat nog niet.", NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.multiAction(buttons, back, 2)));
+        admin.showDialog(dialog);
+    }
+
+    private void loserIslandCreate(Player admin) {
+        if (getLoserWorld() != null) {
+            admin.sendMessage(Component.text(
+                    "Er bestaat al een verliezerseiland. Verwijder die eerst.", NamedTextColor.RED));
+            openLoserIslandMenu(admin);
+            return;
+        }
+        long seed = random.nextLong();
+        World world = new WorldCreator(LOSER_WORLD_NAME).environment(World.Environment.NORMAL).seed(seed).createWorld();
+        if (world == null) {
+            admin.sendMessage(Component.text("Aanmaken van het verliezerseiland is mislukt.", NamedTextColor.RED));
+            openLoserIslandMenu(admin);
+            return;
+        }
+        world.setDifficulty(Difficulty.NORMAL);
+        loserIslandOpenedAt = System.currentTimeMillis();
+        saveState();
+        admin.teleport(world.getSpawnLocation());
+        admin.sendMessage(Component.text(
+                "Nieuw verliezerseiland aangemaakt (seed " + seed + "). Zet de spawn zodra je een plek hebt.",
+                NamedTextColor.GREEN));
+        openLoserIslandMenu(admin);
+    }
+
+    private void loserIslandDelete(Player admin) {
+        World world = getLoserWorld();
+        if (world == null) {
+            admin.sendMessage(Component.text("Er is geen verliezerseiland om te verwijderen.", NamedTextColor.RED));
+            openLoserIslandMenu(admin);
+            return;
+        }
+        // move anyone standing in it out first, or the world can't unload
+        Location fallback = lobbySpawn != null ? lobbySpawn : getServer().getWorlds().get(0).getSpawnLocation();
+        for (Player player : world.getPlayers()) {
+            player.teleport(fallback);
+        }
+        boolean unloaded = getServer().unloadWorld(world, false);
+        if (!unloaded) {
+            admin.sendMessage(Component.text("Kon de wereld niet unloaden.", NamedTextColor.RED));
+            openLoserIslandMenu(admin);
+            return;
+        }
+        deleteRecursively(new File(getServer().getWorldContainer(), LOSER_WORLD_NAME));
+        loserSpawn = null;
+        loserIslandOpenedAt = 0L;
+        loserPhantomsEnabled = false;
+        saveState();
+        admin.sendMessage(Component.text("Verliezerseiland verwijderd.", NamedTextColor.GREEN));
+        openLoserIslandMenu(admin);
+    }
+
+    private void loserIslandTeleport(Player admin) {
+        World world = getLoserWorld();
+        if (world == null) {
+            admin.sendMessage(Component.text("Er bestaat nog geen verliezerseiland.", NamedTextColor.RED));
+            openLoserIslandMenu(admin);
+            return;
+        }
+        Location destination = loserSpawn != null ? loserSpawn : world.getSpawnLocation();
+        admin.teleport(destination);
+        admin.sendMessage(Component.text("Je staat nu op het verliezerseiland.", NamedTextColor.GREEN));
+    }
+
+    private void setLoserPhantomsEnabled(Player admin, boolean enabled) {
+        loserPhantomsEnabled = enabled;
+        saveState();
+        admin.sendMessage(Component.text(
+                enabled ? "Phantoms staan nu aan op het verliezerseiland." : "Phantoms staan nu uit.",
+                NamedTextColor.GREEN));
+        openLoserIslandMenu(admin);
+    }
+
+    /**
+     * Phantoms only ever spawn on the verliezerseiland, and only while the manual toggle is on.
+     * Everywhere else, and while the toggle is off, natural phantom spawns are cancelled outright.
+     */
+    @EventHandler
+    public void onCreatureSpawn(CreatureSpawnEvent event) {
+        if (event.getEntityType() != EntityType.PHANTOM) {
+            return;
+        }
+        World loserWorld = getLoserWorld();
+        boolean allowed = loserPhantomsEnabled && loserWorld != null
+                && event.getLocation().getWorld().equals(loserWorld);
+        if (!allowed) {
+            event.setCancelled(true);
+        }
     }
 
     private void lobbySetSpawn(Player admin) {
@@ -1598,6 +1770,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 () -> pickPlayer(admin, "Grace instellen", target -> pickGrace(admin, target))));
         buttons.add(button(Component.text("Lobby..."), "Lobby-wereld en spawnpunten instellen.", 150,
                 () -> openLobbyMenu(admin)));
+        buttons.add(button(Component.text("Verliezerseiland..."),
+                "Eiland aanmaken/verwijderen, spawn instellen, teleporteren.", 150,
+                () -> openLoserIslandMenu(admin)));
         buttons.add(button(Component.text("Dood-status verwijderen..."),
                 "Verwijdert de uitgeschakeld-status van een speler (vooral voor testen).", 150,
                 () -> pickPlayer(admin, "Dood-status verwijderen", target -> {
