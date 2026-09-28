@@ -943,7 +943,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Component message = Component.text()
                 .append(glyph(LOWKEY_BADGE))
                 .append(Component.space())
-                .append(Component.text(text, NamedTextColor.GOLD))
+                .append(Component.text(text, NamedTextColor.WHITE))
                 .build();
         if (only != null) {
             only.sendMessage(message);
@@ -956,20 +956,65 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ MOTD (fully automatic, no manual edits)
 
+    // approximate pixel widths of the default Minecraft font, used to centre the MOTD lines
+    private static final Map<Character, Integer> MOTD_CHAR_WIDTH = new HashMap<>();
+    static {
+        String narrow2 = "il.,:;'!|";
+        String narrow3 = "I[]t";
+        String wide7 = "@~mMW";
+        for (char c : narrow2.toCharArray()) MOTD_CHAR_WIDTH.put(c, 2);
+        for (char c : narrow3.toCharArray()) MOTD_CHAR_WIDTH.put(c, 3);
+        for (char c : wide7.toCharArray()) MOTD_CHAR_WIDTH.put(c, 7);
+        for (char c : "0123456789".toCharArray()) MOTD_CHAR_WIDTH.put(c, 6);
+        for (char c : "ABCDEFGHJKLNOPQRSTUVXYZ".toCharArray()) MOTD_CHAR_WIDTH.put(c, 6);
+        for (char c : "abcdeghknopqsuvxyz".toCharArray()) MOTD_CHAR_WIDTH.put(c, 6);
+        MOTD_CHAR_WIDTH.put(' ', 4);
+        MOTD_CHAR_WIDTH.put('-', 6);
+        MOTD_CHAR_WIDTH.put('!', 2);
+    }
+    // the box the client draws the MOTD in is roughly this many pixels wide at default font size
+    private static final int MOTD_LINE_WIDTH = 200;
+
+    private static int motdTextWidth(String plain) {
+        int total = 0;
+        for (char c : plain.toCharArray()) {
+            total += MOTD_CHAR_WIDTH.getOrDefault(c, 6) + 1;
+        }
+        return total == 0 ? 0 : total - 1;
+    }
+
+    /** Pads a line with leading spaces so it renders roughly centred in the server list. */
+    private static Component centerMotdLine(Component styled, String plainForWidth) {
+        int width = motdTextWidth(plainForWidth);
+        int padPixels = Math.max(0, (MOTD_LINE_WIDTH - width) / 2);
+        int spaces = padPixels / MOTD_CHAR_WIDTH.get(' ');
+        return spaces == 0 ? styled : Component.text(" ".repeat(spaces)).append(styled);
+    }
+
     @EventHandler
     public void onServerListPing(PaperServerListPingEvent event) {
-        Component line1 = Component.text("LowkeySMP", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD)
-                .append(Component.text(" - Lowkey Peak", NamedTextColor.GRAY));
-        Component line2;
+        String line1Text = "LowkeySMP - Lowkey Peak";
+        Component line1 = centerMotdLine(
+                Component.text("LowkeySMP", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD)
+                        .append(Component.text(" - Lowkey Peak", NamedTextColor.GRAY)),
+                line1Text);
+
+        String line2Text;
+        Component line2Styled;
         if (!hoursOpen) {
-            line2 = Component.text("Gesloten - open om 09:00", NamedTextColor.RED);
+            line2Text = "Gesloten - open om 09:00";
+            line2Styled = Component.text(line2Text, NamedTextColor.RED);
         } else if (serverClosed) {
-            line2 = Component.text("Tijdelijk gesloten voor onderhoud", NamedTextColor.RED);
+            line2Text = "Tijdelijk gesloten voor onderhoud";
+            line2Styled = Component.text(line2Text, NamedTextColor.RED);
         } else {
             int online = getServer().getOnlinePlayers().size();
-            line2 = Component.text("Open! ", NamedTextColor.GREEN)
+            line2Text = "Open! " + online + " online";
+            line2Styled = Component.text("Open! ", NamedTextColor.GREEN)
                     .append(Component.text(online + " online", NamedTextColor.WHITE));
         }
+        Component line2 = centerMotdLine(line2Styled, line2Text);
+
         event.motd(line1.append(Component.newline()).append(line2));
     }
 
