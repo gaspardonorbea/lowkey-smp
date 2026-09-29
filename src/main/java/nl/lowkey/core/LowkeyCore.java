@@ -43,6 +43,8 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.event.weather.ThunderChangeEvent;
+import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataContainer;
@@ -279,6 +281,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::tickGrace, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::updateTablist, 20L, 100L);
         getServer().getScheduler().runTaskTimer(this, this::tickServerHours, 20L, 20L);
+        getServer().getScheduler().runTaskTimer(this, this::tickLoserAtmosphere, 20L, 20L);
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
                 donationIntervalTicks, donationIntervalTicks);
@@ -1199,12 +1202,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** Loads the verliezerseiland world back in on startup, but only if it was ever created (its folder exists). */
     private void loadLoserWorldIfExists() {
-        if (getServer().getWorld(LOSER_WORLD_NAME) != null) {
-            return;
+        World world = getServer().getWorld(LOSER_WORLD_NAME);
+        if (world == null) {
+            File dir = new File(getServer().getWorldContainer(), LOSER_WORLD_NAME);
+            if (dir.isDirectory()) {
+                world = new WorldCreator(LOSER_WORLD_NAME).environment(World.Environment.NORMAL).createWorld();
+            }
         }
-        File dir = new File(getServer().getWorldContainer(), LOSER_WORLD_NAME);
-        if (dir.isDirectory()) {
-            new WorldCreator(LOSER_WORLD_NAME).environment(World.Environment.NORMAL).createWorld();
+        if (world != null) {
+            applyLoserWeather(world);
         }
     }
 
@@ -1219,6 +1225,58 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
         }
         file.delete();
+    }
+
+    /** Locks the verliezerseiland into a permanent, grey storm: always raining, always thundering. */
+    private void applyLoserWeather(World world) {
+        world.setStorm(true);
+        world.setThundering(true);
+        world.setWeatherDuration(Integer.MAX_VALUE);
+        world.setThunderDuration(Integer.MAX_VALUE);
+    }
+
+    /** Keeps the storm locked on: cancels anything that would clear the rain or the thunder there. */
+    @EventHandler
+    public void onWeatherChange(WeatherChangeEvent event) {
+        World loserWorld = getLoserWorld();
+        if (loserWorld != null && event.getWorld().equals(loserWorld) && !event.toWeatherState()) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onThunderChange(ThunderChangeEvent event) {
+        World loserWorld = getLoserWorld();
+        if (loserWorld != null && event.getWorld().equals(loserWorld) && !event.toThunderState()) {
+            event.setCancelled(true);
+        }
+    }
+
+    /**
+     * Ambient creepy particles for whoever is standing on the verliezerseiland: dark red dust motes
+     * drifting around them plus the occasional soul wisp. Purely visual, runs once a second.
+     */
+    private void tickLoserAtmosphere() {
+        World loserWorld = getLoserWorld();
+        if (loserWorld == null || loserWorld.getPlayers().isEmpty()) {
+            return;
+        }
+        Particle.DustOptions redDust = new Particle.DustOptions(Color.fromRGB(120, 0, 0), 1.3f);
+        for (Player player : loserWorld.getPlayers()) {
+            Location base = player.getLocation();
+            for (int i = 0; i < 3; i++) {
+                double dx = (random.nextDouble() - 0.5) * 8;
+                double dy = random.nextDouble() * 4;
+                double dz = (random.nextDouble() - 0.5) * 8;
+                player.spawnParticle(Particle.DUST, base.clone().add(dx, dy, dz), 1, 0, 0, 0, 0, redDust);
+            }
+            if (random.nextInt(3) == 0) {
+                double dx = (random.nextDouble() - 0.5) * 6;
+                double dy = random.nextDouble() * 3;
+                double dz = (random.nextDouble() - 0.5) * 6;
+                player.spawnParticle(Particle.SOUL, base.clone().add(dx, dy, dz), 1, 0, 0, 0, 0.01);
+            }
+        }
     }
 
     /** Submenu for the verliezerseiland, opened from the main menu's "Verliezerseiland..." button. */
@@ -1261,13 +1319,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     private void loserIslandCreate(Player admin) {
+        loserIslandCreate(admin, null);
+    }
+
+    private void loserIslandCreate(Player admin, Long fixedSeed) {
         if (getLoserWorld() != null) {
             admin.sendMessage(Component.text(
                     "Er bestaat al een verliezerseiland. Verwijder die eerst.", NamedTextColor.RED));
             openLoserIslandMenu(admin);
             return;
         }
-        long seed = random.nextLong();
+        long seed = fixedSeed != null ? fixedSeed : random.nextLong();
         World world = new WorldCreator(LOSER_WORLD_NAME).environment(World.Environment.NORMAL).seed(seed).createWorld();
         if (world == null) {
             admin.sendMessage(Component.text("Aanmaken van het verliezerseiland is mislukt.", NamedTextColor.RED));
@@ -1275,6 +1337,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         world.setDifficulty(Difficulty.NORMAL);
+        applyLoserWeather(world);
         loserIslandOpenedAt = System.currentTimeMillis();
         saveState();
         admin.teleport(world.getSpawnLocation());
@@ -1590,6 +1653,22 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             broadcastRandomDonationMessage();
             return true;
         }
+        if (args.length == 3 && args[0].equalsIgnoreCase("island") && args[1].equalsIgnoreCase("create")) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage(Component.text("Dit commando werkt alleen als speler.", NamedTextColor.RED));
+                return true;
+            }
+            long seed;
+            try {
+                seed = Long.parseLong(args[2]);
+            } catch (NumberFormatException e) {
+                // seeds are often typed as plain text too, e.g. "1877693430" already works, but let a
+                // non-numeric seed hash to a long the same way vanilla /seed textboxes do
+                seed = args[2].hashCode();
+            }
+            loserIslandCreate((Player) sender, seed);
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("server")) {
             if (args.length == 2 && args[1].equalsIgnoreCase("close")) {
                 if (sender instanceof Player) {
@@ -1652,7 +1731,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>  |  /lowkey island create <seed>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -1928,6 +2007,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("border");
             options.add("revive");
             options.add("donate");
+            options.add("island");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
             if (sub.equals("grace") || sub.equals("team") || sub.equals("revive") || sub.equals("crew")) {
@@ -1943,6 +2023,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("setgamespawn");
                 options.add("setloserspawn");
                 options.add("teleport");
+            } else if (sub.equals("island")) {
+                options.add("create");
             }
         } else if (args.length == 3) {
             String sub = args[0].toLowerCase(Locale.ROOT);
