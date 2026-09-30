@@ -27,18 +27,24 @@ import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
+import org.bukkit.block.Block;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.ExperienceOrb;
+import org.bukkit.entity.BlockDisplay;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -46,7 +52,9 @@ import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.weather.ThunderChangeEvent;
 import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.generator.ChunkGenerator;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -54,6 +62,9 @@ import org.bukkit.potion.PotionEffect;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
+import org.bukkit.util.Transformation;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 import com.destroystokyo.paper.event.server.PaperServerListPingEvent;
 
 import java.io.File;
@@ -171,6 +182,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private NamespacedKey sideKey;
     private NamespacedKey eliminatedKey;
     private NamespacedKey lastGameLocKey;
+    private NamespacedKey lastLoserLocKey;
+    private NamespacedKey globeItemKey;
+    private NamespacedKey globeDisplayKey;
+    /** locations (as "world,x,y,z") of placed globe blocks - right-clicking one teleports to the loser island */
+    private final Set<String> globeBlockLocations = new HashSet<>();
+    /** the floating, slowly-rotating display entity for each placed globe - purely visual, sits over the real block */
+    private final List<BlockDisplay> globeDisplays = new ArrayList<>();
+    private float globeRotationAngle = 0f;
     private long graceMillis;
     private boolean eliminateOnDeath;
     private String eliminatedSuffix;
@@ -267,9 +286,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         sideKey = new NamespacedKey(this, "side");
         eliminatedKey = new NamespacedKey(this, "eliminated");
         lastGameLocKey = new NamespacedKey(this, "last_game_loc");
+        lastLoserLocKey = new NamespacedKey(this, "last_loser_loc");
+        globeItemKey = new NamespacedKey(this, "globe_item");
+        globeDisplayKey = new NamespacedKey(this, "globe_display");
+        globeBlockLocations.clear();
+        globeBlockLocations.addAll(state.getStringList("globe-blocks"));
 
         cleanupTeams();
         getServer().getPluginManager().registerEvents(this, this);
+        rebuildGlobeDisplays();
 
         LocalTime startupTime = LocalTime.now(LOWKEY_ZONE);
         hoursOpen = startupTime.getHour() >= HOURS_OPEN_FROM;
@@ -282,6 +307,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::updateTablist, 20L, 100L);
         getServer().getScheduler().runTaskTimer(this, this::tickServerHours, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::tickLoserAtmosphere, 20L, 20L);
+        getServer().getScheduler().runTaskTimer(this, this::tickGlobeRotation, 40L, 2L);
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
                 donationIntervalTicks, donationIntervalTicks);
@@ -601,6 +627,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         // every join goes straight to the lobby; wherever they were is remembered so /lowkey lobby teleport can send them back
         if (lobbySpawn != null) {
             captureLastGameLocation(player);
+            captureLastLoserLocation(player);
             getServer().getScheduler().runTask(this, () -> {
                 if (player.isOnline()) {
                     player.teleport(lobbySpawn);
@@ -755,6 +782,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 getServer().getScheduler().runTaskLater(this, () -> {
                     if (player.isOnline() && lobbySpawn != null) {
                         captureLastGameLocation(player);
+                        captureLastLoserLocation(player);
                         player.teleport(lobbySpawn);
                     }
                 }, 3600L);
@@ -804,6 +832,36 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private Location getLastGameLocation(Player player) {
         String value = player.getPersistentDataContainer().get(lastGameLocKey, PersistentDataType.STRING);
+        if (value == null) {
+            return null;
+        }
+        String[] parts = value.split(",");
+        World world = getServer().getWorld(parts[0]);
+        if (world == null || parts.length != 6) {
+            return null;
+        }
+        try {
+            return new Location(world, Double.parseDouble(parts[1]), Double.parseDouble(parts[2]),
+                    Double.parseDouble(parts[3]), Float.parseFloat(parts[4]), Float.parseFloat(parts[5]));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Same idea as captureLastGameLocation, but specifically for the verliezerseiland (used by the globe block). */
+    private void captureLastLoserLocation(Player player) {
+        World loserWorld = getLoserWorld();
+        if (loserWorld == null || !player.getWorld().equals(loserWorld)) {
+            return;
+        }
+        Location loc = player.getLocation();
+        String value = loc.getWorld().getName() + "," + loc.getX() + "," + loc.getY() + "," + loc.getZ()
+                + "," + loc.getYaw() + "," + loc.getPitch();
+        player.getPersistentDataContainer().set(lastLoserLocKey, PersistentDataType.STRING, value);
+    }
+
+    private Location getLastLoserLocation(Player player) {
+        String value = player.getPersistentDataContainer().get(lastLoserLocKey, PersistentDataType.STRING);
         if (value == null) {
             return null;
         }
@@ -1038,6 +1096,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveLocationTo(state, "loser-spawn", loserSpawn);
         state.set("loser-island-opened-at", loserIslandOpenedAt);
         state.set("loser-phantoms-enabled", loserPhantomsEnabled);
+        state.set("globe-blocks", new ArrayList<>(globeBlockLocations));
         try {
             getDataFolder().mkdirs();
             state.save(stateFile);
@@ -1214,17 +1273,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    private static void deleteRecursively(File file) {
+    /** Deletes a file/folder tree and returns whether everything was actually removed. */
+    private static boolean deleteRecursively(File file) {
         if (file == null || !file.exists()) {
-            return;
+            return true;
         }
+        boolean ok = true;
         File[] children = file.listFiles();
         if (children != null) {
             for (File child : children) {
-                deleteRecursively(child);
+                ok &= deleteRecursively(child);
             }
         }
-        file.delete();
+        return file.delete() && ok;
     }
 
     /** Locks the verliezerseiland into a permanent, grey storm: always raining, always thundering. */
@@ -1279,7 +1340,144 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    /** Submenu for the verliezerseiland, opened from the main menu's "Verliezerseiland..." button. */
+    // ------------------------------------------------------------------ globe block (mycelium, retextured)
+
+    private static String blockKey(Block block) {
+        return block.getWorld().getName() + "," + block.getX() + "," + block.getY() + "," + block.getZ();
+    }
+
+    private Block blockFromKey(String key) {
+        String[] parts = key.split(",");
+        if (parts.length != 4) {
+            return null;
+        }
+        World world = getServer().getWorld(parts[0]);
+        if (world == null) {
+            return null;
+        }
+        try {
+            return world.getBlockAt(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Spawns (or reuses an existing, already-loaded) floating display entity that rotates over a globe block. */
+    private BlockDisplay spawnOrFindGlobeDisplay(Block block) {
+        Location center = block.getLocation().add(0.5, 0.5, 0.5);
+        for (org.bukkit.entity.Entity nearby : block.getWorld().getNearbyEntities(center, 0.6, 0.6, 0.6)) {
+            if (nearby instanceof BlockDisplay
+                    && nearby.getPersistentDataContainer().has(globeDisplayKey, PersistentDataType.BOOLEAN)) {
+                return (BlockDisplay) nearby;
+            }
+        }
+        BlockDisplay display = block.getWorld().spawn(block.getLocation(), BlockDisplay.class, d -> {
+            d.setBlock(Material.MYCELIUM.createBlockData());
+            d.getPersistentDataContainer().set(globeDisplayKey, PersistentDataType.BOOLEAN, true);
+            d.setInterpolationDuration(2);
+            d.setInterpolationDelay(0);
+            // ever so slightly bigger than the real block, so it fully hides the static one underneath
+            // and rotation doesn't z-fight with it
+            d.setTransformation(new Transformation(new Vector3f(-0.501f, -0.501f, -0.501f),
+                    new Quaternionf(), new Vector3f(1.002f, 1.002f, 1.002f), new Quaternionf()));
+        });
+        return display;
+    }
+
+    /** Rebuilds the in-memory list of globe displays on startup, re-using entities that survived the restart. */
+    private void rebuildGlobeDisplays() {
+        globeDisplays.clear();
+        for (String key : globeBlockLocations) {
+            Block block = blockFromKey(key);
+            if (block == null || block.getType() != Material.MYCELIUM) {
+                continue;
+            }
+            globeDisplays.add(spawnOrFindGlobeDisplay(block));
+        }
+    }
+
+    /** Slowly spins every tracked globe display around its own Y-axis. Purely visual, runs every 2 ticks. */
+    private void tickGlobeRotation() {
+        if (globeDisplays.isEmpty()) {
+            return;
+        }
+        globeRotationAngle += 0.05f; // slow, steady spin
+        if (globeRotationAngle > (float) (Math.PI * 2)) {
+            globeRotationAngle -= (float) (Math.PI * 2);
+        }
+        globeDisplays.removeIf(display -> !display.isValid());
+        Quaternionf rotation = new Quaternionf().rotateY(globeRotationAngle);
+        for (BlockDisplay display : globeDisplays) {
+            display.setTransformation(new Transformation(new Vector3f(-0.501f, -0.501f, -0.501f),
+                    rotation, new Vector3f(1.002f, 1.002f, 1.002f), new Quaternionf()));
+        }
+    }
+
+    /** Gives an admin a placeable globe block: a tagged Mycelium item, retextured/animated in the resourcepack. */
+    private void giveGlobeItem(Player admin, int amount) {
+        ItemStack item = new ItemStack(Material.MYCELIUM, amount);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text("Wereldbol", NamedTextColor.AQUA));
+        meta.getPersistentDataContainer().set(globeItemKey, PersistentDataType.BOOLEAN, true);
+        item.setItemMeta(meta);
+        admin.getInventory().addItem(item);
+        admin.sendMessage(Component.text(amount + "x wereldbol gegeven.", NamedTextColor.GREEN));
+    }
+
+    /** Tracks a globe block the moment it's placed, so right-clicking it can be recognised later. */
+    @EventHandler
+    public void onGlobePlace(BlockPlaceEvent event) {
+        ItemStack item = event.getItemInHand();
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null || !meta.getPersistentDataContainer().has(globeItemKey, PersistentDataType.BOOLEAN)) {
+            return;
+        }
+        globeBlockLocations.add(blockKey(event.getBlockPlaced()));
+        saveState();
+        globeDisplays.add(spawnOrFindGlobeDisplay(event.getBlockPlaced()));
+    }
+
+    /** Stops tracking a globe block once it's broken, so a random future Mycelium block doesn't teleport people. */
+    @EventHandler
+    public void onGlobeBreak(BlockBreakEvent event) {
+        if (globeBlockLocations.remove(blockKey(event.getBlock()))) {
+            saveState();
+            Location center = event.getBlock().getLocation().add(0.5, 0.5, 0.5);
+            for (org.bukkit.entity.Entity nearby : event.getBlock().getWorld().getNearbyEntities(center, 0.6, 0.6, 0.6)) {
+                if (nearby instanceof BlockDisplay
+                        && nearby.getPersistentDataContainer().has(globeDisplayKey, PersistentDataType.BOOLEAN)) {
+                    nearby.remove();
+                }
+            }
+            globeDisplays.removeIf(display -> !display.isValid());
+        }
+    }
+
+    /** Right-clicking a placed globe block teleports you to your last known spot on the verliezerseiland. */
+    @EventHandler
+    public void onGlobeClick(PlayerInteractEvent event) {
+        if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getHand() != EquipmentSlot.HAND) {
+            return;
+        }
+        Block block = event.getClickedBlock();
+        if (block == null || block.getType() != Material.MYCELIUM || !globeBlockLocations.contains(blockKey(block))) {
+            return;
+        }
+        Player player = event.getPlayer();
+        World loserWorld = getLoserWorld();
+        if (loserWorld == null) {
+            player.sendMessage(Component.text("Er bestaat nog geen verliezerseiland.", NamedTextColor.RED));
+            return;
+        }
+        Location destination = getLastLoserLocation(player);
+        if (destination == null) {
+            destination = loserSpawn != null ? loserSpawn : loserWorld.getSpawnLocation();
+        }
+        player.teleport(destination);
+        player.sendMessage(Component.text("Je staat nu op het verliezerseiland.", NamedTextColor.GREEN));
+    }
+
+
     private void openLoserIslandMenu(Player admin) {
         boolean exists = getLoserWorld() != null;
         List<ActionButton> buttons = new ArrayList<>();
@@ -1306,6 +1504,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         buttons.add(button(Component.text("Phantoms uitzetten", NamedTextColor.GRAY),
                 "Phantoms spawnen niet meer op het verliezerseiland." + (!loserPhantomsEnabled ? " (al uit)" : ""),
                 150, () -> setLoserPhantomsEnabled(admin, false)));
+        buttons.add(button(Component.text("Geef wereldbol"),
+                "Geeft een plaatsbaar wereldbol-blok - rechtsklik erop tp't naar je laatste plek op het eiland.", 150,
+                () -> {
+                    giveGlobeItem(admin, 1);
+                    openLoserIslandMenu(admin);
+                }));
 
         ActionButton back = button(Component.text("Terug"), "Terug naar het menu.", 150, () -> openMenu(admin));
 
@@ -1322,10 +1526,27 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         loserIslandCreate(admin, null);
     }
 
+    /**
+     * Creates the verliezerseiland with the given seed (or a random one if null). If one already
+     * exists, it's fully deleted first and replaced - typing this command with an explicit seed is
+     * a strong enough signal of intent that we don't need the menu's separate confirm step.
+     */
     private void loserIslandCreate(Player admin, Long fixedSeed) {
         if (getLoserWorld() != null) {
+            if (!loserIslandDeleteRaw(admin)) {
+                admin.sendMessage(Component.text(
+                        "Kon het bestaande verliezerseiland niet verwijderen, dus geen nieuw eiland aangemaakt.",
+                        NamedTextColor.RED));
+                openLoserIslandMenu(admin);
+                return;
+            }
+        }
+        File dir = new File(getServer().getWorldContainer(), LOSER_WORLD_NAME);
+        if (dir.exists()) {
             admin.sendMessage(Component.text(
-                    "Er bestaat al een verliezerseiland. Verwijder die eerst.", NamedTextColor.RED));
+                    "De map van het oude verliezerseiland staat er nog (verwijderen is mislukt), dus "
+                            + "hij zou anders gewoon de oude seed hergebruiken. Verwijder de map handmatig en probeer opnieuw.",
+                    NamedTextColor.RED));
             openLoserIslandMenu(admin);
             return;
         }
@@ -1347,30 +1568,41 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         openLoserIslandMenu(admin);
     }
 
-    private void loserIslandDelete(Player admin) {
+    /** Unloads and deletes the verliezerseiland world from disk. Returns false if that didn't fully work. */
+    private boolean loserIslandDeleteRaw(Player admin) {
         World world = getLoserWorld();
         if (world == null) {
-            admin.sendMessage(Component.text("Er is geen verliezerseiland om te verwijderen.", NamedTextColor.RED));
-            openLoserIslandMenu(admin);
-            return;
+            return true;
         }
         // move anyone standing in it out first, or the world can't unload
         Location fallback = lobbySpawn != null ? lobbySpawn : getServer().getWorlds().get(0).getSpawnLocation();
         for (Player player : world.getPlayers()) {
             player.teleport(fallback);
         }
-        boolean unloaded = getServer().unloadWorld(world, false);
-        if (!unloaded) {
-            admin.sendMessage(Component.text("Kon de wereld niet unloaden.", NamedTextColor.RED));
-            openLoserIslandMenu(admin);
-            return;
+        if (!getServer().unloadWorld(world, false)) {
+            return false;
         }
-        deleteRecursively(new File(getServer().getWorldContainer(), LOSER_WORLD_NAME));
+        File dir = new File(getServer().getWorldContainer(), LOSER_WORLD_NAME);
+        deleteRecursively(dir);
         loserSpawn = null;
         loserIslandOpenedAt = 0L;
         loserPhantomsEnabled = false;
         saveState();
-        admin.sendMessage(Component.text("Verliezerseiland verwijderd.", NamedTextColor.GREEN));
+        return !dir.exists();
+    }
+
+    private void loserIslandDelete(Player admin) {
+        if (getLoserWorld() == null) {
+            admin.sendMessage(Component.text("Er is geen verliezerseiland om te verwijderen.", NamedTextColor.RED));
+            openLoserIslandMenu(admin);
+            return;
+        }
+        if (loserIslandDeleteRaw(admin)) {
+            admin.sendMessage(Component.text("Verliezerseiland verwijderd.", NamedTextColor.GREEN));
+        } else {
+            admin.sendMessage(Component.text(
+                    "Kon de wereld niet volledig verwijderen (map staat er mogelijk nog deels).", NamedTextColor.RED));
+        }
         openLoserIslandMenu(admin);
     }
 
@@ -1441,6 +1673,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * or the game-spawn if they've never been in the game) or to the verliezerseiland-spawn.
      */
     private void teleportPlayer(Player admin, Player target, boolean toLoser) {
+        captureLastLoserLocation(target);
         Location destination;
         if (toLoser) {
             destination = loserSpawn;
@@ -1669,6 +1902,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             loserIslandCreate((Player) sender, seed);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("globe")) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage(Component.text("Dit commando werkt alleen als speler.", NamedTextColor.RED));
+                return true;
+            }
+            int amount = 1;
+            if (args.length == 3 && args[1].equalsIgnoreCase("give")) {
+                try {
+                    amount = Math.max(1, Integer.parseInt(args[2]));
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(Component.text("Geef een geldig aantal.", NamedTextColor.RED));
+                    return true;
+                }
+            }
+            giveGlobeItem((Player) sender, amount);
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("server")) {
             if (args.length == 2 && args[1].equalsIgnoreCase("close")) {
                 if (sender instanceof Player) {
@@ -1731,7 +1981,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>  |  /lowkey island create <seed>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey lobby <...>  |  /lowkey island create <seed>  |  /lowkey globe give [aantal]  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -2008,6 +2258,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("revive");
             options.add("donate");
             options.add("island");
+            options.add("globe");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
             if (sub.equals("grace") || sub.equals("team") || sub.equals("revive") || sub.equals("crew")) {
