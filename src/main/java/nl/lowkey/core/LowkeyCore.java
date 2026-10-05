@@ -602,6 +602,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (lobbySpawn != null) {
             // everybody starts in the lobby
             getServer().getScheduler().runTask(this, () -> sendToLobby(player));
+        } else if (playerFile(player.getUniqueId()).exists()) {
+            // the lobby was deleted while this player was away: give the real inventory back
+            getServer().getScheduler().runTask(this, () -> {
+                if (!player.isOnline()) {
+                    return;
+                }
+                restoreInventory(player);
+                if (!isEliminated(player) && player.getGameMode() == GameMode.ADVENTURE) {
+                    player.setGameMode(GameMode.SURVIVAL);
+                }
+            });
         }
     }
 
@@ -1179,6 +1190,86 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 NamedTextColor.GREEN));
     }
 
+    private boolean lobbyExists() {
+        return lobbyCreated || lobbyWorld() != null
+                || new File(getServer().getWorldContainer(), LOBBY_WORLD).isDirectory();
+    }
+
+    private static boolean deleteRecursively(File file) {
+        boolean ok = true;
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                ok &= deleteRecursively(child);
+            }
+        }
+        return file.delete() && ok;
+    }
+
+    /** Someone is in a lobby that is about to be deleted: back to the game world with their own things. */
+    private void leaveDeletedLobby(Player player) {
+        YamlConfiguration data = loadPlayerData(player.getUniqueId());
+        Location dest = readLoc(data, "last");
+        if (dest == null || dest.getWorld() == null || dest.getWorld().getName().equals(LOBBY_WORLD)) {
+            dest = gameWorld().getSpawnLocation();
+        }
+        boolean eliminated = isEliminated(player);
+        restoreInventory(player);
+        if (eliminated) {
+            player.setGameMode(GameMode.SPECTATOR);
+        } else if (!isBypass(player) && player.getGameMode() == GameMode.ADVENTURE) {
+            player.setGameMode(GameMode.SURVIVAL);
+        }
+        player.setFallDistance(0f);
+        player.teleport(dest);
+    }
+
+    /** Wipes the lobby world completely (also an old leftover folder), so /lowkey lobby create starts clean. */
+    private void deleteLobby(CommandSender sender) {
+        if (!lobbyExists()) {
+            sender.sendMessage(Component.text("Er is geen lobby om te verwijderen.", NamedTextColor.RED));
+            return;
+        }
+        World world = lobbyWorld();
+        File folder = world != null ? world.getWorldFolder() : new File(getServer().getWorldContainer(), LOBBY_WORLD);
+        if (world != null) {
+            for (Player player : new ArrayList<>(world.getPlayers())) {
+                leaveDeletedLobby(player);
+            }
+            if (!Bukkit.unloadWorld(world, false)) {
+                sender.sendMessage(Component.text(
+                        "De lobby wereld kon niet worden afgesloten, er staat nog iemand in. Probeer het opnieuw.",
+                        NamedTextColor.RED));
+                return;
+            }
+        }
+        boolean wiped = !folder.exists() || deleteRecursively(folder);
+        lobbyCreated = false;
+        lobbySpawn = null;
+        saveState();
+        if (wiped) {
+            sender.sendMessage(Component.text(
+                    "De lobby is verwijderd. Maak een nieuwe met /lowkey lobby create.", NamedTextColor.GREEN));
+        } else {
+            sender.sendMessage(Component.text(
+                    "De lobby is losgekoppeld, maar de map '" + folder.getName()
+                            + "' kon niet helemaal gewist worden. Verwijder die handmatig.", NamedTextColor.YELLOW));
+        }
+    }
+
+    private void openLobbyDeleteConfirm(Player admin, Runnable back) {
+        confirm(admin,
+                "Lobby verwijderen?",
+                "De hele lobby wereld wordt gewist, met alles wat erin staat.",
+                "Spelers in de lobby gaan terug naar de gamewereld.",
+                Component.text("Ja, verwijderen", NamedTextColor.RED),
+                () -> {
+                    deleteLobby(admin);
+                    back.run();
+                },
+                back);
+    }
+
     private void teleportAdminToLobby(Player admin) {
         if (lobbySpawn == null || lobbySpawn.getWorld() == null) {
             admin.sendMessage(Component.text("Maak de lobby eerst aan met /lowkey lobby create.", NamedTextColor.RED));
@@ -1693,7 +1784,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey donate : stuurt meteen een willekeurig donatiebericht (voor testen)
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
-     * /lowkey lobby <create|tp|setspawn> : maakt de lege lobby wereld, gaat erheen, of zet het lobby spawnpunt
+     * /lowkey lobby <create|tp|setspawn|delete> : maakt de lege lobby wereld, gaat erheen, zet het lobby spawnpunt of wist de lobby
      * /lowkey setspawn <noord|zuid> : zet het spawnpunt van een team op jouw positie
      * /lowkey main : stuurt jou (admin) naar de gamewereld, ook als de server nog niet gelanceerd is
      * /lowkey say <bericht> : stuurt een bericht met de LOWKEY badge naar iedereen
@@ -1843,6 +1934,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 createLobby(sender);
                 return true;
             }
+            if (sub.equals("delete")) {
+                if (args.length == 3 && args[2].equalsIgnoreCase("confirm")) {
+                    deleteLobby(sender);
+                } else if (sender instanceof Player) {
+                    final Player admin = (Player) sender;
+                    openLobbyDeleteConfirm(admin, () -> openWorldMenu(admin));
+                } else {
+                    sender.sendMessage(Component.text("Gebruik in de console: /lowkey lobby delete confirm",
+                            NamedTextColor.GRAY));
+                }
+                return true;
+            }
             if (sub.equals("tp") || sub.equals("setspawn")) {
                 if (!(sender instanceof Player)) {
                     sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
@@ -1855,7 +1958,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 return true;
             }
-            sender.sendMessage(Component.text("Gebruik: /lowkey lobby <create|tp|setspawn>", NamedTextColor.GRAY));
+            sender.sendMessage(Component.text("Gebruik: /lowkey lobby <create|tp|setspawn|delete>", NamedTextColor.GRAY));
             return true;
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("setspawn")) {
@@ -1903,7 +2006,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -2138,6 +2241,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         openWorldMenu(admin);
                     }));
         }
+        if (lobbyExists()) {
+            buttons.add(button(iconLabel(M_LOBBY, "Lobby verwijderen", NamedTextColor.RED),
+                    "Wist de hele lobby wereld, ook oude resten.", 150,
+                    () -> openLobbyDeleteConfirm(admin, () -> openWorldMenu(admin))));
+        }
 
         buttons.add(button(iconLabel(M_SPAWN_N, "Spawn Noord zetten", NamedTextColor.RED),
                 "Zet het spawnpunt van Noord op jouw plek.", 150, () -> {
@@ -2159,7 +2267,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Grenzen", bordersDropped ? "open" : "dicht",
                         bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
-                statusLine("Lobby", lobbyCreated ? "aangemaakt" : "nog niet",
+                statusLine("Lobby", lobbyCreated ? "aangemaakt" : (lobbyExists() ? "oude rest" : "nog niet"),
                         lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
                 statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
                         spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
@@ -2404,6 +2512,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("create");
                 options.add("tp");
                 options.add("setspawn");
+                options.add("delete");
             } else if (sub.equals("setspawn")) {
                 options.add("noord");
                 options.add("zuid");
@@ -2425,6 +2534,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             } else if (sub.equals("crew")) {
                 options.add("aan");
                 options.add("uit");
+            } else if (sub.equals("lobby") && args[1].equalsIgnoreCase("delete")) {
+                options.add("confirm");
             }
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("say")) {
