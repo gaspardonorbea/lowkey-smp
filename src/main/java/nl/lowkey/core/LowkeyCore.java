@@ -49,12 +49,14 @@ import org.bukkit.event.hanging.HangingBreakByEntityEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.generator.ChunkGenerator;
@@ -206,6 +208,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private static final String LOBBY_WORLD = "lowkey_lobby";
     /** false until /lowkey launch: until then the lobby item only says the server is not open yet */
     private boolean launched;
+    /** false while the main world is closed: people can still hang out in the lobby */
+    private boolean mainOpen = true;
     private boolean lobbyCreated;
     private Location lobbySpawn;
     private Location spawnNoord;
@@ -262,6 +266,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         eliminatedKey = new NamespacedKey(this, "eliminated");
         lobbyItemKey = new NamespacedKey(this, "lobby_item");
         launched = state.getBoolean("launched", false);
+        mainOpen = state.getBoolean("main-open", true);
         lobbyCreated = state.getBoolean("lobby-created", false);
         if (lobbyCreated) {
             loadLobbyWorld();
@@ -490,7 +495,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (isCrew(player)) {
             parts.add(CREW_ICON);
         }
-        if (graceRemaining(player) > 0L) {
+        if (graceRemaining(player) > 0L && !inLobby(player)) { // no grace badge in the lobby
             parts.add(GRACE_ICON);
         }
         if (side.icon != null) {
@@ -662,6 +667,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     .append(Component.text(": ", NamedTextColor.GRAY))
                     .append(message);
         }));
+
+        // in the lobby everybody can talk to everybody who is in the lobby too (staff sees it as well)
+        if (inLobby(sender)) {
+            event.viewers().removeIf(viewer -> viewer instanceof Player && !viewer.equals(sender)
+                    && !inLobby((Player) viewer) && !((Player) viewer).hasPermission("lowkey.admin"));
+            return;
+        }
 
         // Noord/Zuid chat is separate until the borders drop
         boolean global = bordersDropped || side == Side.NONE;
@@ -956,64 +968,90 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ MOTD (fully automatic, no manual edits)
 
-    // approximate pixel widths of the default Minecraft font, used to centre the MOTD lines
-    private static final Map<Character, Integer> MOTD_CHAR_WIDTH = new HashMap<>();
+    /**
+     * Glyph widths of the default Minecraft font in GUI pixels (one pixel of spacing is added when
+     * measuring, and bold adds one more per character). Every character not listed is 5 wide.
+     */
+    private static final Map<Character, Integer> MOTD_GLYPH_WIDTH = new HashMap<>();
     static {
-        String narrow2 = "il.,:;'!|";
-        String narrow3 = "I[]t";
-        String wide7 = "@~mMW";
-        for (char c : narrow2.toCharArray()) MOTD_CHAR_WIDTH.put(c, 2);
-        for (char c : narrow3.toCharArray()) MOTD_CHAR_WIDTH.put(c, 3);
-        for (char c : wide7.toCharArray()) MOTD_CHAR_WIDTH.put(c, 7);
-        for (char c : "0123456789".toCharArray()) MOTD_CHAR_WIDTH.put(c, 6);
-        for (char c : "ABCDEFGHJKLNOPQRSTUVXYZ".toCharArray()) MOTD_CHAR_WIDTH.put(c, 6);
-        for (char c : "abcdeghknopqsuvxyz".toCharArray()) MOTD_CHAR_WIDTH.put(c, 6);
-        MOTD_CHAR_WIDTH.put(' ', 4);
-        MOTD_CHAR_WIDTH.put('-', 6);
-        MOTD_CHAR_WIDTH.put('!', 2);
+        for (char c : "i!:;|.,'l".toCharArray()) MOTD_GLYPH_WIDTH.put(c, 1);
+        MOTD_GLYPH_WIDTH.put('`', 2);
+        for (char c : "I[]\"".toCharArray()) MOTD_GLYPH_WIDTH.put(c, 3);
+        for (char c : "ftk(){}<>".toCharArray()) MOTD_GLYPH_WIDTH.put(c, 4);
+        MOTD_GLYPH_WIDTH.put('@', 6);
+        MOTD_GLYPH_WIDTH.put('~', 6);
+        MOTD_GLYPH_WIDTH.put(' ', 3);
     }
-    // the box the client draws the MOTD in is roughly this many pixels wide at default font size
-    private static final int MOTD_LINE_WIDTH = 200;
 
-    private static int motdTextWidth(String plain) {
-        int total = 0;
-        for (char c : plain.toCharArray()) {
-            total += MOTD_CHAR_WIDTH.getOrDefault(c, 6) + 1;
+    /**
+     * The width the client gives the MOTD in the server list: the 305 pixel wide row minus the
+     * 32 pixel icon and 2 pixels of margin. Change only this number if the centre ever needs a nudge.
+     */
+    private static final int MOTD_LINE_WIDTH = 271;
+
+    /** One piece of an MOTD line with its own colour and weight. */
+    private static final class MotdPart {
+        final String text;
+        final TextColor color;
+        final boolean bold;
+
+        MotdPart(String text, TextColor color, boolean bold) {
+            this.text = text;
+            this.color = color;
+            this.bold = bold;
         }
-        return total == 0 ? 0 : total - 1;
     }
 
-    /** Pads a line with leading spaces so it renders roughly centred in the server list. */
-    private static Component centerMotdLine(Component styled, String plainForWidth) {
-        int width = motdTextWidth(plainForWidth);
-        int padPixels = Math.max(0, (MOTD_LINE_WIDTH - width) / 2);
-        int spaces = padPixels / MOTD_CHAR_WIDTH.get(' ');
-        return spaces == 0 ? styled : Component.text(" ".repeat(spaces)).append(styled);
+    private static int motdAdvance(char c, boolean bold) {
+        return MOTD_GLYPH_WIDTH.getOrDefault(c, 5) + 1 + (bold ? 1 : 0);
+    }
+
+    /**
+     * Builds one MOTD line, centred to the pixel. A normal space is 4 pixels and a bold space 5, so a
+     * mix of both lands exactly on the wanted offset.
+     */
+    private static Component centerMotdLine(MotdPart... parts) {
+        int total = 0;
+        for (MotdPart part : parts) {
+            for (char c : part.text.toCharArray()) {
+                total += motdAdvance(c, part.bold);
+            }
+        }
+        int visible = Math.max(0, total - 1); // the last character has no spacing after it
+        int pad = Math.max(0, (MOTD_LINE_WIDTH - visible) / 2);
+        int spaces = pad / 4;
+        int boldSpaces = Math.min(spaces, pad - spaces * 4);
+
+        TextComponent.Builder line = Component.text();
+        if (spaces > boldSpaces) {
+            line.append(Component.text(" ".repeat(spaces - boldSpaces)).decoration(TextDecoration.BOLD, false));
+        }
+        if (boldSpaces > 0) {
+            line.append(Component.text(" ".repeat(boldSpaces)).decoration(TextDecoration.BOLD, true));
+        }
+        for (MotdPart part : parts) {
+            line.append(Component.text(part.text, part.color).decoration(TextDecoration.BOLD, part.bold));
+        }
+        return line.build();
     }
 
     @EventHandler
     public void onServerListPing(PaperServerListPingEvent event) {
-        String line1Text = "LowkeySMP - Lowkey Peak";
         Component line1 = centerMotdLine(
-                Component.text("LowkeySMP", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD)
-                        .append(Component.text(" - Lowkey Peak", NamedTextColor.GRAY)),
-                line1Text);
+                new MotdPart("LowkeySMP", NamedTextColor.LIGHT_PURPLE, true),
+                new MotdPart(" - Lowkey Peak", NamedTextColor.GRAY, true));
 
-        String line2Text;
-        Component line2Styled;
+        Component line2;
         if (!hoursOpen) {
-            line2Text = "Gesloten - open om 09:00";
-            line2Styled = Component.text(line2Text, NamedTextColor.RED);
+            line2 = centerMotdLine(new MotdPart("Gesloten - open om 09:00", NamedTextColor.RED, false));
         } else if (serverClosed) {
-            line2Text = "Tijdelijk gesloten voor onderhoud";
-            line2Styled = Component.text(line2Text, NamedTextColor.RED);
+            line2 = centerMotdLine(new MotdPart("Tijdelijk gesloten voor onderhoud", NamedTextColor.RED, false));
         } else {
             int online = getServer().getOnlinePlayers().size();
-            line2Text = "Open! " + online + " online";
-            line2Styled = Component.text("Open! ", NamedTextColor.GREEN)
-                    .append(Component.text(online + " online", NamedTextColor.WHITE));
+            line2 = centerMotdLine(
+                    new MotdPart("Open! ", NamedTextColor.GREEN, false),
+                    new MotdPart(online + " online", NamedTextColor.WHITE, false));
         }
-        Component line2 = centerMotdLine(line2Styled, line2Text);
 
         event.motd(line1.append(Component.newline()).append(line2));
     }
@@ -1026,6 +1064,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         state.set("server-closed", serverClosed);
         state.set("borders-dropped", bordersDropped);
         state.set("launched", launched);
+        state.set("main-open", mainOpen);
         state.set("lobby-created", lobbyCreated);
         writeLoc(state, "lobby-spawn", lobbySpawn);
         writeLoc(state, "spawn-noord", spawnNoord);
@@ -1525,6 +1564,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             player.sendActionBar(Component.text("De server is nog niet open!", NamedTextColor.RED));
             return;
         }
+        if (!mainOpen) {
+            player.sendActionBar(Component.text("De main wereld is momenteel gesloten!", NamedTextColor.RED));
+            return;
+        }
         if (getSide(player) == Side.NONE) {
             player.sendMessage(Component.text()
                     .append(glyph(LOWKEY_BADGE))
@@ -1548,7 +1591,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private void teleportToMain(Player player) {
         if (!player.isOnline() || !inLobby(player) || isEliminated(player) || !launched
-                || getSide(player) == Side.NONE) {
+                || !mainOpen || getSide(player) == Side.NONE) {
             return;
         }
         enterGame(player, false, false);
@@ -1578,6 +1621,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         launched = true;
+        mainOpen = true;
         saveState();
 
         Title title = Title.title(
@@ -1621,6 +1665,86 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         admin.sendMessage(Component.text(
                 "De launch is teruggezet. Spelers die al in de gamewereld zijn blijven daar, "
                         + "wie in de lobby staat kan er pas weer uit na een nieuwe launch.", NamedTextColor.GREEN));
+    }
+
+    /** Closes the main world: everybody except admins goes to the lobby until it is opened again. */
+    private void closeMainWorld(CommandSender sender) {
+        if (!mainOpen) {
+            sender.sendMessage(Component.text("De main wereld is al gesloten.", NamedTextColor.RED));
+            return;
+        }
+        if (lobbySpawn == null || lobbySpawn.getWorld() == null) {
+            sender.sendMessage(Component.text(
+                    "Maak eerst een lobby met /lowkey lobby create, anders kunnen spelers nergens heen.",
+                    NamedTextColor.RED));
+            return;
+        }
+        mainOpen = false;
+        saveState();
+        int moved = 0;
+        for (Player player : new ArrayList<>(getServer().getOnlinePlayers())) {
+            if (inLobby(player) || player.hasPermission("lowkey.admin")) {
+                continue;
+            }
+            YamlConfiguration data = loadPlayerData(player.getUniqueId());
+            data.set("entered", true); // so the last position in the main world is remembered
+            savePlayerData(player.getUniqueId(), data);
+            sendToLobby(player);
+            player.sendMessage(Component.text()
+                    .append(glyph(LOWKEY_BADGE))
+                    .append(Component.space())
+                    .append(Component.text("De main wereld is tijdelijk gesloten. Je kunt chillen in de lobby.",
+                            NamedTextColor.WHITE))
+                    .build());
+            moved++;
+        }
+        sender.sendMessage(Component.text("De main wereld is gesloten. " + moved
+                + " spelers zijn naar de lobby gestuurd (admins blijven waar ze zijn).", NamedTextColor.GREEN));
+    }
+
+    /** Opens the main world again. Nobody is moved: players go back themselves, to their last position. */
+    private void openMainWorld(CommandSender sender) {
+        if (mainOpen) {
+            sender.sendMessage(Component.text("De main wereld is al open.", NamedTextColor.RED));
+            return;
+        }
+        mainOpen = true;
+        saveState();
+        if (launched) {
+            for (Player player : getServer().getOnlinePlayers()) {
+                if (inLobby(player) && !isEliminated(player)) {
+                    player.sendMessage(Component.text()
+                            .append(glyph(LOWKEY_BADGE))
+                            .append(Component.space())
+                            .append(Component.text("De main wereld is weer open! Gebruik het LowkeySMP item om terug te gaan.",
+                                    NamedTextColor.WHITE))
+                            .build());
+                }
+            }
+        }
+        sender.sendMessage(Component.text(
+                "De main wereld is weer open. Niemand is verplaatst, spelers gaan zelf terug met hun item."
+                        + (launched ? "" : " (De server is nog niet gelanceerd, het item blijft dus dicht.)"),
+                NamedTextColor.GREEN));
+    }
+
+    /** Grace badge shows in the main world only, so the tags are rebuilt whenever someone changes world. */
+    @EventHandler
+    public void onWorldChange(PlayerChangedWorldEvent event) {
+        refreshTags(event.getPlayer());
+    }
+
+    /** Without a bed or anchor you respawn at the spawn point of your team (grace deaths only). */
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent event) {
+        Player player = event.getPlayer();
+        if (event.isBedSpawn() || event.isAnchorSpawn() || isEliminated(player)) {
+            return;
+        }
+        Location spawn = teamSpawn(getSide(player));
+        if (spawn != null && spawn.getWorld() != null) {
+            event.setRespawnLocation(spawn);
+        }
     }
 
     // ---- custom broadcast with the LOWKEY badge
@@ -1784,6 +1908,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey donate : stuurt meteen een willekeurig donatiebericht (voor testen)
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
+     * /lowkey mainworld <open|close> : sluit de main wereld (iedereen behalve admins naar de lobby) of opent hem weer (niemand wordt verplaatst)
      * /lowkey lobby <create|tp|setspawn|delete> : maakt de lege lobby wereld, gaat erheen, zet het lobby spawnpunt of wist de lobby
      * /lowkey setspawn <noord|zuid> : zet het spawnpunt van een team op jouw positie
      * /lowkey main : stuurt jou (admin) naar de gamewereld, ook als de server nog niet gelanceerd is
@@ -1978,6 +2103,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             enterGame((Player) sender, false, true);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("mainworld")) {
+            String choice = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+            if (choice.equals("close")) {
+                closeMainWorld(sender);
+            } else if (choice.equals("open")) {
+                openMainWorld(sender);
+            } else {
+                sender.sendMessage(Component.text("De main wereld is nu " + (mainOpen ? "open" : "gesloten")
+                        + ". Gebruik: /lowkey mainworld <open|close>", NamedTextColor.GRAY));
+            }
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("launch")) {
             if (args.length == 2 && args[1].equalsIgnoreCase("reset")) {
                 resetLaunch(sender);
@@ -2006,7 +2143,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -2101,6 +2238,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         serverClosed ? NamedTextColor.RED : NamedTextColor.GREEN),
                 statusLine("Launch", launched ? "gelanceerd" : "nog niet",
                         launched ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
+                statusLine("Main wereld", mainOpen ? "open" : "gesloten",
+                        mainOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Nether", netherOpen ? "open" : "dicht",
                         netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Grenzen", bordersDropped ? "open" : "dicht",
@@ -2136,6 +2275,26 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             () -> openServerMenu(admin))));
         }
 
+        if (mainOpen) {
+            buttons.add(button(iconLabel(M_MAIN, "Main wereld sluiten", NamedTextColor.RED),
+                    "Iedereen behalve admins gaat naar de lobby. Handig om iets aan te passen.", 150, () -> confirm(admin,
+                            "Main wereld sluiten?",
+                            "Iedereen behalve admins gaat naar de lobby en kan er niet uit tot je de main wereld opent.",
+                            "Spelers houden hun spullen en komen later terug op hun laatste plek.",
+                            Component.text("Ja, sluiten", NamedTextColor.RED),
+                            () -> {
+                                closeMainWorld(admin);
+                                openServerMenu(admin);
+                            },
+                            () -> openServerMenu(admin))));
+        } else {
+            buttons.add(button(iconLabel(M_MAIN, "Main wereld openen", NamedTextColor.GREEN),
+                    "Spelers in de lobby kunnen er weer in met hun item. Niemand wordt verplaatst.", 150, () -> {
+                        openMainWorld(admin);
+                        openServerMenu(admin);
+                    }));
+        }
+
         if (serverClosed) {
             buttons.add(button(iconLabel(M_SERVER, "Server openen", NamedTextColor.GREEN),
                     "Maak de server weer open voor iedereen.", 150, () -> {
@@ -2168,7 +2327,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 statusLine("Server", serverClosed ? "gesloten" : "open",
                         serverClosed ? NamedTextColor.RED : NamedTextColor.GREEN),
                 statusLine("Launch", launched ? "gelanceerd" : "nog niet",
-                        launched ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
+                        launched ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
+                statusLine("Main wereld", mainOpen ? "open" : "gesloten",
+                        mainOpen ? NamedTextColor.GREEN : NamedTextColor.RED));
         showMenu(admin, "Server", body, buttons, backButton("Terug naar het hoofdmenu.", back));
     }
 
@@ -2498,6 +2659,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("lobby");
             options.add("setspawn");
             options.add("main");
+            options.add("mainworld");
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
@@ -2505,7 +2667,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 for (Player player : getServer().getOnlinePlayers()) {
                     options.add(player.getName());
                 }
-            } else if (sub.equals("nether") || sub.equals("server") || sub.equals("border")) {
+            } else if (sub.equals("nether") || sub.equals("server") || sub.equals("border") || sub.equals("mainworld")) {
                 options.add("open");
                 options.add("close");
             } else if (sub.equals("lobby")) {
