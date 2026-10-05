@@ -7,7 +7,7 @@ authors: [LowkeySMP]
 commands:
   lowkey:
     description: LowkeySMP admin commando
-    usage: /lowkey grace <speler> <minuten> | /lowkey team <speler> <noord|zuid|geen> | /lowkey crew <speler> <aan|uit> | /lowkey nether <open|close> | /lowkey server <open|close> | /lowkey border <open|close> | /lowkey revive <speler> | /lowkey donate | /lowkey launch [reset] | /lowkey lobby <create|tp|setspawn> | /lowkey setspawn <noord|zuid> | /lowkey main | /lowkey say <bericht>
+    usage: /lowkey grace <speler> <minuten> | /lowkey team <speler> <noord|zuid|geen> | /lowkey crew <speler> <aan|uit> | /lowkey nether <open|close> | /lowkey server <open|close> | /lowkey border <open|close> | /lowkey revive <speler> | /lowkey donate | /lowkey launch [reset] | /lowkey lobby <create|tp|setspawn|delete> | /lowkey setspawn <noord|zuid> | /lowkey main | /lowkey say <bericht>
 permissions:
   lowkey.admin:
     description: Toegang tot /lowkey
