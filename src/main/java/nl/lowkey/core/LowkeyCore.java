@@ -33,8 +33,11 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Display;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.TextDisplay;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
@@ -74,9 +77,18 @@ import com.destroystokyo.paper.event.server.PaperServerListPingEvent;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.time.ZoneId;
 import java.time.Duration;
+import org.bukkit.util.Transformation;
+import org.joml.AxisAngle4f;
+import org.joml.Vector3f;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -135,6 +147,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private static final String M_SAY = "\uE04F";
     private static final String M_DONATE = "\uE050";
     private static final String M_BACK = "\uE051";
+    private static final String M_COUNTDOWN = "\uE052";
 
     /** -1 px space: pieces of a wide picture are joined with this so there is no seam */
     private static final String SPACER = "\uE010";
@@ -274,6 +287,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         lobbySpawn = readLoc(state, "lobby-spawn");
         spawnNoord = readLoc(state, "spawn-noord");
         spawnZuid = readLoc(state, "spawn-zuid");
+        try {
+            countdownTarget = LocalDateTime.parse(state.getString("countdown-target", DEFAULT_COUNTDOWN.toString()));
+        } catch (DateTimeParseException e) {
+            countdownTarget = DEFAULT_COUNTDOWN;
+        }
+        countdownScale = state.getDouble("countdown-scale", 6.0);
+        countdownLoc = readLoc(state, "countdown-loc");
 
         cleanupTeams();
         getServer().getPluginManager().registerEvents(this, this);
@@ -289,6 +309,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::updateTablist, 20L, 100L);
         getServer().getScheduler().runTaskTimer(this, this::tickServerHours, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::tickLobby, 40L, 200L);
+        getServer().getScheduler().runTaskTimer(this, this::tickCountdown, 40L, 20L);
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
                 donationIntervalTicks, donationIntervalTicks);
@@ -296,6 +317,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        removeCountdownEntity();
         for (Player player : getServer().getOnlinePlayers()) {
             persist(player);
         }
@@ -1064,6 +1086,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         state.set("server-closed", serverClosed);
         state.set("borders-dropped", bordersDropped);
         state.set("launched", launched);
+        state.set("countdown-target", countdownTarget.toString());
+        state.set("countdown-scale", countdownScale);
+        writeLoc(state, "countdown-loc", countdownLoc);
         state.set("main-open", mainOpen);
         state.set("lobby-created", lobbyCreated);
         writeLoc(state, "lobby-spawn", lobbySpawn);
@@ -1268,6 +1293,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (!lobbyExists()) {
             sender.sendMessage(Component.text("Er is geen lobby om te verwijderen.", NamedTextColor.RED));
             return;
+        }
+        if (countdownLoc != null && countdownLoc.getWorld() != null
+                && countdownLoc.getWorld().getName().equals(LOBBY_WORLD)) {
+            removeCountdownEntity();
+            countdownLoc = null;
         }
         World world = lobbyWorld();
         File folder = world != null ? world.getWorldFolder() : new File(getServer().getWorldContainer(), LOBBY_WORLD);
@@ -1747,6 +1777,266 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    // ------------------------------------------------------------------ countdown hologram
+
+    private static final LocalDateTime DEFAULT_COUNTDOWN = LocalDateTime.of(2026, 11, 7, 14, 0);
+    private static final DateTimeFormatter COUNTDOWN_FORMAT =
+            DateTimeFormatter.ofPattern("d MMMM yyyy 'om' HH:mm", Locale.forLanguageTag("nl-BE"));
+
+    /** the moment the countdown runs to (Belgian time) */
+    private LocalDateTime countdownTarget = DEFAULT_COUNTDOWN;
+    /** 1 = normal text size; the logo is about 0.9 blocks tall at scale 1 */
+    private double countdownScale = 6.0;
+    private Location countdownLoc;
+    private UUID countdownId;
+
+    private TextDisplay countdownDisplay() {
+        if (countdownId == null) {
+            return null;
+        }
+        Entity entity = Bukkit.getEntity(countdownId);
+        return entity instanceof TextDisplay && entity.isValid() ? (TextDisplay) entity : null;
+    }
+
+    private Transformation countdownTransformation() {
+        float scale = (float) countdownScale;
+        return new Transformation(new Vector3f(), new AxisAngle4f(), new Vector3f(scale, scale, scale), new AxisAngle4f());
+    }
+
+    private static void countdownPart(TextComponent.Builder builder, String number, String unit) {
+        builder.append(Component.text(number, NamedTextColor.WHITE, TextDecoration.BOLD));
+        builder.append(Component.text(unit, NamedTextColor.GRAY));
+    }
+
+    /** The logo (36 px = 4 lines tall), then the time left on the line below it. */
+    private Component countdownComponent() {
+        long secs = Duration.between(ZonedDateTime.now(LOWKEY_ZONE), countdownTarget.atZone(LOWKEY_ZONE)).getSeconds();
+        Component timer;
+        if (secs <= 0L) {
+            timer = Component.text("Gaat zo beginnen!", NamedTextColor.GREEN, TextDecoration.BOLD);
+        } else {
+            long days = secs / 86_400L;
+            long hours = (secs % 86_400L) / 3_600L;
+            long minutes = (secs % 3_600L) / 60L;
+            long seconds = secs % 60L;
+            TextComponent.Builder builder = Component.text();
+            if (days > 0L) {
+                countdownPart(builder, String.valueOf(days), "d ");
+            }
+            if (days > 0L || hours > 0L) {
+                countdownPart(builder, String.format(Locale.ROOT, "%02d", hours), "u ");
+            }
+            if (days > 0L || hours > 0L || minutes > 0L) {
+                countdownPart(builder, String.format(Locale.ROOT, "%02d", minutes), "m ");
+            }
+            countdownPart(builder, String.format(Locale.ROOT, "%02d", seconds), "s");
+            timer = builder.build();
+        }
+        return Component.text()
+                .append(glyph(LOGO))
+                .append(Component.newline()).append(Component.text(" "))
+                .append(Component.newline()).append(Component.text(" "))
+                .append(Component.newline()).append(Component.text(" "))
+                .append(Component.newline())
+                .append(timer)
+                .build();
+    }
+
+    private TextDisplay spawnCountdown() {
+        final Location where = countdownLoc;
+        World world = where.getWorld();
+        TextDisplay display = world.spawn(where, TextDisplay.class, td -> {
+            td.setPersistent(false); // never saved: the plugin puts it back after a restart
+            td.setBillboard(Display.Billboard.CENTER);
+            td.setAlignment(TextDisplay.TextAlignment.CENTER);
+            td.setLineWidth(10_000);
+            td.setBackgroundColor(Color.fromARGB(0, 0, 0, 0));
+            td.setShadowed(false);
+            td.setSeeThrough(false);
+            td.setBrightness(new Display.Brightness(15, 15));
+            td.setViewRange(2.5f);
+            td.setTransformation(countdownTransformation());
+            td.text(countdownComponent());
+        });
+        countdownId = display.getUniqueId();
+        // keep the chunk loaded so the hologram never disappears when nobody is near
+        world.addPluginChunkTicket(where.getBlockX() >> 4, where.getBlockZ() >> 4, this);
+        return display;
+    }
+
+    private void removeCountdownEntity() {
+        if (countdownId == null) {
+            return;
+        }
+        TextDisplay display = countdownDisplay();
+        if (display != null) {
+            display.remove();
+        }
+        countdownId = null;
+        if (countdownLoc != null && countdownLoc.getWorld() != null) {
+            countdownLoc.getWorld().removePluginChunkTicket(
+                    countdownLoc.getBlockX() >> 4, countdownLoc.getBlockZ() >> 4, this);
+        }
+    }
+
+    /** Every second: shows the hologram until the server is launched, and updates the time. */
+    private void tickCountdown() {
+        if (countdownLoc == null || countdownLoc.getWorld() == null) {
+            return;
+        }
+        if (launched) {
+            removeCountdownEntity();
+            return;
+        }
+        TextDisplay display = countdownDisplay();
+        if (display == null) {
+            spawnCountdown();
+            return;
+        }
+        display.text(countdownComponent());
+    }
+
+    private String countdownScaleText() {
+        return countdownScale == Math.rint(countdownScale)
+                ? String.valueOf((long) countdownScale) : String.valueOf(countdownScale);
+    }
+
+    private void placeCountdown(Player admin) {
+        removeCountdownEntity();
+        countdownLoc = admin.getLocation().clone();
+        countdownLoc.setPitch(0f);
+        saveState();
+        tickCountdown();
+        admin.sendMessage(Component.text("Het countdown hologram staat nu op jouw positie."
+                + (launched ? " Het is verborgen omdat de server al gelanceerd is." : "")
+                + " Het verdwijnt vanzelf bij de launch.", NamedTextColor.GREEN));
+    }
+
+    private void clearCountdown(CommandSender sender) {
+        if (countdownLoc == null) {
+            sender.sendMessage(Component.text("Er staat geen countdown hologram.", NamedTextColor.RED));
+            return;
+        }
+        removeCountdownEntity();
+        countdownLoc = null;
+        saveState();
+        sender.sendMessage(Component.text("Het countdown hologram is verwijderd.", NamedTextColor.GREEN));
+    }
+
+    private boolean setCountdownTarget(CommandSender sender, String date, String time) {
+        LocalDateTime target;
+        try {
+            target = LocalDateTime.of(LocalDate.parse(date), LocalTime.parse(time));
+        } catch (DateTimeParseException e) {
+            sender.sendMessage(Component.text(
+                    "Gebruik de datum als 2026-11-07 en de tijd als 14:00 (Belgische tijd).", NamedTextColor.RED));
+            return false;
+        }
+        countdownTarget = target;
+        saveState();
+        tickCountdown();
+        sender.sendMessage(Component.text("De countdown loopt nu naar " + target.format(COUNTDOWN_FORMAT)
+                + " (Belgische tijd).", NamedTextColor.GREEN));
+        return true;
+    }
+
+    private boolean setCountdownScale(CommandSender sender, String text) {
+        double value;
+        try {
+            value = Double.parseDouble(text.replace(',', '.'));
+        } catch (NumberFormatException e) {
+            value = -1.0;
+        }
+        if (value < 1.0 || value > 40.0) {
+            sender.sendMessage(Component.text("De grootte moet een getal tussen 1 en 40 zijn.", NamedTextColor.RED));
+            return false;
+        }
+        countdownScale = value;
+        saveState();
+        TextDisplay display = countdownDisplay();
+        if (display != null) {
+            display.setTransformation(countdownTransformation());
+        }
+        sender.sendMessage(Component.text("De grootte van het hologram is nu " + countdownScaleText() + ".",
+                NamedTextColor.GREEN));
+        return true;
+    }
+
+    private void countdownStatus(CommandSender sender) {
+        long secs = Duration.between(ZonedDateTime.now(LOWKEY_ZONE), countdownTarget.atZone(LOWKEY_ZONE)).getSeconds();
+        sender.sendMessage(Component.text("Countdown naar " + countdownTarget.format(COUNTDOWN_FORMAT)
+                + ", nog " + Math.max(0L, secs / 3_600L) + " uur. Hologram: "
+                + (countdownLoc == null ? "niet geplaatst" : "geplaatst") + ", grootte " + countdownScaleText()
+                + ". Gebruik: /lowkey countdown <spawn|remove|set <datum> <tijd>|size <getal>>", NamedTextColor.GRAY));
+    }
+
+    private void openCountdownMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_COUNTDOWN, "Hier plaatsen", NamedTextColor.WHITE),
+                "Zet het hologram op jouw positie (liefst in de lobby).", 150, () -> {
+                    placeCountdown(admin);
+                    openCountdownMenu(admin);
+                }));
+        if (countdownLoc != null) {
+            buttons.add(button(iconLabel(M_COUNTDOWN, "Verwijderen", NamedTextColor.RED),
+                    "Haalt het hologram weg.", 150, () -> {
+                        clearCountdown(admin);
+                        openCountdownMenu(admin);
+                    }));
+        }
+        buttons.add(button(iconLabel(M_COUNTDOWN, "Tijd en grootte", NamedTextColor.WHITE),
+                "Pas de eindtijd en de grootte van het hologram aan.", 150, () -> openCountdownSettings(admin)));
+
+        String state = countdownLoc == null ? "niet geplaatst" : (launched ? "verborgen (gelanceerd)" : "zichtbaar");
+        Component body = joinLines(
+                statusLine("Eindtijd", countdownTarget.format(COUNTDOWN_FORMAT), NamedTextColor.WHITE),
+                statusLine("Hologram", state, countdownLoc == null ? NamedTextColor.YELLOW : NamedTextColor.GREEN),
+                statusLine("Grootte", countdownScaleText(), NamedTextColor.WHITE));
+        showMenu(admin, "Countdown", body, buttons, backButton("Terug naar server.", () -> openServerMenu(admin)));
+    }
+
+    private void openCountdownSettings(Player admin) {
+        DialogInput date = DialogInput.text("datum", Component.text("Datum (jjjj-mm-dd)"))
+                .width(300).initial(countdownTarget.toLocalDate().toString()).maxLength(10).build();
+        DialogInput time = DialogInput.text("tijd", Component.text("Tijd (uu:mm, Belgische tijd)"))
+                .width(300).initial(countdownTarget.toLocalTime().toString()).maxLength(5).build();
+        DialogInput size = DialogInput.text("grootte", Component.text("Grootte (1 tot 40)"))
+                .width(300).initial(countdownScaleText()).maxLength(5).build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!clicker.hasPermission("lowkey.admin")) {
+                return;
+            }
+            final String d = view.getText("datum");
+            final String t = view.getText("tijd");
+            final String g = view.getText("grootte");
+            getServer().getScheduler().runTask(this, () -> {
+                if (setCountdownTarget(clicker, d == null ? "" : d.trim(), t == null ? "" : t.trim())) {
+                    setCountdownScale(clicker, g == null ? "" : g.trim());
+                }
+                openCountdownMenu(clicker);
+            });
+        }, CLICK_OPTIONS);
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(menuTitle("Countdown instellingen"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "De countdown loopt naar deze datum en tijd.", NamedTextColor.GRAY))))
+                        .inputs(List.of(date, time, size))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_COUNTDOWN, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla de instellingen op."), 150, save),
+                        backButton("Terug naar de countdown.", () -> openCountdownMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
     // ---- custom broadcast with the LOWKEY badge
 
     private void broadcastMessage(String text) {
@@ -1908,6 +2198,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey donate : stuurt meteen een willekeurig donatiebericht (voor testen)
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
+     * /lowkey countdown <spawn|remove|set <datum> <tijd>|size <getal>> : groot hologram met het logo en de aftelling (verdwijnt bij de launch)
      * /lowkey mainworld <open|close> : sluit de main wereld (iedereen behalve admins naar de lobby) of opent hem weer (niemand wordt verplaatst)
      * /lowkey lobby <create|tp|setspawn|delete> : maakt de lege lobby wereld, gaat erheen, zet het lobby spawnpunt of wist de lobby
      * /lowkey setspawn <noord|zuid> : zet het spawnpunt van een team op jouw positie
@@ -2103,6 +2394,25 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             enterGame((Player) sender, false, true);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("countdown")) {
+            String choice = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+            if (choice.equals("spawn")) {
+                if (sender instanceof Player) {
+                    placeCountdown((Player) sender);
+                } else {
+                    sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
+                }
+            } else if (choice.equals("remove")) {
+                clearCountdown(sender);
+            } else if (choice.equals("set") && args.length == 4) {
+                setCountdownTarget(sender, args[2], args[3]);
+            } else if (choice.equals("size") && args.length == 3) {
+                setCountdownScale(sender, args[2]);
+            } else {
+                countdownStatus(sender);
+            }
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("mainworld")) {
             String choice = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
             if (choice.equals("close")) {
@@ -2143,7 +2453,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -2294,6 +2604,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         openServerMenu(admin);
                     }));
         }
+
+        buttons.add(button(iconLabel(M_COUNTDOWN, "Countdown", NamedTextColor.WHITE),
+                "Hologram met de aftelling naar de start.", 150, () -> openCountdownMenu(admin)));
 
         if (serverClosed) {
             buttons.add(button(iconLabel(M_SERVER, "Server openen", NamedTextColor.GREEN),
@@ -2660,6 +2973,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("setspawn");
             options.add("main");
             options.add("mainworld");
+            options.add("countdown");
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
@@ -2681,10 +2995,28 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             } else if (sub.equals("launch")) {
                 options.add("confirm");
                 options.add("reset");
+            } else if (sub.equals("countdown")) {
+                options.add("spawn");
+                options.add("remove");
+                options.add("set");
+                options.add("size");
+            }
+        } else if (args.length == 4) {
+            if (args[0].equalsIgnoreCase("countdown") && args[1].equalsIgnoreCase("set")) {
+                options.add("14:00");
             }
         } else if (args.length == 3) {
             String sub = args[0].toLowerCase(Locale.ROOT);
-            if (sub.equals("team")) {
+            if (sub.equals("countdown")) {
+                if (args[1].equalsIgnoreCase("set")) {
+                    options.add("2026-11-07");
+                } else if (args[1].equalsIgnoreCase("size")) {
+                    options.add("4");
+                    options.add("6");
+                    options.add("8");
+                    options.add("10");
+                }
+            } else if (sub.equals("team")) {
                 options.add("noord");
                 options.add("zuid");
                 options.add("geen");
