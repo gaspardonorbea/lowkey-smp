@@ -37,21 +37,41 @@ import org.bukkit.entity.Display;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Projectile;
 import org.bukkit.entity.TextDisplay;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockBurnEvent;
+import org.bukkit.event.block.BlockDispenseEvent;
+import org.bukkit.event.block.BlockExplodeEvent;
+import org.bukkit.event.block.BlockFadeEvent;
+import org.bukkit.event.block.BlockFormEvent;
+import org.bukkit.event.block.BlockFromToEvent;
+import org.bukkit.event.block.BlockGrowEvent;
+import org.bukkit.event.block.BlockIgniteEvent;
+import org.bukkit.event.block.BlockPistonExtendEvent;
+import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.block.BlockSpreadEvent;
+import org.bukkit.event.block.LeavesDecayEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
+import org.bukkit.event.entity.EntityChangeBlockEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.hanging.HangingBreakByEntityEvent;
+import org.bukkit.event.hanging.HangingPlaceEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
+import org.bukkit.event.player.PlayerArmorStandManipulateEvent;
+import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
@@ -62,6 +82,9 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.event.weather.ThunderChangeEvent;
+import org.bukkit.event.weather.WeatherChangeEvent;
+import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
@@ -70,6 +93,7 @@ import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffect;
+import org.bukkit.projectiles.ProjectileSource;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
@@ -225,6 +249,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private boolean mainOpen = true;
     private boolean lobbyCreated;
     private Location lobbySpawn;
+    /** true = the lobby world itself is frozen: no snow, ice, fire, fluids, explosions, pistons, growth or mobs */
+    private boolean lobbyProtect = true;
     private Location spawnNoord;
     private Location spawnZuid;
     private NamespacedKey lobbyItemKey;
@@ -280,6 +306,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         lobbyItemKey = new NamespacedKey(this, "lobby_item");
         launched = state.getBoolean("launched", false);
         mainOpen = state.getBoolean("main-open", true);
+        lobbyProtect = state.getBoolean("lobby-protect", true);
         lobbyCreated = state.getBoolean("lobby-created", false);
         if (lobbyCreated) {
             loadLobbyWorld();
@@ -309,6 +336,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::updateTablist, 20L, 100L);
         getServer().getScheduler().runTaskTimer(this, this::tickServerHours, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::tickLobby, 40L, 200L);
+        getServer().getScheduler().runTaskTimer(this, this::tickLobbyPlayers, 10L, 10L);
         getServer().getScheduler().runTaskTimer(this, this::tickCountdown, 40L, 20L);
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
@@ -1090,6 +1118,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         state.set("countdown-scale", countdownScale);
         writeLoc(state, "countdown-loc", countdownLoc);
         state.set("main-open", mainOpen);
+        state.set("lobby-protect", lobbyProtect);
         state.set("lobby-created", lobbyCreated);
         writeLoc(state, "lobby-spawn", lobbySpawn);
         writeLoc(state, "spawn-noord", spawnNoord);
@@ -1226,6 +1255,32 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (world.isThundering()) {
             world.setThundering(false);
         }
+    }
+
+    /** True when this world is the lobby and the lobby protection is switched on. */
+    private boolean shielded(World world) {
+        return lobbyProtect && world != null && lobbySpawn != null && world.equals(lobbySpawn.getWorld());
+    }
+
+    /** A few times per second: nobody in the lobby keeps a freezing overlay (powder snow, cold biomes). */
+    private void tickLobbyPlayers() {
+        if (!lobbyProtect) {
+            return;
+        }
+        World world = lobbyWorld();
+        if (world == null) {
+            return;
+        }
+        for (Player player : world.getPlayers()) {
+            if (player.getFreezeTicks() > 0) {
+                player.setFreezeTicks(0);
+            }
+        }
+    }
+
+    private void setLobbyProtect(boolean on) {
+        lobbyProtect = on;
+        saveState();
     }
 
     private void createLobby(CommandSender sender) {
@@ -2175,12 +2230,183 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onLobbyMobSpawn(CreatureSpawnEvent event) {
-        World lobby = lobbyWorld();
-        if (lobby == null || !event.getLocation().getWorld().equals(lobby)) {
+        if (!shielded(event.getLocation().getWorld())) {
             return;
         }
         CreatureSpawnEvent.SpawnReason reason = event.getSpawnReason();
-        if (reason == CreatureSpawnEvent.SpawnReason.NATURAL || reason == CreatureSpawnEvent.SpawnReason.CHUNK_GEN) {
+        // only admins on purpose (command, spawn egg) and other plugins may bring a mob into the lobby
+        if (reason != CreatureSpawnEvent.SpawnReason.CUSTOM
+                && reason != CreatureSpawnEvent.SpawnReason.COMMAND
+                && reason != CreatureSpawnEvent.SpawnReason.SPAWNER_EGG) {
+            event.setCancelled(true);
+        }
+    }
+
+    // ---- lobby protection (world): no snow, ice, fire, fluids, explosions, pistons, growth or weather
+
+    @EventHandler
+    public void onLobbyForm(BlockFormEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbySpread(BlockSpreadEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyGrow(BlockGrowEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyFade(BlockFadeEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyFluid(BlockFromToEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyBurn(BlockBurnEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyIgnite(BlockIgniteEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyBlockExplode(BlockExplodeEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyEntityExplode(EntityExplodeEvent event) {
+        if (shielded(event.getLocation().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyPistonExtend(BlockPistonExtendEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyPistonRetract(BlockPistonRetractEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyLeavesDecay(LeavesDecayEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyDispense(BlockDispenseEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyStructureGrow(StructureGrowEvent event) {
+        if (shielded(event.getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** Falling blocks, farmland trampled by mobs, endermen, etc. */
+    @EventHandler
+    public void onLobbyEntityChangeBlock(EntityChangeBlockEvent event) {
+        if (shielded(event.getBlock().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyWeather(WeatherChangeEvent event) {
+        if (event.toWeatherState() && shielded(event.getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyThunder(ThunderChangeEvent event) {
+        if (event.toThunderState() && shielded(event.getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    // ---- lobby protection (players): buckets, armor stands, frames and hitting any entity
+
+    @EventHandler
+    public void onLobbyBucketEmpty(PlayerBucketEmptyEvent event) {
+        if (isLocked(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyBucketFill(PlayerBucketFillEvent event) {
+        if (isLocked(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyArmorStand(PlayerArmorStandManipulateEvent event) {
+        if (isLocked(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLobbyHangingPlace(HangingPlaceEvent event) {
+        Player player = event.getPlayer();
+        if (player != null && isLocked(player)) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** Hitting armor stands, item frames, boats, animals and so on (PvP is already off through the damage handler). */
+    @EventHandler
+    public void onLobbyHitEntity(EntityDamageByEntityEvent event) {
+        if (event.getEntity() instanceof Player) {
+            return;
+        }
+        Entity damager = event.getDamager();
+        if (damager instanceof Projectile) {
+            ProjectileSource shooter = ((Projectile) damager).getShooter();
+            damager = shooter instanceof Entity ? (Entity) shooter : damager;
+        }
+        if (damager instanceof Player && isLocked((Player) damager)) {
             event.setCancelled(true);
         }
     }
@@ -2201,6 +2427,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey countdown <spawn|remove|set <datum> <tijd>|size <getal>> : groot hologram met het logo en de aftelling (verdwijnt bij de launch)
      * /lowkey mainworld <open|close> : sluit de main wereld (iedereen behalve admins naar de lobby) of opent hem weer (niemand wordt verplaatst)
      * /lowkey lobby <create|tp|setspawn|delete> : maakt de lege lobby wereld, gaat erheen, zet het lobby spawnpunt of wist de lobby
+     * /lowkey lobby protect <aan|uit> : zet de wereldbescherming van de lobby aan of uit (sneeuw, ijs, vuur, water, explosies, pistons, groei, mobs, weer)
      * /lowkey setspawn <noord|zuid> : zet het spawnpunt van een team op jouw positie
      * /lowkey main : stuurt jou (admin) naar de gamewereld, ook als de server nog niet gelanceerd is
      * /lowkey say <bericht> : stuurt een bericht met de LOWKEY badge naar iedereen
@@ -2362,6 +2589,21 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 return true;
             }
+            if (sub.equals("protect")) {
+                if (args.length == 3 && (args[2].equalsIgnoreCase("aan") || args[2].equalsIgnoreCase("on"))) {
+                    setLobbyProtect(true);
+                    sender.sendMessage(Component.text("De lobby bescherming staat aan.", NamedTextColor.GREEN));
+                    return true;
+                }
+                if (args.length == 3 && (args[2].equalsIgnoreCase("uit") || args[2].equalsIgnoreCase("off"))) {
+                    setLobbyProtect(false);
+                    sender.sendMessage(Component.text("De lobby bescherming staat uit.", NamedTextColor.GREEN));
+                    return true;
+                }
+                sender.sendMessage(Component.text("De lobby bescherming staat nu " + (lobbyProtect ? "aan" : "uit")
+                        + ". Gebruik: /lowkey lobby protect <aan|uit>", NamedTextColor.GRAY));
+                return true;
+            }
             if (sub.equals("tp") || sub.equals("setspawn")) {
                 if (!(sender instanceof Player)) {
                     sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
@@ -2374,7 +2616,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 return true;
             }
-            sender.sendMessage(Component.text("Gebruik: /lowkey lobby <create|tp|setspawn|delete>", NamedTextColor.GRAY));
+            sender.sendMessage(Component.text("Gebruik: /lowkey lobby <create|tp|setspawn|delete|protect>", NamedTextColor.GRAY));
             return true;
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("setspawn")) {
@@ -2721,6 +2963,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     () -> openLobbyDeleteConfirm(admin, () -> openWorldMenu(admin))));
         }
 
+        if (lobbyProtect) {
+            buttons.add(button(iconLabel(M_LOBBY, "Lobby bescherming uit", NamedTextColor.RED),
+                    "Zet sneeuw, vuur, water, explosies en groei in de lobby weer aan, bijvoorbeeld om te bouwen.", 150, () -> {
+                        setLobbyProtect(false);
+                        openWorldMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(iconLabel(M_LOBBY, "Lobby bescherming aan", NamedTextColor.GREEN),
+                    "Zet sneeuw, vuur, water, explosies en groei in de lobby uit.", 150, () -> {
+                        setLobbyProtect(true);
+                        openWorldMenu(admin);
+                    }));
+        }
+
         buttons.add(button(iconLabel(M_SPAWN_N, "Spawn Noord zetten", NamedTextColor.RED),
                 "Zet het spawnpunt van Noord op jouw plek.", 150, () -> {
                     setTeamSpawn(admin, Side.NOORD);
@@ -2743,6 +2999,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Lobby", lobbyCreated ? "aangemaakt" : (lobbyExists() ? "oude rest" : "nog niet"),
                         lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
+                statusLine("Lobby bescherming", lobbyProtect ? "aan" : "uit",
+                        lobbyProtect ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
                         spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
                 statusLine("Spawn Zuid", spawnZuid != null ? "ingesteld" : "niet ingesteld",
@@ -2989,6 +3247,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("tp");
                 options.add("setspawn");
                 options.add("delete");
+                options.add("protect");
             } else if (sub.equals("setspawn")) {
                 options.add("noord");
                 options.add("zuid");
@@ -3030,6 +3289,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("uit");
             } else if (sub.equals("lobby") && args[1].equalsIgnoreCase("delete")) {
                 options.add("confirm");
+            } else if (sub.equals("lobby") && args[1].equalsIgnoreCase("protect")) {
+                options.add("aan");
+                options.add("uit");
             }
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("say")) {
