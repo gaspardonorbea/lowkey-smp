@@ -1518,6 +1518,56 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         player.getInventory().setHeldItemSlot(4);
     }
 
+    /**
+     * Admin command / menu: hands a player the LowkeySMP nether star. Only works while the player is in the lobby
+     * (in the main world the star would be a loose item that disappears when they go to the lobby).
+     * Never replaces an item and never duplicates it.
+     */
+    private void giveLobbyItemTo(CommandSender giver, Player target) {
+        if (lobbySpawn == null || lobbySpawn.getWorld() == null) {
+            giver.sendMessage(Component.text("Er is geen lobby, dus de nether star kan niet gegeven worden.",
+                    NamedTextColor.RED));
+            return;
+        }
+        if (!inLobby(target)) {
+            giver.sendMessage(Component.text("Je kunt " + target.getName()
+                    + " nu geen LowkeySMP nether star geven, want die speler is in de main wereld. "
+                    + "De ster kan alleen in de lobby gegeven worden.", NamedTextColor.RED));
+            return;
+        }
+        if (isEliminated(target)) {
+            giver.sendMessage(Component.text(target.getName()
+                    + " is uitgeschakeld en kan de lobby niet meer verlaten, dus krijgt geen nether star.",
+                    NamedTextColor.RED));
+            return;
+        }
+        for (ItemStack item : target.getInventory().getContents()) {
+            if (isLobbyItem(item)) {
+                giver.sendMessage(Component.text(target.getName() + " heeft de LowkeySMP nether star al.",
+                        NamedTextColor.YELLOW));
+                return;
+            }
+        }
+        ItemStack star = createLobbyItem();
+        ItemStack slotFive = target.getInventory().getItem(4);
+        if (slotFive == null || slotFive.getType().isAir()) {
+            target.getInventory().setItem(4, star);
+        } else if (!target.getInventory().addItem(star).isEmpty()) {
+            giver.sendMessage(Component.text("De inventory van " + target.getName()
+                    + " zit vol, de nether star is niet gegeven.", NamedTextColor.RED));
+            return;
+        }
+        giver.sendMessage(Component.text(target.getName() + " heeft de LowkeySMP nether star gekregen.",
+                NamedTextColor.GREEN));
+        if (!giver.equals(target)) {
+            target.sendMessage(Component.text()
+                    .append(glyph(LOWKEY_BADGE))
+                    .append(Component.space())
+                    .append(Component.text("Je hebt de LowkeySMP nether star gekregen.", NamedTextColor.LIGHT_PURPLE))
+                    .build());
+        }
+    }
+
     private void removeLobbyItems(Player player) {
         ItemStack[] contents = player.getInventory().getContents();
         for (int i = 0; i < contents.length; i++) {
@@ -2421,6 +2471,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey server <open|close> : sluit de server voor iedereen behalve 'closed-access' (geen bans), of maakt hem weer open
      * /lowkey border <open|close> : opent of sluit de grenzen tussen Noord- en Zuid-chat
      * /lowkey revive <speler> : verwijdert de dood/uitgeschakeld-status van een speler (vooral voor testen)
+     * /lowkey give <speler> : geeft een speler in de lobby de LowkeySMP nether star (hotbar slot 5)
      * /lowkey donate : stuurt meteen een willekeurig donatiebericht (voor testen)
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
@@ -2503,6 +2554,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             clearEliminated(target);
             sender.sendMessage(Component.text(
                     "Dood-status van " + target.getName() + " is verwijderd.", NamedTextColor.GREEN));
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("give")) {
+            Player target = args.length == 2 ? getServer().getPlayerExact(args[1]) : null;
+            if (args.length != 2) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey give <speler>", NamedTextColor.GRAY));
+            } else if (target == null) {
+                sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
+            } else {
+                giveLobbyItemTo(sender, target);
+            }
             return true;
         }
         if (args.length == 1 && args[0].equalsIgnoreCase("donate")) {
@@ -3032,6 +3094,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             "Dood-status van " + target.getName() + " is verwijderd.", NamedTextColor.GREEN));
                     openPlayersMenu(admin);
                 })));
+        buttons.add(button(iconLabel(M_LOBBY, "LowkeySMP ster geven", NamedTextColor.WHITE),
+                "Geeft een speler in de lobby de LowkeySMP nether star (hotbar slot 5).", 150,
+                () -> pickPlayer(admin, "LowkeySMP ster geven", target -> {
+                    giveLobbyItemTo(admin, target);
+                    openPlayersMenu(admin);
+                })));
         Component body = Component.text("Kies wat je wilt aanpassen. Daarna kies je de speler.", NamedTextColor.GRAY);
         showMenu(admin, "Spelers", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
     }
@@ -3226,6 +3294,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("border");
             options.add("revive");
             options.add("donate");
+            options.add("give");
             options.add("launch");
             options.add("lobby");
             options.add("setspawn");
@@ -3235,7 +3304,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
-            if (sub.equals("grace") || sub.equals("team") || sub.equals("revive") || sub.equals("crew")) {
+            if (sub.equals("grace") || sub.equals("team") || sub.equals("revive") || sub.equals("crew") || sub.equals("give")) {
                 for (Player player : getServer().getOnlinePlayers()) {
                     options.add(player.getName());
                 }
