@@ -101,6 +101,8 @@ import com.destroystokyo.paper.event.server.PaperServerListPingEvent;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -256,6 +258,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private NamespacedKey lobbyItemKey;
 
     private NamespacedKey graceKey;
+    /** which "grace for everybody" reset a player has already received (see /lowkey graceall) */
+    private NamespacedKey graceVersionKey;
+    /** counts up with every /lowkey graceall; saved in state.yml */
+    private int graceResetVersion;
+    private long graceResetMillis;
     private NamespacedKey sideKey;
     private NamespacedKey eliminatedKey;
     private long graceMillis;
@@ -291,6 +298,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ lifecycle
 
+    /** Runs before the server loads any world, which is the only moment the main world can be swapped. */
+    @Override
+    public void onLoad() {
+        applyPendingWorldReset();
+    }
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
@@ -301,12 +314,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         serverClosed = state.getBoolean("server-closed", false);
         bordersDropped = state.getBoolean("borders-dropped", false);
         graceKey = new NamespacedKey(this, "grace_left");
+        graceVersionKey = new NamespacedKey(this, "grace_version");
         sideKey = new NamespacedKey(this, "side");
         eliminatedKey = new NamespacedKey(this, "eliminated");
         lobbyItemKey = new NamespacedKey(this, "lobby_item");
         launched = state.getBoolean("launched", false);
         mainOpen = state.getBoolean("main-open", true);
         lobbyProtect = state.getBoolean("lobby-protect", true);
+        graceResetVersion = state.getInt("grace-reset-version", 0);
+        graceResetMillis = state.getLong("grace-reset-millis", 0L);
         lobbyCreated = state.getBoolean("lobby-created", false);
         if (lobbyCreated) {
             loadLobbyWorld();
@@ -424,7 +440,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             data.set(graceKey, PersistentDataType.LONG, left);
         } else {
             left = stored;
+            Integer received = data.get(graceVersionKey, PersistentDataType.INTEGER);
+            if (graceResetVersion > 0 && (received == null || received < graceResetVersion)) {
+                // /lowkey graceall happened while this player was offline
+                left = graceResetMillis;
+                data.set(graceKey, PersistentDataType.LONG, left);
+            }
         }
+        data.set(graceVersionKey, PersistentDataType.INTEGER, graceResetVersion);
 
         UUID id = player.getUniqueId();
         graceLeft.put(id, left);
@@ -435,7 +458,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             // small delay so the resource pack is (most likely) active and the glyphs render
             getServer().getScheduler().runTaskLater(this, () -> {
                 long remaining = graceRemaining(player);
-                if (player.isOnline() && remaining > 0) {
+                // everybody joins in the lobby: the message comes when they enter the main world instead
+                if (player.isOnline() && remaining > 0 && !inLobby(player)) {
                     player.sendMessage(graceMessage(remaining));
                 }
             }, 60L);
@@ -493,9 +517,28 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         graceLast.put(id, System.currentTimeMillis());
         player.getPersistentDataContainer().set(graceKey, PersistentDataType.LONG, millis);
         refreshTags(player);
-        if (millis > 0L) {
+        if (millis > 0L && !inLobby(player)) {
             player.sendMessage(graceMessage(millis));
         }
+    }
+
+    /**
+     * Gives everybody the same grace time again. Online players are updated right now. For everybody else the reset is
+     * remembered (a counter in state.yml) and applied the moment they join, so offline players are covered too.
+     */
+    private void resetGraceForEveryone(CommandSender sender, long minutes) {
+        graceResetVersion++;
+        graceResetMillis = minutes * 60_000L;
+        saveState();
+        int online = 0;
+        for (Player player : getServer().getOnlinePlayers()) {
+            player.getPersistentDataContainer().set(graceVersionKey, PersistentDataType.INTEGER, graceResetVersion);
+            setGrace(player, graceResetMillis);
+            online++;
+        }
+        sender.sendMessage(Component.text("De grace van iedereen staat nu op " + minutes + " minuten. "
+                + online + " online spelers zijn meteen bijgewerkt, spelers die nu offline zijn krijgen het zodra ze "
+                + "joinen.", NamedTextColor.GREEN));
     }
 
     private Component graceMessage(long remainingMillis) {
@@ -1119,6 +1162,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         writeLoc(state, "countdown-loc", countdownLoc);
         state.set("main-open", mainOpen);
         state.set("lobby-protect", lobbyProtect);
+        state.set("grace-reset-version", graceResetVersion);
+        state.set("grace-reset-millis", graceResetMillis);
         state.set("lobby-created", lobbyCreated);
         writeLoc(state, "lobby-spawn", lobbySpawn);
         writeLoc(state, "spawn-noord", spawnNoord);
@@ -1866,7 +1911,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** Grace badge shows in the main world only, so the tags are rebuilt whenever someone changes world. */
     @EventHandler
     public void onWorldChange(PlayerChangedWorldEvent event) {
-        refreshTags(event.getPlayer());
+        Player player = event.getPlayer();
+        refreshTags(player);
+        // coming from the lobby into the game: this is where the grace message belongs
+        boolean fromLobby = lobbySpawn != null && event.getFrom().equals(lobbySpawn.getWorld());
+        if (fromLobby && !inLobby(player) && !isEliminated(player)) {
+            long remaining = graceRemaining(player);
+            if (remaining > 0L) {
+                player.sendMessage(graceMessage(remaining));
+            }
+        }
     }
 
     /** Without a bed or anchor you respawn at the spawn point of your team (grace deaths only). */
@@ -2461,10 +2515,231 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    // ------------------------------------------------------------------ main world seed
+
+    private static final String PENDING_RESET_FILE = "pending-world-reset.yml";
+    private static final String OLD_WORLDS_DIR = "lowkey-old-worlds";
+
+    private File pendingResetFile() {
+        return new File(getDataFolder(), PENDING_RESET_FILE);
+    }
+
+    private static File serverPropertiesFile() {
+        return new File("server.properties");
+    }
+
+    private static String readServerProperty(String key, String fallback) {
+        File file = serverPropertiesFile();
+        if (!file.isFile()) {
+            return fallback;
+        }
+        try {
+            for (String line : Files.readAllLines(file.toPath(), StandardCharsets.ISO_8859_1)) {
+                String trimmed = line.trim();
+                if (!trimmed.startsWith("#") && trimmed.startsWith(key + "=")) {
+                    return trimmed.substring(key.length() + 1).trim();
+                }
+            }
+        } catch (IOException ignored) {
+            // fall through to the fallback
+        }
+        return fallback;
+    }
+
+    /** Changes one line of server.properties and leaves every other line exactly as it was. */
+    private static boolean writeServerProperty(String key, String value) {
+        File file = serverPropertiesFile();
+        if (!file.isFile()) {
+            return false;
+        }
+        try {
+            List<String> lines = new ArrayList<>(Files.readAllLines(file.toPath(), StandardCharsets.ISO_8859_1));
+            boolean found = false;
+            for (int i = 0; i < lines.size(); i++) {
+                String trimmed = lines.get(i).trim();
+                if (!trimmed.startsWith("#") && trimmed.startsWith(key + "=")) {
+                    lines.set(i, key + "=" + value);
+                    found = true;
+                }
+            }
+            if (!found) {
+                lines.add(key + "=" + value);
+            }
+            Files.write(file.toPath(), lines, StandardCharsets.ISO_8859_1);
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Called from onLoad, before the server creates the worlds. If /lowkey seed queued a reset, the old main world
+     * (and its Nether and End) is MOVED to lowkey-old-worlds (nothing is deleted), so the server generates a new
+     * one with the seed that is now in server.properties.
+     */
+    private void applyPendingWorldReset() {
+        File marker = pendingResetFile();
+        if (!marker.isFile()) {
+            return;
+        }
+        String levelName = readServerProperty("level-name", "world");
+        if (!levelName.matches("[A-Za-z0-9_\\-]+") || levelName.equals(LOBBY_WORLD)) {
+            getLogger().severe("World reset cancelled: the level-name '" + levelName + "' is not safe to move.");
+            marker.delete();
+            return;
+        }
+        File container = getServer().getWorldContainer();
+        File main = new File(container, levelName);
+        if (main.isDirectory() && !new File(main, "level.dat").isFile()) {
+            getLogger().severe("World reset cancelled: " + main.getPath() + " has no level.dat.");
+            marker.delete();
+            return;
+        }
+
+        String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        File archive = new File(new File(OLD_WORLDS_DIR), levelName + "-" + stamp);
+        List<String> names = Arrays.asList(levelName + "_nether", levelName + "_the_end", levelName);
+        archive.mkdirs();
+        for (String name : names) {
+            File dir = new File(container, name);
+            if (!dir.isDirectory()) {
+                continue;
+            }
+            try {
+                Files.move(dir.toPath(), new File(archive, name).toPath());
+            } catch (IOException e) {
+                getLogger().severe("World reset failed: could not move " + dir.getPath() + " (" + e.getMessage()
+                        + "). The reset stays queued and is tried again at the next restart.");
+                return;
+            }
+        }
+        forgetMainWorldLocations(names);
+        marker.delete();
+        getLogger().info("Main world reset: the old world was moved to " + archive.getPath()
+                + ", a new world is generated with the seed from server.properties.");
+    }
+
+    /** Spawn points and last known positions in the old main world mean nothing in the new one. */
+    private void forgetMainWorldLocations(List<String> worldNames) {
+        File stateYml = new File(getDataFolder(), "state.yml");
+        if (stateYml.isFile()) {
+            YamlConfiguration state = YamlConfiguration.loadConfiguration(stateYml);
+            boolean changed = false;
+            for (String key : Arrays.asList("spawn-noord", "spawn-zuid", "countdown-loc")) {
+                if (worldNames.contains(state.getString(key + ".world"))) {
+                    state.set(key, null);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                try {
+                    state.save(stateYml);
+                } catch (IOException e) {
+                    getLogger().warning("Kon state.yml niet opslaan: " + e.getMessage());
+                }
+            }
+        }
+        File[] files = new File(getDataFolder(), "players").listFiles((d, n) -> n.endsWith(".yml"));
+        if (files == null) {
+            return;
+        }
+        for (File file : files) {
+            YamlConfiguration data = YamlConfiguration.loadConfiguration(file);
+            if (worldNames.contains(data.getString("last.world"))) {
+                data.set("last", null);
+                try {
+                    data.save(file);
+                } catch (IOException e) {
+                    getLogger().warning("Kon speler data niet opslaan: " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    /** /lowkey seed [seed|random|cancel] [confirm] */
+    private void handleSeedCommand(CommandSender sender, String[] args) {
+        File marker = pendingResetFile();
+        if (args.length == 1) {
+            sender.sendMessage(Component.text("De seed van de main wereld is nu " + gameWorld().getSeed() + ".",
+                    NamedTextColor.GRAY));
+            if (marker.isFile()) {
+                String queued = YamlConfiguration.loadConfiguration(marker).getString("seed", "");
+                sender.sendMessage(Component.text("Er staat een wereld reset klaar met seed: "
+                        + (queued.isEmpty() ? "willekeurig" : queued)
+                        + ". Hij gaat in bij de volgende herstart, of stop hem met /lowkey seed cancel.",
+                        NamedTextColor.YELLOW));
+            } else {
+                sender.sendMessage(Component.text("Gebruik: /lowkey seed <seed|random|cancel>", NamedTextColor.GRAY));
+            }
+            return;
+        }
+
+        String arg = args[1];
+        if (arg.equalsIgnoreCase("cancel")) {
+            if (!marker.isFile()) {
+                sender.sendMessage(Component.text("Er staat geen wereld reset klaar.", NamedTextColor.YELLOW));
+                return;
+            }
+            String previous = YamlConfiguration.loadConfiguration(marker).getString("previous-seed", "");
+            writeServerProperty("level-seed", previous);
+            marker.delete();
+            sender.sendMessage(Component.text("De wereld reset is geannuleerd.", NamedTextColor.GREEN));
+            return;
+        }
+
+        boolean random = arg.equalsIgnoreCase("random");
+        if (!random && !arg.matches("-?[A-Za-z0-9_]{1,64}")) {
+            sender.sendMessage(Component.text("Een seed mag alleen letters, cijfers en _ bevatten, met een min "
+                    + "ervoor voor een negatief getal. Gebruik: /lowkey seed <seed|random|cancel>",
+                    NamedTextColor.RED));
+            return;
+        }
+        String value = random ? "" : arg;
+        String label = random ? "een willekeurige seed" : "seed " + value;
+
+        if (args.length < 3 || !args[2].equalsIgnoreCase("confirm")) {
+            sender.sendMessage(Component.text("Let op: bij de volgende herstart wordt de huidige main wereld "
+                    + "(met Nether en End) verplaatst naar de map " + OLD_WORLDS_DIR + " en maakt de server een "
+                    + "nieuwe wereld met " + label + ". Alle bouwwerken, inventories en voortgang in de main wereld "
+                    + "beginnen dan opnieuw. Bevestig met: /lowkey seed " + arg + " confirm", NamedTextColor.RED));
+            return;
+        }
+        if (!serverPropertiesFile().isFile()) {
+            sender.sendMessage(Component.text("server.properties niet gevonden, de seed is niet aangepast.",
+                    NamedTextColor.RED));
+            return;
+        }
+
+        String previous = marker.isFile()
+                ? YamlConfiguration.loadConfiguration(marker).getString("previous-seed", "")
+                : readServerProperty("level-seed", "");
+        if (!writeServerProperty("level-seed", value)) {
+            sender.sendMessage(Component.text("Kon server.properties niet aanpassen.", NamedTextColor.RED));
+            return;
+        }
+        YamlConfiguration pending = new YamlConfiguration();
+        pending.set("seed", value);
+        pending.set("previous-seed", previous);
+        pending.set("requested", LocalDateTime.now().toString());
+        try {
+            getDataFolder().mkdirs();
+            pending.save(marker);
+        } catch (IOException e) {
+            writeServerProperty("level-seed", previous);
+            sender.sendMessage(Component.text("Kon de reset niet klaarzetten: " + e.getMessage(), NamedTextColor.RED));
+            return;
+        }
+        sender.sendMessage(Component.text("Klaar. Stop de server en start hem weer op, dan wordt de nieuwe main "
+                + "wereld gemaakt met " + label + ". De oude wereld blijft bewaard in " + OLD_WORLDS_DIR
+                + ". Met /lowkey seed zie je daarna de nieuwe seed. Stel je de seed bij je host in een paneel in, "
+                + "zet hem daar dan ook.", NamedTextColor.GREEN));
+    }
+
     // ------------------------------------------------------------------ admin command
 
     /**
      * /lowkey  (of /lowkey menu) : opent het beheerpaneel met knoppen
+     * /lowkey graceall [minuten] : zet de grace van iedereen weer op dit aantal minuten (standaard grace-minutes uit config.yml), ook van spelers die offline zijn
      * /lowkey grace <speler> <minuten> : zet de resterende grace tijd (0 = grace beeindigen)
      * /lowkey team <speler> <noord|zuid|geen> : zet de speler in Noord, Zuid of geen team
      * /lowkey nether <open|close> : opent of sluit de Nether (bij openen: titel + bericht voor iedereen)
@@ -2476,6 +2751,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
      * /lowkey countdown <spawn|remove|set <datum> <tijd>|size <getal>> : groot hologram met het logo en de aftelling (verdwijnt bij de launch)
+     * /lowkey seed [seed|random|cancel] [confirm] : zet een nieuwe seed voor de main wereld klaar, die bij de volgende herstart wordt aangemaakt (oude wereld wordt bewaard)
      * /lowkey mainworld <open|close> : sluit de main wereld (iedereen behalve admins naar de lobby) of opent hem weer (niemand wordt verplaatst)
      * /lowkey lobby <create|tp|setspawn|delete> : maakt de lege lobby wereld, gaat erheen, zet het lobby spawnpunt of wist de lobby
      * /lowkey lobby protect <aan|uit> : zet de wereldbescherming van de lobby aan of uit (sneeuw, ijs, vuur, water, explosies, pistons, groei, mobs, weer)
@@ -2494,6 +2770,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         if (sender instanceof Player && (args.length == 0 || (args.length == 1 && args[0].equalsIgnoreCase("menu")))) {
             openMenu((Player) sender);
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("graceall")) {
+            long minutes = graceMillis / 60_000L;
+            if (args.length >= 2) {
+                try {
+                    minutes = Math.max(0L, Long.parseLong(args[1]));
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(Component.text("Geef het aantal minuten als getal. Gebruik: /lowkey graceall [minuten]",
+                            NamedTextColor.RED));
+                    return true;
+                }
+            }
+            resetGraceForEveryone(sender, minutes);
             return true;
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("grace")) {
@@ -2717,6 +3007,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("seed")) {
+            handleSeedCommand(sender, args);
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("mainworld")) {
             String choice = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
             if (choice.equals("close")) {
@@ -2757,7 +3051,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -3086,6 +3380,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         buttons.add(button(iconLabel(M_GRACE, "Grace instellen", NamedTextColor.WHITE),
                 "Zet de grace tijd van een speler.", 150,
                 () -> pickPlayer(admin, "Grace instellen", target -> pickGrace(admin, target))));
+        buttons.add(button(iconLabel(M_GRACE, "Grace voor iedereen", NamedTextColor.WHITE),
+                "Zet de grace van alle spelers weer op de standaard tijd, ook van spelers die nu offline zijn.", 150,
+                () -> {
+                    resetGraceForEveryone(admin, graceMillis / 60_000L);
+                    openPlayersMenu(admin);
+                }));
         buttons.add(button(iconLabel(M_REVIVE, "Dood-status weg", NamedTextColor.WHITE),
                 "Verwijdert de uitgeschakeld-status van een speler (vooral voor testen).", 150,
                 () -> pickPlayer(admin, "Dood-status verwijderen", target -> {
@@ -3287,6 +3587,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (args.length == 1) {
             options.add("menu");
             options.add("grace");
+            options.add("graceall");
             options.add("team");
             options.add("crew");
             options.add("nether");
@@ -3300,6 +3601,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("setspawn");
             options.add("main");
             options.add("mainworld");
+            options.add("seed");
             options.add("countdown");
             options.add("say");
         } else if (args.length == 2) {
@@ -3317,6 +3619,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("setspawn");
                 options.add("delete");
                 options.add("protect");
+            } else if (sub.equals("seed")) {
+                options.add("random");
+                options.add("cancel");
             } else if (sub.equals("setspawn")) {
                 options.add("noord");
                 options.add("zuid");
@@ -3353,6 +3658,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("1");
                 options.add("10");
                 options.add("60");
+            } else if (sub.equals("graceall")) {
+                options.add("60");
             } else if (sub.equals("crew")) {
                 options.add("aan");
                 options.add("uit");
@@ -3361,6 +3668,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             } else if (sub.equals("lobby") && args[1].equalsIgnoreCase("protect")) {
                 options.add("aan");
                 options.add("uit");
+            } else if (sub.equals("seed") && !args[1].equalsIgnoreCase("cancel")) {
+                options.add("confirm");
             }
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("say")) {
