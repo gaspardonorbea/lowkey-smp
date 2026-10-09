@@ -103,6 +103,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.MessageDigest;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -323,6 +324,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         lobbyProtect = state.getBoolean("lobby-protect", true);
         graceResetVersion = state.getInt("grace-reset-version", 0);
         graceResetMillis = state.getLong("grace-reset-millis", 0L);
+        loginPin = state.getString("login-pin", "1283");
+        // ops that were handed out by /lowkey login but never taken back (crash): take them back now
+        for (String raw : state.getStringList("login-op-granted")) {
+            try {
+                getServer().getOfflinePlayer(UUID.fromString(raw)).setOp(false);
+            } catch (IllegalArgumentException ignored) {
+                // not a uuid, skip it
+            }
+        }
         lobbyCreated = state.getBoolean("lobby-created", false);
         if (lobbyCreated) {
             loadLobbyWorld();
@@ -362,6 +372,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     @Override
     public void onDisable() {
         removeCountdownEntity();
+        for (Player player : getServer().getOnlinePlayers()) {
+            logout(player, false); // nobody keeps a temporary op after a restart
+        }
         for (Player player : getServer().getOnlinePlayers()) {
             persist(player);
         }
@@ -764,7 +777,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         // in the lobby everybody can talk to everybody who is in the lobby too (staff sees it as well)
         if (inLobby(sender)) {
             event.viewers().removeIf(viewer -> viewer instanceof Player && !viewer.equals(sender)
-                    && !inLobby((Player) viewer) && !((Player) viewer).hasPermission("lowkey.admin"));
+                    && !inLobby((Player) viewer) && !isAdmin((Player) viewer));
             return;
         }
 
@@ -776,7 +789,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     return false;
                 }
                 Player viewerPlayer = (Player) viewer;
-                if (viewerPlayer.hasPermission("lowkey.admin")) {
+                if (isAdmin(viewerPlayer)) {
                     return false; // staff always sees both team chats
                 }
                 Side viewerSide = sideCache.getOrDefault(viewerPlayer.getUniqueId(), Side.NONE);
@@ -1164,6 +1177,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         state.set("lobby-protect", lobbyProtect);
         state.set("grace-reset-version", graceResetVersion);
         state.set("grace-reset-millis", graceResetMillis);
+        state.set("login-pin", loginPin);
+        state.set("login-op-granted", new ArrayList<>(opGranted));
         state.set("lobby-created", lobbyCreated);
         writeLoc(state, "lobby-spawn", lobbySpawn);
         writeLoc(state, "spawn-noord", spawnNoord);
@@ -1280,7 +1295,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** Admins in creative mode may build in the lobby; everybody else is locked. */
     private boolean isBypass(Player player) {
-        return player.hasPermission("lowkey.admin") && player.getGameMode() == GameMode.CREATIVE;
+        return isAdmin(player) && player.getGameMode() == GameMode.CREATIVE;
     }
 
     private boolean isLocked(Player player) {
@@ -1863,7 +1878,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveState();
         int moved = 0;
         for (Player player : new ArrayList<>(getServer().getOnlinePlayers())) {
-            if (inLobby(player) || player.hasPermission("lowkey.admin")) {
+            if (inLobby(player) || isAdmin(player)) {
                 continue;
             }
             YamlConfiguration data = loadPlayerData(player.getUniqueId());
@@ -2169,7 +2184,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return;
             }
             Player clicker = (Player) audience;
-            if (!clicker.hasPermission("lowkey.admin")) {
+            if (!isAdmin(clicker)) {
                 return;
             }
             final String d = view.getText("datum");
@@ -2515,6 +2530,146 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    // ------------------------------------------------------------------ login (/lowkey login)
+
+    /** players that logged in with the pin; never saved, so everybody has to log in again after a restart */
+    private final Set<UUID> loggedIn = ConcurrentHashMap.newKeySet();
+    /** uuids of players that got op from the login and must lose it again (saved in state.yml in case of a crash) */
+    private final Set<String> opGranted = new HashSet<>();
+    private final Map<UUID, Integer> loginFails = new HashMap<>();
+    private final Map<UUID, Long> loginLockUntil = new HashMap<>();
+    private String loginPin = "1283";
+
+    private static final int LOGIN_MAX_TRIES = 3;
+    private static final long LOGIN_LOCK_MILLIS = 10L * 60_000L;
+
+    /** The owners from config.yml (login.owners) always have access without a pin. */
+    private boolean isOwner(Player player) {
+        List<String> owners = getConfig().getStringList("login.owners");
+        if (owners.isEmpty()) {
+            owners = List.of("r3ktify");
+        }
+        for (String owner : owners) {
+            if (owner.equalsIgnoreCase(player.getName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Console always may. A player may when he is an owner or logged in with the pin. */
+    private boolean isAdmin(CommandSender sender) {
+        if (!(sender instanceof Player)) {
+            return true;
+        }
+        Player player = (Player) sender;
+        return loggedIn.contains(player.getUniqueId()) || isOwner(player);
+    }
+
+    private boolean lockedOut(Player player) {
+        Long until = loginLockUntil.get(player.getUniqueId());
+        long now = System.currentTimeMillis();
+        if (until == null || until <= now) {
+            return false;
+        }
+        long minutes = (until - now + 59_999L) / 60_000L;
+        player.sendMessage(Component.text("Te veel foute pogingen. Probeer het over " + minutes
+                + (minutes == 1 ? " minuut" : " minuten") + " opnieuw.", NamedTextColor.RED));
+        return true;
+    }
+
+    private void openLoginDialog(Player player) {
+        DialogInput pin = DialogInput.text("pin", Component.text("Pincode"))
+                .width(300).maxLength(12).build();
+        DialogAction submit = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            String entered = view.getText("pin");
+            final String code = entered == null ? "" : entered.trim();
+            getServer().getScheduler().runTask(this, () -> attemptLogin(clicker, code));
+        }, CLICK_OPTIONS);
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(menuTitle("Inloggen"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Vul de pincode in voor toegang tot /lowkey en alle commands.", NamedTextColor.GRAY))))
+                        .inputs(List.of(pin))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(Component.text("Inloggen", NamedTextColor.GREEN),
+                                Component.text("Log in met deze pincode."), 150, submit),
+                        ActionButton.create(Component.text("Annuleren", NamedTextColor.GRAY),
+                                Component.text("Sluit dit scherm."), 150, null))));
+        player.showDialog(dialog);
+    }
+
+    private void attemptLogin(Player player, String code) {
+        if (!player.isOnline() || isAdmin(player) || lockedOut(player)) {
+            return;
+        }
+        UUID id = player.getUniqueId();
+        boolean correct = MessageDigest.isEqual(code.getBytes(StandardCharsets.UTF_8),
+                loginPin.getBytes(StandardCharsets.UTF_8));
+        if (correct) {
+            loginFails.remove(id);
+            loginLockUntil.remove(id);
+            loggedIn.add(id);
+            if (!player.isOp()) {
+                player.setOp(true);
+                opGranted.add(id.toString());
+                saveState();
+            }
+            player.updateCommands();
+            player.sendMessage(Component.text("Je bent ingelogd. Je hebt nu toegang tot /lowkey en alle commands tot "
+                    + "je uitlogt of de server verlaat.", NamedTextColor.GREEN));
+            getLogger().info(player.getName() + " logged in with the pin.");
+            notifyOwners(player, player.getName() + " is ingelogd met de pincode.", NamedTextColor.YELLOW);
+            openMenu(player);
+            return;
+        }
+        int fails = loginFails.merge(id, 1, Integer::sum);
+        getLogger().warning(player.getName() + " entered a wrong login pin (" + fails + "/" + LOGIN_MAX_TRIES + ").");
+        notifyOwners(player, player.getName() + " vulde een foute pincode in.", NamedTextColor.RED);
+        if (fails >= LOGIN_MAX_TRIES) {
+            loginFails.remove(id);
+            loginLockUntil.put(id, System.currentTimeMillis() + LOGIN_LOCK_MILLIS);
+            lockedOut(player);
+            return;
+        }
+        player.sendMessage(Component.text("Foute pincode. Je hebt nog " + (LOGIN_MAX_TRIES - fails)
+                + (LOGIN_MAX_TRIES - fails == 1 ? " poging." : " pogingen."), NamedTextColor.RED));
+        openLoginDialog(player);
+    }
+
+    private void notifyOwners(Player about, String text, NamedTextColor color) {
+        for (Player online : getServer().getOnlinePlayers()) {
+            if (!online.equals(about) && isOwner(online)) {
+                online.sendMessage(Component.text(text, color));
+            }
+        }
+    }
+
+    /** Takes back the access (and the temporary op) of a player that logged in with the pin. */
+    private void logout(Player player, boolean announce) {
+        UUID id = player.getUniqueId();
+        boolean wasLoggedIn = loggedIn.remove(id);
+        if (opGranted.remove(id.toString())) {
+            player.setOp(false);
+            saveState();
+        }
+        if (wasLoggedIn && announce) {
+            player.updateCommands();
+            player.sendMessage(Component.text("Je bent uitgelogd.", NamedTextColor.GREEN));
+        }
+    }
+
+    @EventHandler
+    public void onLoginQuit(PlayerQuitEvent event) {
+        logout(event.getPlayer(), false);
+    }
+
     // ------------------------------------------------------------------ main world seed
 
     private static final String PENDING_RESET_FILE = "pending-world-reset.yml";
@@ -2751,6 +2906,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
      * /lowkey countdown <spawn|remove|set <datum> <tijd>|size <getal>> : groot hologram met het logo en de aftelling (verdwijnt bij de launch)
+     * /lowkey login : vraagt om de pincode (standaard 1283) en geeft toegang tot /lowkey en alle commands, tot je uitlogt of de server verlaat. Eigenaars (login.owners in config.yml) hebben altijd toegang
+     * /lowkey pin <4 tot 8 cijfers> : verandert de pincode (alleen eigenaars en de console)
      * /lowkey seed [seed|random|cancel] [confirm] : zet een nieuwe seed voor de main wereld klaar, die bij de volgende herstart wordt aangemaakt (oude wereld wordt bewaard)
      * /lowkey mainworld <open|close> : sluit de main wereld (iedereen behalve admins naar de lobby) of opent hem weer (niemand wordt verplaatst)
      * /lowkey lobby <create|tp|setspawn|delete> : maakt de lege lobby wereld, gaat erheen, zet het lobby spawnpunt of wist de lobby
@@ -2764,8 +2921,38 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (!command.getName().equalsIgnoreCase("lowkey")) {
             return false;
         }
-        if (!sender.hasPermission("lowkey.admin")) {
+        if (args.length >= 1 && args[0].equalsIgnoreCase("login")) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage(Component.text("Alleen spelers kunnen inloggen.", NamedTextColor.RED));
+                return true;
+            }
+            Player player = (Player) sender;
+            if (isOwner(player)) {
+                player.sendMessage(Component.text("Je hebt altijd toegang, inloggen is niet nodig.",
+                        NamedTextColor.YELLOW));
+            } else if (isAdmin(player)) {
+                player.sendMessage(Component.text("Je bent al ingelogd.", NamedTextColor.YELLOW));
+            } else if (!lockedOut(player)) {
+                openLoginDialog(player);
+            }
+            return true;
+        }
+        if (!isAdmin(sender)) {
             sender.sendMessage(Component.text("Je hebt hier geen toegang toe.", NamedTextColor.RED));
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("pin")) {
+            if (sender instanceof Player && !isOwner((Player) sender)) {
+                sender.sendMessage(Component.text("Alleen de eigenaar kan de pincode aanpassen.", NamedTextColor.RED));
+                return true;
+            }
+            if (args.length != 2 || !args[1].matches("\\d{4,8}")) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey pin <4 tot 8 cijfers>", NamedTextColor.GRAY));
+                return true;
+            }
+            loginPin = args[1];
+            saveState();
+            sender.sendMessage(Component.text("De pincode is aangepast.", NamedTextColor.GREEN));
             return true;
         }
         if (sender instanceof Player && (args.length == 0 || (args.length == 1 && args[0].equalsIgnoreCase("menu")))) {
@@ -3051,7 +3238,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -3071,7 +3258,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return;
             }
             Player clicker = (Player) audience;
-            if (!clicker.hasPermission("lowkey.admin")) {
+            if (!isAdmin(clicker)) {
                 return;
             }
             getServer().getScheduler().runTask(this, action);
@@ -3138,6 +3325,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "Team, crew, grace en dood-status.", 150, () -> openPlayersMenu(admin)));
         buttons.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
                 "Eigen bericht en donatiebericht.", 150, () -> openMessagesMenu(admin)));
+        if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
+            buttons.add(button(Component.text("Uitloggen", NamedTextColor.RED),
+                    "Log uit en verlies je toegang tot /lowkey en de commands.", 150, () -> logout(admin, true)));
+        }
         ActionButton close = ActionButton.create(Component.text("Sluiten", NamedTextColor.GRAY),
                 Component.text("Sluit dit menu."), 150, null);
 
@@ -3433,7 +3624,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return;
             }
             Player clicker = (Player) audience;
-            if (!clicker.hasPermission("lowkey.admin")) {
+            if (!isAdmin(clicker)) {
                 return;
             }
             final String text = view.getText("message");
@@ -3580,7 +3771,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** Typing /lowkey (and pressing space / tab) suggests every possibility. */
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (!command.getName().equalsIgnoreCase("lowkey") || !sender.hasPermission("lowkey.admin")) {
+        if (!command.getName().equalsIgnoreCase("lowkey") || !isAdmin(sender)) {
             return List.of();
         }
         List<String> options = new ArrayList<>();
@@ -3602,6 +3793,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("main");
             options.add("mainworld");
             options.add("seed");
+            options.add("pin");
             options.add("countdown");
             options.add("say");
         } else if (args.length == 2) {
