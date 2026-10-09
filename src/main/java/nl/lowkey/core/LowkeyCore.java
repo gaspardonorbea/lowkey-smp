@@ -103,6 +103,8 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -128,6 +130,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * LowkeySMP visuals and rules:
@@ -2768,10 +2772,62 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return;
             }
         }
+        restoreCustomWorlds(new File(archive, levelName), main);
         forgetMainWorldLocations(names);
         marker.delete();
         getLogger().info("Main world reset: the old world was moved to " + archive.getPath()
                 + ", a new world is generated with the seed from server.properties.");
+    }
+
+    /**
+     * Newer Paper versions keep EVERY world inside the main world folder (world/dimensions/<namespace>/<key>), so the
+     * lobby and any other custom world lives there too. Everything except the three vanilla dimensions is copied
+     * from the archived world into the new one, so the lobby survives a seed change.
+     */
+    private void restoreCustomWorlds(File archivedLevel, File newLevel) {
+        File dimensions = new File(archivedLevel, "dimensions");
+        File[] namespaces = dimensions.listFiles(File::isDirectory);
+        if (namespaces == null) {
+            return;
+        }
+        Set<String> vanilla = Set.of("overworld", "the_nether", "the_end");
+        for (File namespace : namespaces) {
+            File[] keys = namespace.listFiles(File::isDirectory);
+            if (keys == null) {
+                continue;
+            }
+            for (File key : keys) {
+                if (namespace.getName().equals("minecraft") && vanilla.contains(key.getName())) {
+                    continue;
+                }
+                File target = new File(new File(new File(newLevel, "dimensions"), namespace.getName()), key.getName());
+                try {
+                    copyDirectory(key.toPath(), target.toPath());
+                    getLogger().info("Kept custom world " + namespace.getName() + "/" + key.getName()
+                            + " through the reset.");
+                } catch (IOException e) {
+                    getLogger().severe("Could not keep custom world " + namespace.getName() + "/" + key.getName()
+                            + " (" + e.getMessage() + "). Copy " + key.getPath() + " to " + target.getPath()
+                            + " by hand while the server is stopped.");
+                }
+            }
+        }
+    }
+
+    private static void copyDirectory(Path from, Path to) throws IOException {
+        List<Path> all;
+        try (Stream<Path> walk = Files.walk(from)) {
+            all = walk.collect(Collectors.toList());
+        }
+        for (Path source : all) {
+            Path destination = to.resolve(from.relativize(source).toString());
+            if (Files.isDirectory(source)) {
+                Files.createDirectories(destination);
+            } else {
+                Files.createDirectories(destination.getParent());
+                Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
     }
 
     /** Spawn points and last known positions in the old main world mean nothing in the new one. */
@@ -2856,7 +2912,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             sender.sendMessage(Component.text("Let op: bij de volgende herstart wordt de huidige main wereld "
                     + "(met Nether en End) verplaatst naar de map " + OLD_WORLDS_DIR + " en maakt de server een "
                     + "nieuwe wereld met " + label + ". Alle bouwwerken, inventories en voortgang in de main wereld "
-                    + "beginnen dan opnieuw. Bevestig met: /lowkey seed " + arg + " confirm", NamedTextColor.RED));
+                    + "beginnen dan opnieuw, de lobby blijft behouden. Bevestig met: /lowkey seed " + arg + " confirm", NamedTextColor.RED));
             return;
         }
         if (!serverPropertiesFile().isFile()) {
