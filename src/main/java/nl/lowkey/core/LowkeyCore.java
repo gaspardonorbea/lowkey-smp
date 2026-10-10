@@ -13,6 +13,8 @@ import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.event.ClickCallback;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -371,6 +373,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
                 donationIntervalTicks, donationIntervalTicks);
+        long websiteMinutes = getConfig().getLong("website-interval-minutes", 20L);
+        if (websiteMinutes > 0L) {
+            // first one after 8 minutes, so it never lands on the same moment as a donation message
+            getServer().getScheduler().runTaskTimer(this, this::broadcastWebsiteMessage,
+                    8L * 60L * 20L, websiteMinutes * 60L * 20L);
+        }
     }
 
     @Override
@@ -1073,6 +1081,47 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             for (Player player : getServer().getOnlinePlayers()) {
                 player.sendMessage(message);
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ website broadcaster
+
+    private static final String DEFAULT_WEBSITE_URL = "https://lowkeysmp.lovable.app";
+    private static final List<String> WEBSITE_MESSAGES = List.of(
+            "Heb je de LowkeySMP website al gezien?",
+            "Bekijk de website van LowkeySMP:",
+            "Kijk eens rond op de LowkeySMP website:",
+            "LowkeySMP heeft een website, ga er eens langs:",
+            "Meer over LowkeySMP vind je op de website:",
+            "Nog niet op de website geweest? Klik hier:"
+    );
+
+    private void broadcastWebsiteMessage() {
+        if (getServer().getOnlinePlayers().isEmpty()) {
+            return;
+        }
+        sendWebsiteMessage();
+    }
+
+    /** One random sentence followed by a clickable link, with the LOWKEY badge, to everybody online. */
+    private void sendWebsiteMessage() {
+        String url = getConfig().getString("website-url", DEFAULT_WEBSITE_URL).trim();
+        if (!url.startsWith("https://") && !url.startsWith("http://")) {
+            url = DEFAULT_WEBSITE_URL;
+        }
+        String shown = url.replaceFirst("^https?://", "");
+        String text = WEBSITE_MESSAGES.get(random.nextInt(WEBSITE_MESSAGES.size()));
+        Component link = Component.text(shown, NamedTextColor.AQUA, TextDecoration.UNDERLINED)
+                .clickEvent(ClickEvent.openUrl(url))
+                .hoverEvent(HoverEvent.showText(Component.text("Klik om de website te openen", NamedTextColor.GRAY)));
+        Component message = Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text(text + " ", NamedTextColor.WHITE))
+                .append(link)
+                .build();
+        for (Player player : getServer().getOnlinePlayers()) {
+            player.sendMessage(message);
         }
     }
 
@@ -2958,6 +3007,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey border <open|close> : opent of sluit de grenzen tussen Noord- en Zuid-chat
      * /lowkey revive <speler> : verwijdert de dood/uitgeschakeld-status van een speler (vooral voor testen)
      * /lowkey give <speler> : geeft een speler in de lobby de LowkeySMP nether star (hotbar slot 5)
+     * /lowkey website : stuurt meteen een websitebericht met klikbare link (ook elke website-interval-minutes minuten automatisch)
      * /lowkey donate : stuurt meteen een willekeurig donatiebericht (voor testen)
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
@@ -3103,6 +3153,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (args.length == 1 && args[0].equalsIgnoreCase("donate")) {
             sender.sendMessage(Component.text("Donatiebericht verstuurd.", NamedTextColor.GREEN));
             broadcastRandomDonationMessage();
+            return true;
+        }
+        if (args.length == 1 && args[0].equalsIgnoreCase("website")) {
+            sender.sendMessage(Component.text("Websitebericht verstuurd.", NamedTextColor.GREEN));
+            sendWebsiteMessage();
             return true;
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("server")) {
@@ -3294,7 +3349,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -3380,7 +3435,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         buttons.add(button(iconLabel(M_PLAYERS, "Spelers", NamedTextColor.WHITE),
                 "Team, crew, grace en dood-status.", 150, () -> openPlayersMenu(admin)));
         buttons.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
-                "Eigen bericht en donatiebericht.", 150, () -> openMessagesMenu(admin)));
+                "Eigen bericht, donatiebericht en websitebericht.", 150, () -> openMessagesMenu(admin)));
         if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
             buttons.add(button(Component.text("Uitloggen", NamedTextColor.RED),
                     "Log uit en verlies je toegang tot /lowkey en de commands.", 150, () -> logout(admin, true)));
@@ -3665,6 +3720,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     broadcastRandomDonationMessage();
                     openMessagesMenu(admin);
                 }));
+        buttons.add(button(iconLabel(M_MESSAGES, "Websitebericht", NamedTextColor.WHITE),
+                "Stuurt meteen een bericht met een klikbare link naar de website naar iedereen.", 150, () -> {
+                    sendWebsiteMessage();
+                    openMessagesMenu(admin);
+                }));
         Component body = Component.text("Berichten naar alle spelers, met de LOWKEY badge.", NamedTextColor.GRAY);
         showMenu(admin, "Berichten", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
     }
@@ -3842,6 +3902,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("border");
             options.add("revive");
             options.add("donate");
+            options.add("website");
             options.add("give");
             options.add("launch");
             options.add("lobby");
