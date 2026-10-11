@@ -10,6 +10,7 @@ import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.input.DialogInput;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
 import net.kyori.adventure.key.Key;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.event.ClickCallback;
@@ -29,6 +30,8 @@ import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.block.Block;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.command.Command;
@@ -389,6 +392,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(this, this);
         mace = new MaceManager(this);
         mace.start();
+        loadChecklist();
 
         LocalTime startupTime = LocalTime.now(LOWKEY_ZONE);
         hoursOpen = startupTime.getHour() >= HOURS_OPEN_FROM;
@@ -768,12 +772,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         team.addEntry(player.getName());
         teamNames.put(id, wanted);
 
-        // tab list entry: icons + name in the team colour
+        // tab list entry: icons + name in the team colour. Eliminated players are grey and struck through,
+        // players that are in the lobby get a small grey "lobby" behind their name.
         TextColor nameColor = side == Side.NONE ? NamedTextColor.WHITE : TextColor.color(side.rgb);
-        player.playerListName(Component.text()
-                .append(icons)
-                .append(Component.text(player.getName(), nameColor))
-                .build());
+        boolean out = isEliminated(player);
+        TextComponent.Builder entry = Component.text().append(icons);
+        if (out) {
+            entry.append(Component.text(player.getName(), NamedTextColor.GRAY, TextDecoration.STRIKETHROUGH));
+        } else {
+            entry.append(Component.text(player.getName(), nameColor));
+            if (inLobby(player)) {
+                entry.append(Component.text(" lobby", NamedTextColor.DARK_GRAY));
+            }
+        }
+        player.playerListName(entry.build());
     }
 
     private void removeTeam(Player player) {
@@ -800,21 +812,70 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ tab list header + footer
 
-    /** The logo, followed by blank lines so the list starts below it (logo is 36 px = 4 lines). */
+    /** The logo (36 px = 4 lines), then a gradient tagline and a little room before the player list. */
     private Component tabHeader() {
+        Component tagline = MiniMessage.miniMessage()
+                .deserialize("<gradient:#c084fc:#f472b6><bold>L O W K E Y   P E A K</bold></gradient>");
         return Component.text()
                 .append(glyph(LOGO))
                 .append(Component.newline()).append(Component.text(" "))
                 .append(Component.newline()).append(Component.text(" "))
                 .append(Component.newline()).append(Component.text(" "))
+                .append(Component.newline()).append(tagline)
                 .append(Component.newline()).append(Component.text(" "))
                 .build();
     }
 
+    /** Team counts, online count, Nether and border status and the website in a gradient. */
     private Component tabFooter() {
-        return Component.text()
+        int noord = 0;
+        int zuid = 0;
+        for (Player online : getServer().getOnlinePlayers()) {
+            Side side = sideCache.getOrDefault(online.getUniqueId(), Side.NONE);
+            if (side == Side.NOORD) {
+                noord++;
+            } else if (side == Side.ZUID) {
+                zuid++;
+            }
+        }
+        Component teams = Component.text()
+                .append(glyph(NOORD_ICON))
+                .append(Component.space())
+                .append(Component.text("Noord ", TextColor.color(Side.NOORD.rgb)))
+                .append(Component.text(String.valueOf(noord), NamedTextColor.WHITE, TextDecoration.BOLD))
+                .append(Component.text("     "))
+                .append(glyph(ZUID_ICON))
+                .append(Component.space())
+                .append(Component.text("Zuid ", TextColor.color(Side.ZUID.rgb)))
+                .append(Component.text(String.valueOf(zuid), NamedTextColor.WHITE, TextDecoration.BOLD))
+                .build();
+        Component online = Component.text()
                 .append(Component.text("Online: ", NamedTextColor.GRAY))
                 .append(Component.text(String.valueOf(getServer().getOnlinePlayers().size()), NamedTextColor.WHITE))
+                .build();
+        Component status = Component.text()
+                .append(Component.text("Nether ", NamedTextColor.GRAY))
+                .append(Component.text(netherOpen ? "open" : "dicht",
+                        netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED))
+                .append(Component.text("   |   ", NamedTextColor.DARK_GRAY))
+                .append(Component.text("Grenzen ", NamedTextColor.GRAY))
+                .append(Component.text(bordersDropped ? "open" : "dicht",
+                        bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED))
+                .build();
+        String url = getConfig().getString("website-url", DEFAULT_WEBSITE_URL).trim();
+        if (!url.startsWith("https://") && !url.startsWith("http://")) {
+            url = DEFAULT_WEBSITE_URL;
+        }
+        String shown = MiniMessage.miniMessage().escapeTags(url.replaceFirst("^https?://", ""));
+        Component website = MiniMessage.miniMessage()
+                .deserialize("<gradient:#c084fc:#f472b6>" + shown + "</gradient>");
+        return Component.text()
+                .append(Component.text(" "))
+                .append(Component.newline()).append(teams)
+                .append(Component.newline()).append(online)
+                .append(Component.newline()).append(status)
+                .append(Component.newline()).append(Component.text(" "))
+                .append(Component.newline()).append(website)
                 .build();
     }
 
@@ -1053,6 +1114,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         storedEliminated.put(player.getUniqueId(), value);
         player.getPersistentDataContainer().set(eliminatedKey, PersistentDataType.BOOLEAN, value);
         saveIdentity(player);
+        refreshTags(player);
     }
 
     /**
@@ -1500,17 +1562,28 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return lobbyProtect && world != null && lobbySpawn != null && world.equals(lobbySpawn.getWorld());
     }
 
-    /** A few times per second: nobody in the lobby keeps a freezing overlay (powder snow, cold biomes). */
+    /**
+     * A few times per second, for everybody in the lobby: always full health, full food and full saturation (so no
+     * hunger ever), and no freezing overlay (powder snow, cold biomes) while the lobby protection is on.
+     */
     private void tickLobbyPlayers() {
-        if (!lobbyProtect) {
-            return;
-        }
         World world = lobbyWorld();
         if (world == null) {
             return;
         }
         for (Player player : world.getPlayers()) {
-            if (player.getFreezeTicks() > 0) {
+            AttributeInstance maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
+            double max = maxHealth == null ? 20.0 : maxHealth.getValue();
+            if (!player.isDead() && player.getHealth() < max) {
+                player.setHealth(max);
+            }
+            if (player.getFoodLevel() < 20) {
+                player.setFoodLevel(20);
+            }
+            if (player.getSaturation() < 20f) {
+                player.setSaturation(20f);
+            }
+            if (lobbyProtect && player.getFreezeTicks() > 0) {
                 player.setFreezeTicks(0);
             }
         }
@@ -3146,6 +3219,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey setspawn <noord|zuid> : zet het spawnpunt van een team op jouw positie
      * /lowkey main : stuurt jou (admin) naar de gamewereld, ook als de server nog niet gelanceerd is
      * /lowkey mace [status|aan|uit|cooldown <minuten>|cooldownreset|give <speler>|reset|test <noord|zuid|geen>] : de ene mace van de server
+     * /lowkey checklist : de checklist met alles wat je moet doen voor je de grenzen dropt
      * /lowkey say <bericht> : stuurt een bericht met de LOWKEY badge naar iedereen
      */
     @Override
@@ -3412,6 +3486,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             enterGame((Player) sender, false, true);
             return true;
         }
+        if (args.length == 1 && args[0].equalsIgnoreCase("checklist")) {
+            if (sender instanceof Player) {
+                openChecklistMenu((Player) sender);
+            } else {
+                sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
+            }
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("mace")) {
             mace.handleCommand(sender, Arrays.copyOfRange(args, 1, args.length));
             return true;
@@ -3479,7 +3561,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test>  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test>  |  /lowkey checklist  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -3568,6 +3650,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "Eigen bericht, donatiebericht en websitebericht.", 150, () -> openMessagesMenu(admin)));
         buttons.add(button(iconLabel(M_MACE, "Mace", NamedTextColor.WHITE),
                 "De ene mace: cooldown, houder en reset.", 150, () -> mace.openMenu(admin)));
+        buttons.add(button(iconLabel(M_BORDERS, "Checklist", NamedTextColor.WHITE),
+                "Alles wat je moet doen voor je de grenzen dropt.", 150, () -> openChecklistMenu(admin)));
         if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
             buttons.add(button(Component.text("Uitloggen", NamedTextColor.RED),
                     "Log uit en verlies je toegang tot /lowkey en de commands.", 150, () -> logout(admin, true)));
@@ -3724,10 +3808,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     }));
         } else {
             buttons.add(button(iconLabel(M_BORDERS, "Grenzen droppen", NamedTextColor.GREEN),
-                    "Chat van Noord en Zuid wordt weer een gedeelde chat.", 150, () -> {
-                        setBordersDropped(true);
-                        openWorldMenu(admin);
-                    }));
+                    "Opent eerst de checklist, zodat je niks vergeet.", 150, () -> openChecklistMenu(admin)));
         }
 
         if (lobbyCreated && lobbyWorld() != null) {
@@ -4019,6 +4100,161 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         });
     }
 
+    // ------------------------------------------------------------------ border checklist
+
+    /** One step of the checklist: what it is called, and the command to run for it. */
+    private static final class CheckStep {
+        final String id;
+        final String title;
+        final String command;
+
+        CheckStep(String id, String title, String command) {
+            this.id = id;
+            this.title = title;
+            this.command = command;
+        }
+    }
+
+    /**
+     * Everything that has to be done before the borders drop. A WorldGuard flag is removed by running the flag command
+     * WITHOUT a value behind it. Add or change steps here.
+     */
+    private static final List<CheckStep> BORDER_STEPS = List.of(
+            new CheckStep("block-break", "block-break flag weg", "/rg flag teamgrens block-break"),
+            new CheckStep("block-place", "block-place flag weg", "/rg flag teamgrens block-place"),
+            new CheckStep("entry", "entry flag weg", "/rg flag teamgrens entry"),
+            new CheckStep("enderpearl", "enderpearl flag weg", "/rg flag teamgrens enderpearl"),
+            new CheckStep("chorus", "chorus-fruit-teleport flag weg", "/rg flag teamgrens chorus-fruit-teleport"),
+            new CheckStep("controle", "Controleren dat er niks meer staat", "/rg info teamgrens"));
+
+    private final Set<String> checklistDone = new HashSet<>();
+
+    private File checklistFile() {
+        return new File(getDataFolder(), "checklist.yml");
+    }
+
+    private void loadChecklist() {
+        checklistDone.clear();
+        YamlConfiguration y = YamlConfiguration.loadConfiguration(checklistFile());
+        for (CheckStep step : BORDER_STEPS) {
+            if (y.getBoolean("done." + step.id, false)) {
+                checklistDone.add(step.id);
+            }
+        }
+    }
+
+    private void saveChecklist() {
+        YamlConfiguration y = new YamlConfiguration();
+        for (CheckStep step : BORDER_STEPS) {
+            y.set("done." + step.id, checklistDone.contains(step.id));
+        }
+        try {
+            getDataFolder().mkdirs();
+            y.save(checklistFile());
+        } catch (IOException e) {
+            getLogger().warning("Kon checklist.yml niet opslaan: " + e.getMessage());
+        }
+    }
+
+    private void toggleChecklistStep(String id) {
+        if (!checklistDone.remove(id)) {
+            checklistDone.add(id);
+        }
+        saveChecklist();
+    }
+
+    private List<String> missingChecklistSteps() {
+        List<String> missing = new ArrayList<>();
+        for (CheckStep step : BORDER_STEPS) {
+            if (!checklistDone.contains(step.id)) {
+                missing.add(step.title);
+            }
+        }
+        return missing;
+    }
+
+    /** The checklist: tick every step, then press "Grenzen droppen" at the bottom. */
+    private void openChecklistMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        for (CheckStep step : BORDER_STEPS) {
+            boolean done = checklistDone.contains(step.id);
+            Component label = Component.text()
+                    .append(Component.text(done ? "[x] " : "[ ] ", done ? NamedTextColor.GREEN : NamedTextColor.GRAY))
+                    .append(Component.text(step.title, done ? NamedTextColor.GREEN : NamedTextColor.WHITE))
+                    .build();
+            String tooltip = "Doe: " + step.command + (step.command.startsWith("/rg flag") ? " (zonder waarde)" : "")
+                    + ". Klik om af te vinken.";
+            buttons.add(button(label, tooltip, 300, () -> {
+                toggleChecklistStep(step.id);
+                openChecklistMenu(admin);
+            }));
+        }
+        buttons.add(button(iconLabel(M_MESSAGES, "Commands in chat", NamedTextColor.AQUA),
+                "Zet alle commands klikbaar in de chat. Daarna sluit dit scherm.", 300, () -> sendChecklistCommands(admin)));
+        buttons.add(button(iconLabel(M_BORDERS, "Grenzen droppen", NamedTextColor.GREEN),
+                "Kan pas als alle stappen afgevinkt zijn.", 300, () -> tryDropBorders(admin)));
+        buttons.add(button(Component.text("Checklist leegmaken", NamedTextColor.RED),
+                "Haalt alle vinkjes weg.", 300, () -> {
+                    checklistDone.clear();
+                    saveChecklist();
+                    openChecklistMenu(admin);
+                }));
+
+        int done = BORDER_STEPS.size() - missingChecklistSteps().size();
+        Component body = joinLines(
+                statusLine("Voortgang", done + " van " + BORDER_STEPS.size(),
+                        done == BORDER_STEPS.size() ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
+                statusLine("Grenzen", bordersDropped ? "open" : "dicht",
+                        bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
+                Component.text("Klik een stap aan als je hem gedaan hebt.", NamedTextColor.GRAY));
+        ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(menuTitle("Border checklist"))
+                        .body(List.of(DialogBody.plainMessage(body)))
+                        .build())
+                .type(DialogType.multiAction(buttons, back, 1)));
+        admin.showDialog(dialog);
+    }
+
+    /** Every command of the checklist as a clickable line in the chat. */
+    private void sendChecklistCommands(Player admin) {
+        admin.sendMessage(Component.text("Klik een command om hem in je chatbalk te zetten. Bij de flags laat je de "
+                + "waarde weg, dan wordt de flag verwijderd.", NamedTextColor.GRAY));
+        for (CheckStep step : BORDER_STEPS) {
+            admin.sendMessage(Component.text(step.command, NamedTextColor.AQUA)
+                    .clickEvent(ClickEvent.suggestCommand(step.command))
+                    .hoverEvent(HoverEvent.showText(Component.text("Klik om in je chatbalk te zetten", NamedTextColor.GRAY))));
+        }
+        admin.sendMessage(Component.text("Open de checklist weer met /lowkey checklist.", NamedTextColor.GRAY));
+    }
+
+    private void tryDropBorders(Player admin) {
+        if (bordersDropped) {
+            admin.sendMessage(Component.text("De grenzen zijn al open.", NamedTextColor.YELLOW));
+            openChecklistMenu(admin);
+            return;
+        }
+        List<String> missing = missingChecklistSteps();
+        if (!missing.isEmpty()) {
+            admin.sendMessage(Component.text("Nog niet klaar: " + String.join(", ", missing) + ".", NamedTextColor.RED));
+            openChecklistMenu(admin);
+            return;
+        }
+        confirm(admin,
+                "Grenzen droppen?",
+                "Alle stappen staan op klaar. Noord en Zuid krijgen weer een gedeelde chat.",
+                "Je kunt de grenzen later weer dichtzetten.",
+                Component.text("Ja, droppen", NamedTextColor.GREEN),
+                () -> {
+                    setBordersDropped(true);
+                    openChecklistMenu(admin);
+                },
+                () -> openChecklistMenu(admin));
+    }
+
     // ------------------------------------------------------------------ tab completion
 
     /** Typing /lowkey (and pressing space / tab) suggests every possibility. */
@@ -4053,6 +4289,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("pin");
             options.add("countdown");
             options.add("mace");
+            options.add("checklist");
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
