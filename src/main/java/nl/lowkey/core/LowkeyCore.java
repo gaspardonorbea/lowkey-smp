@@ -135,6 +135,21 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.bukkit.entity.Allay;
+import org.bukkit.entity.Item;
+import org.bukkit.entity.ItemFrame;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.entity.ItemSpawnEvent;
+import org.bukkit.event.inventory.ClickType;
+import org.bukkit.event.inventory.CraftItemEvent;
+import org.bukkit.event.inventory.InventoryPickupItemEvent;
+import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.event.inventory.PrepareItemCraftEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.inventory.Recipe;
+import org.bukkit.inventory.ShapedRecipe;
+import java.util.EnumSet;
 /**
  * LowkeySMP visuals and rules:
  * - tab list: logo on top, "Online: N" at the bottom, Noord (red) above Zuid (blue), icons before every name
@@ -143,7 +158,9 @@ import java.util.stream.Stream;
  * - grace period: the first hour of playtime per player you simply respawn
  * - after that: elimination message, big title, blood, straight to spectator, then the lobby
  * - lobby: void world, hotbar item (slot 5) with a teleport dialog, locked until /lowkey launch
+ * - the one and only mace (see MaceManager)
  *
+ * Team, grace and elimination are stored in plugins/LowkeyCore/players/&lt;uuid&gt;.yml, so they survive a world reset.
  * All glyphs live in the "lowkey:tags" font from the resource pack.
  */
 public final class LowkeyCore extends JavaPlugin implements Listener {
@@ -181,6 +198,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private static final String M_DONATE = "\uE050";
     private static final String M_BACK = "\uE051";
     private static final String M_COUNTDOWN = "\uE052";
+    /** the mace icon of the Mace tab: add \uE053 to tags.json with the vanilla mace item texture */
+    static final String M_MACE = "\uE053";
 
     /** -1 px space: pieces of a wide picture are joined with this so there is no seam */
     private static final String SPACER = "\uE010";
@@ -191,7 +210,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private static final String TITLE_GLYPH = "\uE030" + SPACER + "\uE031" + SPACER + "\uE032";
 
     /** which side (team) a player is on */
-    private enum Side {
+    enum Side {
         NOORD("noord", NOORD_ICON, 0xFF5555, '1'),
         ZUID("zuid", ZUID_ICON, 0x55AAFF, '2'),
         NONE("geen", null, 0xFFFFFF, '3');
@@ -227,6 +246,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** grace time left in ms, as of the timestamp in graceLast (only for online players) */
     private final Map<UUID, Long> graceLeft = new HashMap<>();
     private final Map<UUID, Long> graceLast = new HashMap<>();
+
+    /**
+     * Team and elimination of every online player, loaded from players/<uuid>.yml when they join. This file lives in
+     * the plugin folder, so (unlike the player's own data in the world folder) it survives a world reset.
+     */
+    private final Map<UUID, Side> storedSide = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> storedEliminated = new ConcurrentHashMap<>();
+    /** counts the grace ticks so the identity file is only rewritten about every 30 seconds */
+    private int graceSaveCounter;
+
+    /** the one and only mace */
+    private MaceManager mace;
 
     /** side of every online player, readable from the async chat thread */
     private final Map<UUID, Side> sideCache = new ConcurrentHashMap<>();
@@ -356,6 +387,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         cleanupTeams();
         getServer().getPluginManager().registerEvents(this, this);
+        mace = new MaceManager(this);
+        mace.start();
 
         LocalTime startupTime = LocalTime.now(LOWKEY_ZONE);
         hoursOpen = startupTime.getHour() >= HOURS_OPEN_FROM;
@@ -383,6 +416,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        if (mace != null) {
+            mace.stop();
+        }
         removeCountdownEntity();
         for (Player player : getServer().getOnlinePlayers()) {
             logout(player, false); // nobody keeps a temporary op after a restart
@@ -409,7 +445,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ helpers
 
-    private static Component glyph(String characters) {
+    static Component glyph(String characters) {
         return Component.text(characters).font(FONT).color(NamedTextColor.WHITE);
     }
 
@@ -434,21 +470,92 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    // ------------------------------------------------------------------ identity (team, grace, elimination)
+
+    /**
+     * Loads team, grace and elimination of a player from players/<uuid>.yml. The first time with this version the
+     * values the old version kept in the player's own data (world/playerdata) are copied over. From then on the file in
+     * the plugin folder is the one that counts, so a world reset or a replaced playerdata folder no longer wipes them.
+     */
+    private void loadIdentity(Player player) {
+        UUID id = player.getUniqueId();
+        YamlConfiguration data = loadPlayerData(id);
+        String source = "players file";
+        if (!data.getBoolean("identity.migrated", false)) {
+            PersistentDataContainer pdc = player.getPersistentDataContainer();
+            String rawSide = pdc.get(sideKey, PersistentDataType.STRING);
+            Long grace = pdc.get(graceKey, PersistentDataType.LONG);
+            Integer version = pdc.get(graceVersionKey, PersistentDataType.INTEGER);
+            Boolean eliminated = pdc.get(eliminatedKey, PersistentDataType.BOOLEAN);
+            if (rawSide != null) {
+                data.set("identity.side", rawSide);
+            }
+            if (grace != null) {
+                data.set("identity.grace-left", grace);
+            }
+            if (version != null) {
+                data.set("identity.grace-version", version);
+            }
+            if (eliminated != null) {
+                data.set("identity.eliminated", eliminated);
+            }
+            data.set("identity.migrated", true);
+            savePlayerData(id, data);
+            source = "copied from player data";
+        }
+        Side side = Side.fromId(data.getString("identity.side"));
+        if (side == null) {
+            side = Side.NONE;
+        }
+        boolean eliminated = data.getBoolean("identity.eliminated", false);
+        storedSide.put(id, side);
+        storedEliminated.put(id, eliminated);
+        getLogger().info("[identity] " + player.getName() + " team=" + side.id + " eliminated=" + eliminated
+                + " grace-ms=" + (data.contains("identity.grace-left") ? data.getLong("identity.grace-left") : "nieuw")
+                + " (" + source + ")");
+    }
+
+    /** Writes team, grace and elimination of an online player to players/<uuid>.yml. */
+    private void saveIdentity(Player player) {
+        UUID id = player.getUniqueId();
+        Side side = storedSide.get(id);
+        Boolean eliminated = storedEliminated.get(id);
+        if (side == null || eliminated == null) {
+            return; // not loaded yet: never overwrite what is in the file
+        }
+        YamlConfiguration data = loadPlayerData(id);
+        data.set("identity.migrated", true);
+        data.set("identity.side", side == Side.NONE ? null : side.id);
+        data.set("identity.eliminated", eliminated);
+        if (graceLeft.containsKey(id)) {
+            data.set("identity.grace-left", graceRemaining(id));
+            data.set("identity.grace-version", graceResetVersion);
+        }
+        savePlayerData(id, data);
+    }
+
     // ------------------------------------------------------------------ side (Noord / Zuid)
 
-    private Side getSide(Player player) {
-        String raw = player.getPersistentDataContainer().get(sideKey, PersistentDataType.STRING);
-        Side side = Side.fromId(raw);
-        return side == null ? Side.NONE : side;
+    Side getSide(Player player) {
+        Side cached = storedSide.get(player.getUniqueId());
+        if (cached != null) {
+            return cached;
+        }
+        loadIdentity(player);
+        Side loaded = storedSide.get(player.getUniqueId());
+        return loaded == null ? Side.NONE : loaded;
     }
 
     private void setSide(Player player, Side side) {
+        getSide(player); // makes sure the identity is loaded
+        storedSide.put(player.getUniqueId(), side);
         PersistentDataContainer data = player.getPersistentDataContainer();
         if (side == Side.NONE) {
             data.remove(sideKey);
         } else {
             data.set(sideKey, PersistentDataType.STRING, side.id);
         }
+        saveIdentity(player);
         refreshTags(player);
     }
 
@@ -456,27 +563,29 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** Start (or resume) grace tracking for a player who just joined. */
     private void startTracking(Player player, boolean announce) {
+        loadIdentity(player);
+        UUID id = player.getUniqueId();
+        YamlConfiguration stored = loadPlayerData(id);
         PersistentDataContainer data = player.getPersistentDataContainer();
-        Long stored = data.get(graceKey, PersistentDataType.LONG);
 
         long left;
-        if (stored == null) {
+        if (!stored.contains("identity.grace-left")) {
             left = graceMillis; // first time on the server: fresh grace
-            data.set(graceKey, PersistentDataType.LONG, left);
         } else {
-            left = stored;
-            Integer received = data.get(graceVersionKey, PersistentDataType.INTEGER);
-            if (graceResetVersion > 0 && (received == null || received < graceResetVersion)) {
+            left = stored.getLong("identity.grace-left");
+            boolean hasVersion = stored.contains("identity.grace-version");
+            int received = stored.getInt("identity.grace-version", 0);
+            if (graceResetVersion > 0 && (!hasVersion || received < graceResetVersion)) {
                 // /lowkey graceall happened while this player was offline
                 left = graceResetMillis;
-                data.set(graceKey, PersistentDataType.LONG, left);
             }
         }
+        data.set(graceKey, PersistentDataType.LONG, left);
         data.set(graceVersionKey, PersistentDataType.INTEGER, graceResetVersion);
 
-        UUID id = player.getUniqueId();
         graceLeft.put(id, left);
         graceLast.put(id, System.currentTimeMillis());
+        saveIdentity(player);
         refreshTags(player);
 
         if (announce && left > 0) {
@@ -509,11 +618,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (graceLeft.containsKey(player.getUniqueId())) {
             player.getPersistentDataContainer().set(graceKey, PersistentDataType.LONG, graceRemaining(player));
         }
+        saveIdentity(player);
     }
 
     /** Runs every second: counts down grace time, ends it when it hits zero. */
     private void tickGrace() {
         long now = System.currentTimeMillis();
+        graceSaveCounter++;
+        boolean saveNow = graceSaveCounter % 30 == 0;
         for (Player player : getServer().getOnlinePlayers()) {
             UUID id = player.getUniqueId();
             Long left = graceLeft.get(id);
@@ -530,8 +642,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             player.getPersistentDataContainer().set(graceKey, PersistentDataType.LONG, remaining);
 
             if (remaining <= 0L) {
+                saveIdentity(player);
                 refreshTags(player); // yellow icon disappears
                 player.sendMessage(graceEndedMessage());
+            } else if (saveNow) {
+                saveIdentity(player);
             }
         }
     }
@@ -541,6 +656,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         graceLeft.put(id, millis);
         graceLast.put(id, System.currentTimeMillis());
         player.getPersistentDataContainer().set(graceKey, PersistentDataType.LONG, millis);
+        saveIdentity(player);
         refreshTags(player);
         if (millis > 0L && !inLobby(player)) {
             player.sendMessage(graceMessage(millis));
@@ -749,6 +865,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build());
 
         persist(player);
+        storedSide.remove(player.getUniqueId());
+        storedEliminated.remove(player.getUniqueId());
         graceLeft.remove(player.getUniqueId());
         graceLast.remove(player.getUniqueId());
         netherNotice.remove(player.getUniqueId());
@@ -922,12 +1040,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     private boolean isEliminated(Player player) {
-        Boolean value = player.getPersistentDataContainer().get(eliminatedKey, PersistentDataType.BOOLEAN);
-        return value != null && value;
+        Boolean cached = storedEliminated.get(player.getUniqueId());
+        if (cached != null) {
+            return cached;
+        }
+        loadIdentity(player);
+        return storedEliminated.getOrDefault(player.getUniqueId(), false);
     }
 
     private void setEliminated(Player player, boolean value) {
+        isEliminated(player); // makes sure the identity is loaded
+        storedEliminated.put(player.getUniqueId(), value);
         player.getPersistentDataContainer().set(eliminatedKey, PersistentDataType.BOOLEAN, value);
+        saveIdentity(player);
     }
 
     /**
@@ -1342,12 +1467,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return getServer().getWorlds().get(0);
     }
 
-    private boolean inLobby(Player player) {
+    boolean inLobby(Player player) {
         return lobbySpawn != null && lobbySpawn.getWorld() != null && player.getWorld().equals(lobbySpawn.getWorld());
     }
 
     /** Admins in creative mode may build in the lobby; everybody else is locked. */
-    private boolean isBypass(Player player) {
+    boolean isBypass(Player player) {
         return isAdmin(player) && player.getGameMode() == GameMode.CREATIVE;
     }
 
@@ -1555,7 +1680,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return null;
     }
 
-    // ---- per player files (stashed inventory + last position in the game world)
+    // ---- per player files (stashed inventory + last position in the game world + identity)
 
     private File playerFile(UUID id) {
         return new File(new File(getDataFolder(), "players"), id + ".yml");
@@ -1577,7 +1702,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    private static void writeLoc(ConfigurationSection root, String path, Location loc) {
+    static void writeLoc(ConfigurationSection root, String path, Location loc) {
         if (loc == null || loc.getWorld() == null) {
             root.set(path, null);
             return;
@@ -1590,7 +1715,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         root.set(path + ".pitch", (double) loc.getPitch());
     }
 
-    private static Location readLoc(ConfigurationSection root, String path) {
+    static Location readLoc(ConfigurationSection root, String path) {
         String worldName = root.getString(path + ".world");
         if (worldName == null) {
             return null;
@@ -2611,7 +2736,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     /** Console always may. A player may when he is an owner or logged in with the pin. */
-    private boolean isAdmin(CommandSender sender) {
+    boolean isAdmin(CommandSender sender) {
         if (!(sender instanceof Player)) {
             return true;
         }
@@ -3020,6 +3145,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey lobby protect <aan|uit> : zet de wereldbescherming van de lobby aan of uit (sneeuw, ijs, vuur, water, explosies, pistons, groei, mobs, weer)
      * /lowkey setspawn <noord|zuid> : zet het spawnpunt van een team op jouw positie
      * /lowkey main : stuurt jou (admin) naar de gamewereld, ook als de server nog niet gelanceerd is
+     * /lowkey mace [status|aan|uit|cooldown <minuten>|cooldownreset|give <speler>|reset|test <noord|zuid|geen>] : de ene mace van de server
      * /lowkey say <bericht> : stuurt een bericht met de LOWKEY badge naar iedereen
      */
     @Override
@@ -3286,6 +3412,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             enterGame((Player) sender, false, true);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("mace")) {
+            mace.handleCommand(sender, Arrays.copyOfRange(args, 1, args.length));
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("countdown")) {
             String choice = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
             if (choice.equals("spawn")) {
@@ -3349,21 +3479,21 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test>  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
 
     // ------------------------------------------------------------------ admin panel (dialog menus)
 
-    private static final ClickCallback.Options CLICK_OPTIONS =
+    static final ClickCallback.Options CLICK_OPTIONS =
             ClickCallback.Options.builder().uses(1).lifetime(Duration.ofMinutes(10)).build();
 
     /**
      * One clickable button in a dialog. The action runs on the main thread and only when the person
      * who clicked really has the lowkey.admin permission (so a menu can never be abused).
      */
-    private ActionButton button(Component label, String tooltip, int width, Runnable action) {
+    ActionButton button(Component label, String tooltip, int width, Runnable action) {
         DialogAction dialogAction = DialogAction.customClick((view, audience) -> {
             if (!(audience instanceof Player)) {
                 return;
@@ -3378,7 +3508,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     /** A menu label: the vanilla item icon from the resource pack, a space and the text. */
-    private Component iconLabel(String icon, String text, TextColor color) {
+    Component iconLabel(String icon, String text, TextColor color) {
         return Component.text()
                 .append(glyph(icon))
                 .append(Component.space())
@@ -3386,19 +3516,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build();
     }
 
-    private static Component menuTitle(String text) {
+    static Component menuTitle(String text) {
         return Component.text(text, NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD);
     }
 
     /** One status line: grey label, coloured value. */
-    private static Component statusLine(String label, String value, TextColor valueColor) {
+    static Component statusLine(String label, String value, TextColor valueColor) {
         return Component.text()
                 .append(Component.text(label + ": ", NamedTextColor.GRAY))
                 .append(Component.text(value, valueColor))
                 .build();
     }
 
-    private static Component joinLines(Component... lines) {
+    static Component joinLines(Component... lines) {
         Component result = Component.empty();
         for (int i = 0; i < lines.length; i++) {
             if (i > 0) {
@@ -3409,11 +3539,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return result;
     }
 
-    private ActionButton backButton(String tooltip, Runnable back) {
+    ActionButton backButton(String tooltip, Runnable back) {
         return button(iconLabel(M_BACK, "Terug", NamedTextColor.GRAY), tooltip, 150, back);
     }
 
-    private void showMenu(Player admin, String title, Component body, List<ActionButton> buttons, ActionButton exit) {
+    void showMenu(Player admin, String title, Component body, List<ActionButton> buttons, ActionButton exit) {
         Dialog dialog = Dialog.create(builder -> builder.empty()
                 .base(DialogBase.builder(menuTitle(title))
                         .body(List.of(DialogBody.plainMessage(body)))
@@ -3422,8 +3552,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         admin.showDialog(dialog);
     }
 
-    /** The main menu, opened with /lowkey: four sections. */
-    private void openMenu(Player admin) {
+    /** The main menu, opened with /lowkey: five sections. */
+    void openMenu(Player admin) {
         if (!admin.isOnline()) {
             return;
         }
@@ -3436,6 +3566,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "Team, crew, grace en dood-status.", 150, () -> openPlayersMenu(admin)));
         buttons.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
                 "Eigen bericht, donatiebericht en websitebericht.", 150, () -> openMessagesMenu(admin)));
+        buttons.add(button(iconLabel(M_MACE, "Mace", NamedTextColor.WHITE),
+                "De ene mace: cooldown, houder en reset.", 150, () -> mace.openMenu(admin)));
         if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
             buttons.add(button(Component.text("Uitloggen", NamedTextColor.RED),
                     "Log uit en verlies je toegang tot /lowkey en de commands.", 150, () -> logout(admin, true)));
@@ -3771,8 +3903,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     // ---- shared screens
 
     /** A yes / no screen. "Annuleren" runs `back`. */
-    private void confirm(Player admin, String title, String line1, String line2, Component yesLabel,
-                         Runnable yes, Runnable back) {
+    void confirm(Player admin, String title, String line1, String line2, Component yesLabel,
+                 Runnable yes, Runnable back) {
         Dialog dialog = Dialog.create(builder -> builder.empty()
                 .base(DialogBase.builder(Component.text(title, NamedTextColor.RED, TextDecoration.BOLD))
                         .body(List.of(
@@ -3787,6 +3919,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** A list with one button per online player; clicking one continues with `next`. */
     private void pickPlayer(Player admin, String title, Consumer<Player> next) {
+        pickPlayer(admin, title, next, () -> openPlayersMenu(admin));
+    }
+
+    /** Same, but "Terug" goes to wherever `backTo` says. */
+    void pickPlayer(Player admin, String title, Consumer<Player> next, Runnable backTo) {
         List<ActionButton> buttons = new ArrayList<>();
         for (Player online : getServer().getOnlinePlayers()) {
             buttons.add(button(Component.text(online.getName()), "Kies " + online.getName() + ".", 100, () -> {
@@ -3794,11 +3931,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     next.accept(online);
                 } else {
                     admin.sendMessage(Component.text("Die speler is niet meer online.", NamedTextColor.RED));
-                    openPlayersMenu(admin);
+                    backTo.run();
                 }
             }));
         }
-        ActionButton back = backButton("Terug naar spelers.", () -> openPlayersMenu(admin));
+        ActionButton back = backButton("Terug.", backTo);
 
         Dialog dialog = Dialog.create(builder -> builder.empty()
                 .base(DialogBase.builder(menuTitle(title))
@@ -3890,6 +4027,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (!command.getName().equalsIgnoreCase("lowkey") || !isAdmin(sender)) {
             return List.of();
         }
+        if (args.length >= 2 && args[0].equalsIgnoreCase("mace")) {
+            return mace.tabComplete(args);
+        }
         List<String> options = new ArrayList<>();
         if (args.length == 1) {
             options.add("menu");
@@ -3912,6 +4052,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("seed");
             options.add("pin");
             options.add("countdown");
+            options.add("mace");
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
@@ -3992,5 +4133,985 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
         }
         return result;
+    }
+}
+
+// ====================================================================================
+// The one and only mace. Package-private on purpose: Java allows it in this same file.
+// ====================================================================================
+
+/**
+ * The one and only mace of LowkeySMP.
+ * <ul>
+ * <li>Vanilla recipe, but only one mace can ever be crafted. From that moment the recipe is removed and every other way
+ * to get a mace is blocked (crafter, creative, /give, stale copies).</li>
+ * <li>When it is crafted everybody gets a title: "Noord heeft de mace ontgrendeld" (red) or "Zuid heeft de mace
+ * ontgrendeld" (blue).</li>
+ * <li>A real smash attack (falling more than 1.5 blocks) that hits a PLAYER starts a cooldown (default 10 minutes).
+ * The cooldown belongs to the mace: it keeps running when the mace changes owner or lies on the ground, and it is shown
+ * as the item cooldown overlay on the mace. It only runs while the mace is in the main world.</li>
+ * <li>The mace cannot be put in chests, ender chests, shulkers, item frames, bundles, pots and so on, so it is always
+ * in a player's inventory or on the ground. If it is destroyed, it is gone for good (until an admin resets it).</li>
+ * </ul>
+ * Everything is saved in mace.yml (separate from state.yml, which is rewritten as a whole by LowkeyCore).
+ */
+final class MaceManager implements Listener {
+
+    private enum Where { NONE, CARRIED, GROUND, DESTROYED }
+
+    /** Inventories a mace may be in while it is open. Everything else counts as storage and is blocked. */
+    private static final Set<InventoryType> ALLOWED_TOP = EnumSet.of(
+            InventoryType.CRAFTING, InventoryType.PLAYER, InventoryType.WORKBENCH, InventoryType.ANVIL,
+            InventoryType.ENCHANTING, InventoryType.GRINDSTONE, InventoryType.SMITHING, InventoryType.CREATIVE,
+            InventoryType.MERCHANT);
+
+    private final LowkeyCore core;
+    private final NamespacedKey maceKey;
+    private final NamespacedKey recipeKey = NamespacedKey.minecraft("mace");
+    private final File file;
+    private Recipe vanillaRecipe;
+
+    // ---- saved in mace.yml
+    private boolean enabled = true;
+    /** true from the moment the first mace is crafted (or given): no second one can be made */
+    private boolean crafted;
+    /** counts up with every reset: a mace of an older generation is removed wherever it shows up */
+    private int generation = 1;
+    private long cooldownMinutes = 10L;
+    private long cooldownLeftMs;
+    private Where where = Where.NONE;
+    /** the player who carries (or last carried) the mace */
+    private UUID holder;
+    private String holderName = "";
+    private UUID groundItem;
+    private Location groundLoc;
+
+    // ---- not saved
+    private UUID pendingCrafter;
+    private long lastTickMs;
+    private boolean dirty;
+    private int saveCounter;
+
+    MaceManager(LowkeyCore core) {
+        this.core = core;
+        this.maceKey = new NamespacedKey(core, "mace");
+        this.file = new File(core.getDataFolder(), "mace.yml");
+        load();
+    }
+
+    // ------------------------------------------------------------------ lifecycle
+
+    void start() {
+        vanillaRecipe = Bukkit.getRecipe(recipeKey);
+        if (crafted) {
+            Bukkit.removeRecipe(recipeKey);
+        }
+        lastTickMs = System.currentTimeMillis();
+        core.getServer().getPluginManager().registerEvents(this, core);
+        core.getServer().getScheduler().runTaskTimer(core, this::tick, 20L, 20L);
+    }
+
+    void stop() {
+        save();
+    }
+
+    private static UUID parseUuid(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(raw);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private void load() {
+        YamlConfiguration y = YamlConfiguration.loadConfiguration(file);
+        enabled = y.getBoolean("enabled", true);
+        crafted = y.getBoolean("crafted", false);
+        generation = Math.max(1, y.getInt("generation", 1));
+        cooldownMinutes = Math.max(0L, y.getLong("cooldown-minutes", 10L));
+        cooldownLeftMs = Math.max(0L, y.getLong("cooldown-left-ms", 0L));
+        try {
+            where = Where.valueOf(y.getString("where", "NONE"));
+        } catch (IllegalArgumentException e) {
+            where = Where.NONE;
+        }
+        holder = parseUuid(y.getString("holder"));
+        holderName = y.getString("holder-name", "");
+        groundItem = parseUuid(y.getString("ground-item"));
+        groundLoc = LowkeyCore.readLoc(y, "ground-loc");
+    }
+
+    private void save() {
+        YamlConfiguration y = new YamlConfiguration();
+        y.set("enabled", enabled);
+        y.set("crafted", crafted);
+        y.set("generation", generation);
+        y.set("cooldown-minutes", cooldownMinutes);
+        y.set("cooldown-left-ms", cooldownLeftMs);
+        y.set("where", where.name());
+        y.set("holder", holder == null ? null : holder.toString());
+        y.set("holder-name", holderName);
+        y.set("ground-item", groundItem == null ? null : groundItem.toString());
+        LowkeyCore.writeLoc(y, "ground-loc", groundLoc);
+        try {
+            core.getDataFolder().mkdirs();
+            y.save(file);
+        } catch (IOException e) {
+            core.getLogger().warning("Kon mace.yml niet opslaan: " + e.getMessage());
+        }
+        dirty = false;
+        saveCounter = 0;
+    }
+
+    // ------------------------------------------------------------------ item helpers
+
+    private static boolean isMace(ItemStack item) {
+        return item != null && item.getType() == Material.MACE;
+    }
+
+    private Integer taggedGeneration(ItemStack item) {
+        if (!isMace(item) || !item.hasItemMeta()) {
+            return null;
+        }
+        return item.getItemMeta().getPersistentDataContainer().get(maceKey, PersistentDataType.INTEGER);
+    }
+
+    /** The real mace of this generation. */
+    private boolean isValidMace(ItemStack item) {
+        Integer gen = taggedGeneration(item);
+        return gen != null && gen == generation;
+    }
+
+    /** A mace of an older generation (from before a reset). */
+    private boolean isStale(ItemStack item) {
+        Integer gen = taggedGeneration(item);
+        return gen != null && gen != generation;
+    }
+
+    private static boolean isBundle(ItemStack item) {
+        return item != null && item.getType().name().endsWith("BUNDLE");
+    }
+
+    private ItemStack createMace() {
+        ItemStack item = new ItemStack(Material.MACE);
+        ItemMeta meta = item.getItemMeta();
+        meta.getPersistentDataContainer().set(maceKey, PersistentDataType.INTEGER, generation);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private boolean hasValidMace(Player player) {
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (isValidMace(item)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String formatTime(long ms) {
+        long totalSeconds = (ms + 999L) / 1000L;
+        return String.format(Locale.ROOT, "%d:%02d", totalSeconds / 60L, totalSeconds % 60L);
+    }
+
+    private static String where(Location loc) {
+        if (loc == null || loc.getWorld() == null) {
+            return "onbekend";
+        }
+        return loc.getBlockX() + ", " + loc.getBlockY() + ", " + loc.getBlockZ() + " (" + loc.getWorld().getName() + ")";
+    }
+
+    // ------------------------------------------------------------------ the one-second tick
+
+    private boolean cooldownRuns() {
+        if (where == Where.GROUND) {
+            return true;
+        }
+        if (where == Where.CARRIED && holder != null) {
+            Player p = Bukkit.getPlayer(holder);
+            return p != null && !core.inLobby(p);
+        }
+        return false;
+    }
+
+    private void tick() {
+        long now = System.currentTimeMillis();
+        long elapsed = Math.max(0L, now - lastTickMs);
+        lastTickMs = now;
+
+        if (cooldownLeftMs > 0L && cooldownRuns()) {
+            cooldownLeftMs = Math.max(0L, cooldownLeftMs - elapsed);
+            dirty = true;
+        }
+        if (where == Where.GROUND) {
+            checkGround();
+        }
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            purgeInvalidMaces(player);
+            syncOverlay(player);
+        }
+        if (dirty && ++saveCounter >= 30) {
+            save();
+        }
+    }
+
+    /** The mace lies on the ground: follow the item, and notice when it is gone (lava, void, despawn...). */
+    private void checkGround() {
+        Entity entity = groundItem == null ? null : Bukkit.getEntity(groundItem);
+        if (entity != null && entity.isValid()) {
+            groundLoc = entity.getLocation().clone();
+            return;
+        }
+        if (groundLoc != null && groundLoc.getWorld() != null) {
+            World world = groundLoc.getWorld();
+            if (world.isChunkLoaded(groundLoc.getBlockX() >> 4, groundLoc.getBlockZ() >> 4)) {
+                markDestroyed();
+            }
+        }
+    }
+
+    private void markDestroyed() {
+        where = Where.DESTROYED;
+        groundItem = null;
+        cooldownLeftMs = 0L;
+        save();
+        core.getLogger().info("De mace is vernietigd.");
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (core.isAdmin(player)) {
+                player.sendMessage(Component.text("De mace is vernietigd en is nu weg. Reset hem in /lowkey, Mace, "
+                        + "als hij opnieuw gecraft mag worden.", NamedTextColor.YELLOW));
+            }
+        }
+    }
+
+    /** Removes every mace that should not exist: older generations, and (once the real one is crafted) untagged ones. */
+    private void purgeInvalidMaces(Player player) {
+        if (core.isBypass(player)) {
+            return;
+        }
+        PlayerInventory inv = player.getInventory();
+        ItemStack[] contents = inv.getContents();
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack item = contents[i];
+            if (isMace(item) && !isValidMace(item) && (isStale(item) || crafted)) {
+                inv.setItem(i, null);
+                core.getLogger().info("Een ongeldige mace is weggehaald bij " + player.getName() + ".");
+            }
+        }
+        ItemStack cursor = player.getItemOnCursor();
+        if (isMace(cursor) && !isValidMace(cursor) && (isStale(cursor) || crafted)) {
+            player.setItemOnCursor(null);
+        }
+    }
+
+    /** Puts the cooldown overlay on the mace of whoever holds it, and takes it away from everybody else. */
+    private void syncOverlay(Player player) {
+        int want = 0;
+        if (cooldownLeftMs > 0L && !core.inLobby(player) && hasValidMace(player)) {
+            want = (int) Math.max(1L, (cooldownLeftMs + 49L) / 50L);
+        }
+        int current = player.getCooldown(Material.MACE);
+        if (want == 0) {
+            if (current > 0) {
+                player.setCooldown(Material.MACE, 0);
+            }
+        } else if (Math.abs(current - want) > 10) {
+            player.setCooldown(Material.MACE, want);
+        }
+    }
+
+    // ------------------------------------------------------------------ crafting (only one, ever)
+
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onPrepareCraft(PrepareItemCraftEvent event) {
+        ItemStack result = event.getInventory().getResult();
+        if (!isMace(result)) {
+            return;
+        }
+        if (!enabled || crafted) {
+            event.getInventory().setResult(null);
+            return;
+        }
+        event.getInventory().setResult(createMace());
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onCraftCheck(CraftItemEvent event) {
+        if (!isMace(event.getRecipe().getResult()) || !(event.getWhoClicked() instanceof Player)) {
+            return;
+        }
+        Player player = (Player) event.getWhoClicked();
+        if (!enabled || crafted) {
+            event.setCancelled(true);
+            return;
+        }
+        if (event.isShiftClick()) {
+            event.setCancelled(true);
+            player.sendMessage(Component.text("Craft de mace zonder shift te gebruiken.", NamedTextColor.RED));
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onCraft(CraftItemEvent event) {
+        if (!isMace(event.getRecipe().getResult()) || !(event.getWhoClicked() instanceof Player)) {
+            return;
+        }
+        final UUID crafterId = event.getWhoClicked().getUniqueId();
+        // provisional: blocks everybody else right away, confirmed (or undone) one tick later
+        crafted = true;
+        pendingCrafter = crafterId;
+        Bukkit.getScheduler().runTask(core, () -> finishCraft(crafterId));
+    }
+
+    private void finishCraft(UUID crafterId) {
+        if (pendingCrafter == null || !pendingCrafter.equals(crafterId)) {
+            return;
+        }
+        pendingCrafter = null;
+        Player crafter = Bukkit.getPlayer(crafterId);
+        boolean found = where == Where.GROUND
+                || (crafter != null && (hasValidMace(crafter) || isValidMace(crafter.getItemOnCursor())));
+        if (!found) {
+            // the click did not actually hand out a mace
+            crafted = false;
+            where = Where.NONE;
+            save();
+            return;
+        }
+        holder = crafterId;
+        holderName = crafter != null ? crafter.getName() : "";
+        if (where != Where.GROUND) {
+            where = Where.CARRIED;
+        }
+        cooldownLeftMs = 0L;
+        Bukkit.removeRecipe(recipeKey);
+        save();
+        if (crafter != null) {
+            announce(crafter);
+        }
+    }
+
+    private void restoreRecipe() {
+        if (Bukkit.getRecipe(recipeKey) != null) {
+            return;
+        }
+        Recipe recipe = vanillaRecipe;
+        if (recipe == null) {
+            ShapedRecipe fallback = new ShapedRecipe(recipeKey, new ItemStack(Material.MACE));
+            fallback.shape("H", "B");
+            fallback.setIngredient('H', Material.HEAVY_CORE);
+            fallback.setIngredient('B', Material.BREEZE_ROD);
+            recipe = fallback;
+            vanillaRecipe = fallback;
+        }
+        Bukkit.addRecipe(recipe);
+    }
+
+    // ------------------------------------------------------------------ the title
+
+    private static Component titleFor(LowkeyCore.Side side) {
+        if (side == LowkeyCore.Side.NONE) {
+            return Component.text("De mace is gecraft", NamedTextColor.WHITE);
+        }
+        String name = side == LowkeyCore.Side.NOORD ? "Noord" : "Zuid";
+        return Component.text()
+                .append(Component.text(name, TextColor.color(side.rgb)))
+                .append(Component.text(" heeft de mace ontgrendeld", NamedTextColor.WHITE))
+                .build();
+    }
+
+    private static Title buildTitle(LowkeyCore.Side side) {
+        return Title.title(titleFor(side), Component.empty(),
+                Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(3000), Duration.ofMillis(1000)));
+    }
+
+    private void announce(Player crafter) {
+        Title title = buildTitle(core.getSide(crafter));
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            player.showTitle(title);
+            player.playSound(player.getLocation(), Sound.ENTITY_WITHER_SPAWN, 0.8f, 1.0f);
+        }
+    }
+
+    // ------------------------------------------------------------------ smash attack + cooldown
+
+    /** The attacker when this hit is a real smash attack with a mace, otherwise null. */
+    private Player smashAttacker(EntityDamageByEntityEvent event) {
+        if (!(event.getDamager() instanceof Player) || event.getCause() != EntityDamageEvent.DamageCause.ENTITY_ATTACK) {
+            return null;
+        }
+        Player attacker = (Player) event.getDamager();
+        if (!isMace(attacker.getInventory().getItemInMainHand())) {
+            return null;
+        }
+        double fall = attacker.getFallDistance();
+        if (fall > 1.5 && !attacker.isGliding()) {
+            return attacker;
+        }
+        return null;
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onSmashCheck(EntityDamageByEntityEvent event) {
+        Player attacker = smashAttacker(event);
+        if (attacker == null) {
+            return;
+        }
+        if (!enabled) {
+            event.setCancelled(true);
+            attacker.sendActionBar(Component.text("De mace staat uit.", NamedTextColor.RED));
+            return;
+        }
+        if (event.getEntity() instanceof Player && cooldownLeftMs > 0L) {
+            event.setCancelled(true);
+            attacker.sendActionBar(Component.text()
+                    .append(Component.text("De mace is nog ", NamedTextColor.RED))
+                    .append(Component.text(formatTime(cooldownLeftMs), NamedTextColor.WHITE))
+                    .append(Component.text(" op cooldown", NamedTextColor.RED))
+                    .build());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onSmashApply(EntityDamageByEntityEvent event) {
+        Player attacker = smashAttacker(event);
+        if (attacker == null || !(event.getEntity() instanceof Player) || event.getEntity().equals(attacker)) {
+            return;
+        }
+        if (isValidMace(attacker.getInventory().getItemInMainHand())) {
+            holder = attacker.getUniqueId();
+            holderName = attacker.getName();
+            where = Where.CARRIED;
+        }
+        if (cooldownMinutes <= 0L) {
+            return;
+        }
+        cooldownLeftMs = cooldownMinutes * 60_000L;
+        lastTickMs = System.currentTimeMillis();
+        save();
+        syncOverlay(attacker);
+    }
+
+    // ------------------------------------------------------------------ where is the mace
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onItemSpawn(ItemSpawnEvent event) {
+        Item item = event.getEntity();
+        ItemStack stack = item.getItemStack();
+        if (!isMace(stack)) {
+            return;
+        }
+        if (isValidMace(stack)) {
+            where = Where.GROUND;
+            groundItem = item.getUniqueId();
+            groundLoc = item.getLocation().clone();
+            UUID thrower = item.getThrower();
+            if (thrower != null) {
+                holder = thrower;
+                String name = Bukkit.getOfflinePlayer(thrower).getName();
+                holderName = name == null ? "" : name;
+            }
+            save();
+        } else if (isStale(stack) || crafted) {
+            event.setCancelled(true); // an old or fake mace never lands on the ground
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPickup(EntityPickupItemEvent event) {
+        if (!(event.getEntity() instanceof Player)) {
+            return;
+        }
+        ItemStack stack = event.getItem().getItemStack();
+        if (!isValidMace(stack)) {
+            return;
+        }
+        Player player = (Player) event.getEntity();
+        where = Where.CARRIED;
+        holder = player.getUniqueId();
+        holderName = player.getName();
+        groundItem = null;
+        save();
+    }
+
+    /** Mobs never pick the mace up. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onMobPickup(EntityPickupItemEvent event) {
+        if (!(event.getEntity() instanceof Player) && isMace(event.getItem().getItemStack())) {
+            event.setCancelled(true);
+        }
+    }
+
+    // ------------------------------------------------------------------ the mace never goes into storage
+
+    private static boolean isStorage(Inventory top) {
+        return top != null && !ALLOWED_TOP.contains(top.getType());
+    }
+
+    private void denyStorage(Player player) {
+        player.sendMessage(Component.text("De mace kan nergens in opgeslagen worden. Hij moet in je inventory blijven.",
+                NamedTextColor.RED));
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onClick(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player)) {
+            return;
+        }
+        Player player = (Player) event.getWhoClicked();
+        ItemStack cursor = event.getCursor();
+        ItemStack current = event.getCurrentItem();
+
+        // bundles
+        if ((isMace(cursor) && isBundle(current)) || (isBundle(cursor) && isMace(current))) {
+            event.setCancelled(true);
+            denyStorage(player);
+            return;
+        }
+
+        Inventory top = event.getView().getTopInventory();
+        if (!isStorage(top)) {
+            return;
+        }
+        Inventory clicked = event.getClickedInventory();
+        if (clicked == null) {
+            return;
+        }
+        boolean intoStorage = false;
+        if (clicked.equals(top)) {
+            if (isMace(cursor)) {
+                intoStorage = true;
+            }
+            if (event.getClick() == ClickType.NUMBER_KEY) {
+                int button = event.getHotbarButton();
+                if (button >= 0 && isMace(player.getInventory().getItem(button))) {
+                    intoStorage = true;
+                }
+            }
+            if (event.getClick() == ClickType.SWAP_OFFHAND && isMace(player.getInventory().getItemInOffHand())) {
+                intoStorage = true;
+            }
+        } else if (event.isShiftClick() && isMace(current)) {
+            intoStorage = true;
+        }
+        if (intoStorage) {
+            event.setCancelled(true);
+            denyStorage(player);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onDrag(InventoryDragEvent event) {
+        if (!(event.getWhoClicked() instanceof Player) || !isMace(event.getOldCursor())) {
+            return;
+        }
+        Inventory top = event.getView().getTopInventory();
+        if (!isStorage(top)) {
+            return;
+        }
+        for (int slot : event.getRawSlots()) {
+            if (slot < top.getSize()) {
+                event.setCancelled(true);
+                denyStorage((Player) event.getWhoClicked());
+                return;
+            }
+        }
+    }
+
+    /** Hoppers never suck the mace up. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHopperPickup(InventoryPickupItemEvent event) {
+        if (isMace(event.getItem().getItemStack())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onInteractEntity(PlayerInteractEntityEvent event) {
+        Player player = event.getPlayer();
+        if (!isMace(player.getInventory().getItem(event.getHand()))) {
+            return;
+        }
+        if (event.getRightClicked() instanceof ItemFrame || event.getRightClicked() instanceof Allay) {
+            event.setCancelled(true);
+            denyStorage(player);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onArmorStand(PlayerArmorStandManipulateEvent event) {
+        if (isMace(event.getPlayerItem())) {
+            event.setCancelled(true);
+            denyStorage(event.getPlayer());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onInteractBlock(PlayerInteractEvent event) {
+        if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getClickedBlock() == null) {
+            return;
+        }
+        if (event.getClickedBlock().getType() == Material.DECORATED_POT && isMace(event.getItem())) {
+            event.setCancelled(true);
+            denyStorage(event.getPlayer());
+        }
+    }
+
+    // ------------------------------------------------------------------ admin actions
+
+    private void setEnabled(CommandSender sender, boolean on) {
+        enabled = on;
+        save();
+        sender.sendMessage(Component.text("De mace staat nu " + (on ? "aan." : "uit. Hij kan niet gecraft of gebruikt worden."),
+                NamedTextColor.GREEN));
+    }
+
+    private void setCooldownMinutes(CommandSender sender, long minutes) {
+        cooldownMinutes = Math.max(0L, Math.min(1440L, minutes));
+        save();
+        sender.sendMessage(Component.text("De mace cooldown is nu " + cooldownMinutes + " minuten"
+                + (cooldownMinutes == 0L ? " (geen cooldown)." : "."), NamedTextColor.GREEN));
+    }
+
+    private void resetCooldown(CommandSender sender) {
+        cooldownLeftMs = 0L;
+        save();
+        sender.sendMessage(Component.text("De cooldown van de mace is weggehaald.", NamedTextColor.GREEN));
+    }
+
+    private void giveMace(CommandSender giver, Player target) {
+        if (core.inLobby(target)) {
+            giver.sendMessage(Component.text(target.getName() + " is in de lobby. De mace hoort bij de echte game en kan "
+                    + "daar niet in de inventory zitten.", NamedTextColor.RED));
+            return;
+        }
+        if (crafted && (where == Where.CARRIED || where == Where.GROUND)) {
+            giver.sendMessage(Component.text("De mace bestaat al (" + statusWord() + "). Reset hem eerst als je een nieuwe "
+                    + "wilt geven.", NamedTextColor.RED));
+            return;
+        }
+        if (!target.getInventory().addItem(createMace()).isEmpty()) {
+            giver.sendMessage(Component.text("De inventory van " + target.getName() + " zit vol.", NamedTextColor.RED));
+            return;
+        }
+        crafted = true;
+        where = Where.CARRIED;
+        holder = target.getUniqueId();
+        holderName = target.getName();
+        groundItem = null;
+        cooldownLeftMs = 0L;
+        Bukkit.removeRecipe(recipeKey);
+        save();
+        giver.sendMessage(Component.text(target.getName() + " heeft de mace gekregen.", NamedTextColor.GREEN));
+    }
+
+    private void reset(CommandSender sender) {
+        generation++;
+        int removed = 0;
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            PlayerInventory inv = player.getInventory();
+            ItemStack[] contents = inv.getContents();
+            for (int i = 0; i < contents.length; i++) {
+                if (isMace(contents[i])) {
+                    inv.setItem(i, null);
+                    removed++;
+                }
+            }
+            if (isMace(player.getItemOnCursor())) {
+                player.setItemOnCursor(null);
+                removed++;
+            }
+            player.setCooldown(Material.MACE, 0);
+        }
+        if (groundItem != null) {
+            Entity entity = Bukkit.getEntity(groundItem);
+            if (entity != null) {
+                entity.remove();
+                removed++;
+            }
+        }
+        crafted = false;
+        where = Where.NONE;
+        holder = null;
+        holderName = "";
+        groundItem = null;
+        groundLoc = null;
+        cooldownLeftMs = 0L;
+        pendingCrafter = null;
+        restoreRecipe();
+        save();
+        sender.sendMessage(Component.text("De mace is gereset: hij mag weer gecraft worden. " + removed
+                + " oude mace(s) zijn weggehaald (een mace in een offline inventory verdwijnt zodra die speler joint).",
+                NamedTextColor.GREEN));
+    }
+
+    private void testTitle(Player admin, LowkeyCore.Side side) {
+        admin.showTitle(buildTitle(side));
+        admin.playSound(admin.getLocation(), Sound.ENTITY_WITHER_SPAWN, 0.8f, 1.0f);
+    }
+
+    // ------------------------------------------------------------------ status
+
+    private String statusWord() {
+        if (!crafted) {
+            return "nog niet gecraft";
+        }
+        if (where == Where.DESTROYED) {
+            return "vernietigd";
+        }
+        if (where == Where.GROUND) {
+            return "op de grond";
+        }
+        return "in bezit van " + (holderName.isEmpty() ? "onbekend" : holderName);
+    }
+
+    private String locationWord() {
+        if (!crafted || where == Where.DESTROYED || where == Where.NONE) {
+            return "-";
+        }
+        if (where == Where.GROUND) {
+            return where(groundLoc);
+        }
+        Player p = holder == null ? null : Bukkit.getPlayer(holder);
+        if (p == null) {
+            return "houder is offline";
+        }
+        if (core.inLobby(p)) {
+            return "houder is in de lobby";
+        }
+        return where(p.getLocation());
+    }
+
+    private String cooldownWord() {
+        if (cooldownLeftMs <= 0L) {
+            return "klaar";
+        }
+        return formatTime(cooldownLeftMs) + (cooldownRuns() ? "" : " (gepauzeerd)");
+    }
+
+    private void sendStatus(CommandSender sender) {
+        sender.sendMessage(Component.text("Mace: " + (enabled ? "aan" : "uit") + " | status: " + statusWord()
+                + " | locatie: " + locationWord() + " | cooldown: " + cooldownWord() + " | cooldown duur: "
+                + cooldownMinutes + " min", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("Gebruik: /lowkey mace <status|aan|uit|cooldown <minuten>|cooldownreset|give <speler>"
+                + "|reset|test <noord|zuid|geen>>", NamedTextColor.GRAY));
+    }
+
+    // ------------------------------------------------------------------ command
+
+    /** args are the arguments after "mace". */
+    void handleCommand(CommandSender sender, String[] args) {
+        String sub = args.length == 0 ? "status" : args[0].toLowerCase(Locale.ROOT);
+        if (sub.equals("status")) {
+            sendStatus(sender);
+        } else if (sub.equals("aan")) {
+            setEnabled(sender, true);
+        } else if (sub.equals("uit")) {
+            setEnabled(sender, false);
+        } else if (sub.equals("cooldown")) {
+            long minutes = -1L;
+            if (args.length == 2) {
+                try {
+                    minutes = Long.parseLong(args[1]);
+                } catch (NumberFormatException ignored) {
+                    minutes = -1L;
+                }
+            }
+            if (minutes < 0L) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey mace cooldown <minuten>", NamedTextColor.GRAY));
+            } else {
+                setCooldownMinutes(sender, minutes);
+            }
+        } else if (sub.equals("cooldownreset")) {
+            resetCooldown(sender);
+        } else if (sub.equals("give")) {
+            Player target = args.length == 2 ? Bukkit.getPlayerExact(args[1]) : null;
+            if (args.length != 2) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey mace give <speler>", NamedTextColor.GRAY));
+            } else if (target == null) {
+                sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
+            } else {
+                giveMace(sender, target);
+            }
+        } else if (sub.equals("reset")) {
+            if (args.length == 2 && args[1].equalsIgnoreCase("confirm")) {
+                reset(sender);
+            } else if (sender instanceof Player) {
+                final Player admin = (Player) sender;
+                openResetConfirm(admin);
+            } else {
+                sender.sendMessage(Component.text("Gebruik in de console: /lowkey mace reset confirm", NamedTextColor.GRAY));
+            }
+        } else if (sub.equals("test")) {
+            LowkeyCore.Side side = args.length == 2 ? LowkeyCore.Side.fromId(args[1].toLowerCase(Locale.ROOT)) : null;
+            if (!(sender instanceof Player) || side == null) {
+                sender.sendMessage(Component.text("Gebruik in-game: /lowkey mace test <noord|zuid|geen>", NamedTextColor.GRAY));
+            } else {
+                testTitle((Player) sender, side);
+            }
+        } else {
+            sendStatus(sender);
+        }
+    }
+
+    /** args are ALL arguments (args[0] is "mace"). */
+    List<String> tabComplete(String[] args) {
+        List<String> options = new ArrayList<>();
+        if (args.length == 2) {
+            options.add("status");
+            options.add("aan");
+            options.add("uit");
+            options.add("cooldown");
+            options.add("cooldownreset");
+            options.add("give");
+            options.add("reset");
+            options.add("test");
+        } else if (args.length == 3) {
+            String sub = args[1].toLowerCase(Locale.ROOT);
+            if (sub.equals("give")) {
+                for (Player player : Bukkit.getOnlinePlayers()) {
+                    options.add(player.getName());
+                }
+            } else if (sub.equals("cooldown")) {
+                options.add("5");
+                options.add("10");
+                options.add("15");
+            } else if (sub.equals("reset")) {
+                options.add("confirm");
+            } else if (sub.equals("test")) {
+                options.add("noord");
+                options.add("zuid");
+                options.add("geen");
+            }
+        }
+        String typed = args[args.length - 1].toLowerCase(Locale.ROOT);
+        List<String> result = new ArrayList<>();
+        for (String option : options) {
+            if (option.toLowerCase(Locale.ROOT).startsWith(typed)) {
+                result.add(option);
+            }
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------------------ the Mace tab in /lowkey
+
+    void openMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Cooldown instellen", NamedTextColor.WHITE),
+                "Stel de cooldown van de mace in (in minuten).", 150, () -> openCooldownDialog(admin)));
+        if (enabled) {
+            buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Mace uitzetten", NamedTextColor.RED),
+                    "Niemand kan de mace dan craften of gebruiken.", 150, () -> {
+                        setEnabled(admin, false);
+                        openMenu(admin);
+                    }));
+        } else {
+            buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Mace aanzetten", NamedTextColor.GREEN),
+                    "De mace kan weer gecraft en gebruikt worden.", 150, () -> {
+                        setEnabled(admin, true);
+                        openMenu(admin);
+                    }));
+        }
+        if (cooldownLeftMs > 0L) {
+            buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Cooldown wissen", NamedTextColor.WHITE),
+                    "Haalt de lopende cooldown van de mace weg.", 150, () -> {
+                        resetCooldown(admin);
+                        openMenu(admin);
+                    }));
+        }
+        buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Titel testen", NamedTextColor.WHITE),
+                "Laat de titel alleen aan jou zien.", 150, () -> openTitleTest(admin)));
+        buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Mace geven", NamedTextColor.WHITE),
+                "Geeft de mace aan een speler (alleen als hij nog niet bestaat).", 150,
+                () -> core.pickPlayer(admin, "Mace geven", target -> {
+                    giveMace(admin, target);
+                    openMenu(admin);
+                }, () -> openMenu(admin))));
+        buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Mace resetten", NamedTextColor.RED),
+                "Haalt de mace weg en laat hem opnieuw craften.", 150, () -> openResetConfirm(admin)));
+
+        Component body = LowkeyCore.joinLines(
+                LowkeyCore.statusLine("Mace", enabled ? "aan" : "uit", enabled ? NamedTextColor.GREEN : NamedTextColor.RED),
+                LowkeyCore.statusLine("Status", statusWord(), !crafted ? NamedTextColor.YELLOW
+                        : (where == Where.DESTROYED ? NamedTextColor.RED : NamedTextColor.GREEN)),
+                LowkeyCore.statusLine("Locatie", locationWord(), NamedTextColor.WHITE),
+                LowkeyCore.statusLine("Cooldown", cooldownWord(),
+                        cooldownLeftMs > 0L ? NamedTextColor.RED : NamedTextColor.GREEN),
+                LowkeyCore.statusLine("Cooldown duur", cooldownMinutes + " minuten", NamedTextColor.WHITE));
+        core.showMenu(admin, "Mace", body, buttons, core.backButton("Terug naar het hoofdmenu.", () -> core.openMenu(admin)));
+    }
+
+    private void openResetConfirm(Player admin) {
+        core.confirm(admin,
+                "Mace resetten?",
+                "De mace wordt overal weggehaald en mag daarna opnieuw gecraft worden.",
+                "De cooldown wordt ook gewist.",
+                Component.text("Ja, resetten", NamedTextColor.RED),
+                () -> {
+                    reset(admin);
+                    openMenu(admin);
+                },
+                () -> openMenu(admin));
+    }
+
+    private void openTitleTest(Player admin) {
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(core.button(Component.text("Noord", NamedTextColor.RED), "Laat de Noord titel zien.", 100,
+                () -> testTitle(admin, LowkeyCore.Side.NOORD)));
+        buttons.add(core.button(Component.text("Zuid", NamedTextColor.BLUE), "Laat de Zuid titel zien.", 100,
+                () -> testTitle(admin, LowkeyCore.Side.ZUID)));
+        buttons.add(core.button(Component.text("Geen team", NamedTextColor.GRAY), "Laat de titel zonder team zien.", 100,
+                () -> testTitle(admin, LowkeyCore.Side.NONE)));
+        core.showMenu(admin, "Titel testen",
+                Component.text("De titel verschijnt alleen bij jou. Sluit dit scherm om hem te zien.", NamedTextColor.GRAY),
+                buttons, core.backButton("Terug naar de mace.", () -> openMenu(admin)));
+    }
+
+    private void openCooldownDialog(Player admin) {
+        DialogInput minutes = DialogInput.text("minuten", Component.text("Cooldown in minuten (0 tot 1440)"))
+                .width(300).initial(String.valueOf(cooldownMinutes)).maxLength(4).build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!core.isAdmin(clicker)) {
+                return;
+            }
+            final String text = view.getText("minuten");
+            Bukkit.getScheduler().runTask(core, () -> {
+                long value = -1L;
+                try {
+                    value = Long.parseLong(text == null ? "" : text.trim());
+                } catch (NumberFormatException ignored) {
+                    value = -1L;
+                }
+                if (value < 0L || value > 1440L) {
+                    clicker.sendMessage(Component.text("Geef een getal tussen 0 en 1440.", NamedTextColor.RED));
+                } else {
+                    setCooldownMinutes(clicker, value);
+                }
+                openMenu(clicker);
+            });
+        }, LowkeyCore.CLICK_OPTIONS);
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(LowkeyCore.menuTitle("Mace cooldown"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Zo lang moet de mace wachten na een smash attack op een speler.", NamedTextColor.GRAY))))
+                        .inputs(List.of(minutes))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(core.iconLabel(LowkeyCore.M_MACE, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla de cooldown op."), 150, save),
+                        core.backButton("Terug naar de mace.", () -> openMenu(admin)))));
+        admin.showDialog(dialog);
     }
 }
