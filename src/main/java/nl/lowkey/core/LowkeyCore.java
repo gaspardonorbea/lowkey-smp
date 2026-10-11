@@ -78,6 +78,7 @@ import org.bukkit.event.player.PlayerArmorStandManipulateEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
+import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -826,7 +827,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build();
     }
 
-    /** Team counts, online count, Nether and border status and the website in a gradient. */
+    /** Team counts, online count and the website in a gradient. */
     private Component tabFooter() {
         int noord = 0;
         int zuid = 0;
@@ -853,15 +854,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(Component.text("Online: ", NamedTextColor.GRAY))
                 .append(Component.text(String.valueOf(getServer().getOnlinePlayers().size()), NamedTextColor.WHITE))
                 .build();
-        Component status = Component.text()
-                .append(Component.text("Nether ", NamedTextColor.GRAY))
-                .append(Component.text(netherOpen ? "open" : "dicht",
-                        netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED))
-                .append(Component.text("   |   ", NamedTextColor.DARK_GRAY))
-                .append(Component.text("Grenzen ", NamedTextColor.GRAY))
-                .append(Component.text(bordersDropped ? "open" : "dicht",
-                        bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED))
-                .build();
         String url = getConfig().getString("website-url", DEFAULT_WEBSITE_URL).trim();
         if (!url.startsWith("https://") && !url.startsWith("http://")) {
             url = DEFAULT_WEBSITE_URL;
@@ -873,7 +865,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(Component.text(" "))
                 .append(Component.newline()).append(teams)
                 .append(Component.newline()).append(online)
-                .append(Component.newline()).append(status)
                 .append(Component.newline()).append(Component.text(" "))
                 .append(Component.newline()).append(website)
                 .build();
@@ -1400,6 +1391,50 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
 
         event.motd(line1.append(Component.newline()).append(line2));
+    }
+
+    // ------------------------------------------------------------------ no private messages between the teams
+
+    private static final Set<String> WHISPER_COMMANDS = Set.of("tell", "msg", "w", "whisper", "t", "pm", "m", "dm");
+
+    /** Until the borders drop, Noord and Zuid cannot send each other private messages (staff may). */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onWhisper(PlayerCommandPreprocessEvent event) {
+        if (bordersDropped) {
+            return;
+        }
+        Player sender = event.getPlayer();
+        if (isAdmin(sender)) {
+            return;
+        }
+        String[] parts = event.getMessage().trim().split("\\s+");
+        if (parts.length < 2) {
+            return;
+        }
+        String command = parts[0].startsWith("/") ? parts[0].substring(1) : parts[0];
+        int colon = command.lastIndexOf(':'); // minecraft:tell, essentials:msg, ...
+        if (colon >= 0) {
+            command = command.substring(colon + 1);
+        }
+        if (!WHISPER_COMMANDS.contains(command.toLowerCase(Locale.ROOT))) {
+            return;
+        }
+        Player target = getServer().getPlayerExact(parts[1]);
+        if (target == null) {
+            return;
+        }
+        Side from = getSide(sender);
+        Side to = getSide(target);
+        if (from == Side.NONE || to == Side.NONE || from == to) {
+            return;
+        }
+        event.setCancelled(true);
+        sender.sendMessage(Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text("Je kunt geen priv\u00E9bericht sturen naar een speler van het andere team.",
+                        NamedTextColor.RED))
+                .build());
     }
 
     // ------------------------------------------------------------------ Nether open / closed
@@ -3772,19 +3807,45 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 back);
     }
 
-    // ---- section: Wereld
+    // ---- section: Wereld (an overview with three small screens: Nether en grenzen, Lobby, Spawnpunten)
 
     private void openWorldMenu(Player admin) {
         if (!admin.isOnline()) {
             return;
         }
         List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_BORDERS, "Nether en grenzen", NamedTextColor.WHITE),
+                "Nether openen of sluiten en de grenzen droppen.", 150, () -> openAccessMenu(admin)));
+        buttons.add(button(iconLabel(M_LOBBY, "Lobby", NamedTextColor.WHITE),
+                "Lobby aanmaken, spawn, bescherming en verwijderen.", 150, () -> openLobbyMenu(admin)));
+        buttons.add(button(iconLabel(M_SPAWN_N, "Spawnpunten", NamedTextColor.WHITE),
+                "Spawn van Noord en Zuid en naar het main eiland.", 150, () -> openSpawnMenu(admin)));
 
+        Component body = joinLines(
+                statusLine("Nether", netherOpen ? "open" : "dicht",
+                        netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Grenzen", bordersDropped ? "open" : "dicht",
+                        bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Lobby", lobbyCreated ? "aangemaakt" : (lobbyExists() ? "oude rest" : "nog niet"),
+                        lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
+                statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
+                        spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
+                statusLine("Spawn Zuid", spawnZuid != null ? "ingesteld" : "niet ingesteld",
+                        spawnZuid != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
+        showMenu(admin, "Wereld", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+    }
+
+    /** Wereld > Nether en grenzen */
+    private void openAccessMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
         if (netherOpen) {
             buttons.add(button(iconLabel(M_NETHER, "Nether sluiten", NamedTextColor.RED),
                     "Sluit de Nether weer. Wie erin zit kan er nog uit.", 150, () -> {
                         setNether(false);
-                        openWorldMenu(admin);
+                        openAccessMenu(admin);
                     }));
         } else {
             buttons.add(button(iconLabel(M_NETHER, "Nether openen", NamedTextColor.GREEN),
@@ -3795,88 +3856,102 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             Component.text("Ja, openen", NamedTextColor.GREEN),
                             () -> {
                                 setNether(true);
-                                openWorldMenu(admin);
+                                openAccessMenu(admin);
                             },
-                            () -> openWorldMenu(admin))));
+                            () -> openAccessMenu(admin))));
         }
-
         if (bordersDropped) {
             buttons.add(button(iconLabel(M_BORDERS, "Grenzen dicht", NamedTextColor.RED),
                     "Noord en Zuid zien daarna weer alleen hun eigen chat.", 150, () -> {
                         setBordersDropped(false);
-                        openWorldMenu(admin);
+                        openAccessMenu(admin);
                     }));
         } else {
             buttons.add(button(iconLabel(M_BORDERS, "Grenzen droppen", NamedTextColor.GREEN),
                     "Opent eerst de checklist, zodat je niks vergeet.", 150, () -> openChecklistMenu(admin)));
         }
-
-        if (lobbyCreated && lobbyWorld() != null) {
-            buttons.add(button(iconLabel(M_LOBBY, "Naar de lobby", NamedTextColor.WHITE),
-                    "Teleporteert jou naar de lobby.", 150, () -> {
-                        teleportAdminToLobby(admin);
-                    }));
-            buttons.add(button(iconLabel(M_LOBBY, "Lobby spawn zetten", NamedTextColor.WHITE),
-                    "Zet het lobby spawnpunt op jouw plek. Je moet in de lobby staan.", 150, () -> {
-                        setLobbySpawn(admin);
-                        openWorldMenu(admin);
-                    }));
-        } else {
-            buttons.add(button(iconLabel(M_LOBBY, "Lobby aanmaken", NamedTextColor.GREEN),
-                    "Maakt de lege lobby wereld met een klein platform.", 150, () -> {
-                        createLobby(admin);
-                        openWorldMenu(admin);
-                    }));
-        }
-        if (lobbyExists()) {
-            buttons.add(button(iconLabel(M_LOBBY, "Lobby verwijderen", NamedTextColor.RED),
-                    "Wist de hele lobby wereld, ook oude resten.", 150,
-                    () -> openLobbyDeleteConfirm(admin, () -> openWorldMenu(admin))));
-        }
-
-        if (lobbyProtect) {
-            buttons.add(button(iconLabel(M_LOBBY, "Lobby bescherming uit", NamedTextColor.RED),
-                    "Zet sneeuw, vuur, water, explosies en groei in de lobby weer aan, bijvoorbeeld om te bouwen.", 150, () -> {
-                        setLobbyProtect(false);
-                        openWorldMenu(admin);
-                    }));
-        } else {
-            buttons.add(button(iconLabel(M_LOBBY, "Lobby bescherming aan", NamedTextColor.GREEN),
-                    "Zet sneeuw, vuur, water, explosies en groei in de lobby uit.", 150, () -> {
-                        setLobbyProtect(true);
-                        openWorldMenu(admin);
-                    }));
-        }
-
-        buttons.add(button(iconLabel(M_SPAWN_N, "Spawn Noord zetten", NamedTextColor.RED),
-                "Zet het spawnpunt van Noord op jouw plek.", 150, () -> {
-                    setTeamSpawn(admin, Side.NOORD);
-                    openWorldMenu(admin);
-                }));
-        buttons.add(button(iconLabel(M_SPAWN_Z, "Spawn Zuid zetten", NamedTextColor.BLUE),
-                "Zet het spawnpunt van Zuid op jouw plek.", 150, () -> {
-                    setTeamSpawn(admin, Side.ZUID);
-                    openWorldMenu(admin);
-                }));
-        buttons.add(button(iconLabel(M_MAIN, "Naar main eiland", NamedTextColor.WHITE),
-                "Teleporteert jou naar de gamewereld (laatste plek of team spawn).", 150, () -> {
-                    enterGame(admin, false, true);
-                }));
-
         Component body = joinLines(
                 statusLine("Nether", netherOpen ? "open" : "dicht",
                         netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Grenzen", bordersDropped ? "open" : "dicht",
                         bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Checklist", (BORDER_STEPS.size() - missingChecklistSteps().size()) + " van " + BORDER_STEPS.size(),
+                        missingChecklistSteps().isEmpty() ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
+        showMenu(admin, "Nether en grenzen", body, buttons, backButton("Terug naar wereld.", () -> openWorldMenu(admin)));
+    }
+
+    /** Wereld > Lobby */
+    private void openLobbyMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        if (lobbyCreated && lobbyWorld() != null) {
+            buttons.add(button(iconLabel(M_LOBBY, "Naar de lobby", NamedTextColor.WHITE),
+                    "Teleporteert jou naar de lobby.", 150, () -> teleportAdminToLobby(admin)));
+            buttons.add(button(iconLabel(M_LOBBY, "Lobby spawn zetten", NamedTextColor.WHITE),
+                    "Zet het lobby spawnpunt op jouw plek. Je moet in de lobby staan.", 150, () -> {
+                        setLobbySpawn(admin);
+                        openLobbyMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(iconLabel(M_LOBBY, "Lobby aanmaken", NamedTextColor.GREEN),
+                    "Maakt de lege lobby wereld met een klein platform.", 150, () -> {
+                        createLobby(admin);
+                        openLobbyMenu(admin);
+                    }));
+        }
+        if (lobbyProtect) {
+            buttons.add(button(iconLabel(M_LOBBY, "Bescherming uit", NamedTextColor.RED),
+                    "Zet sneeuw, vuur, water, explosies en groei in de lobby weer aan, bijvoorbeeld om te bouwen.", 150, () -> {
+                        setLobbyProtect(false);
+                        openLobbyMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(iconLabel(M_LOBBY, "Bescherming aan", NamedTextColor.GREEN),
+                    "Zet sneeuw, vuur, water, explosies en groei in de lobby uit.", 150, () -> {
+                        setLobbyProtect(true);
+                        openLobbyMenu(admin);
+                    }));
+        }
+        if (lobbyExists()) {
+            buttons.add(button(iconLabel(M_LOBBY, "Lobby verwijderen", NamedTextColor.RED),
+                    "Wist de hele lobby wereld, ook oude resten.", 150,
+                    () -> openLobbyDeleteConfirm(admin, () -> openLobbyMenu(admin))));
+        }
+        Component body = joinLines(
                 statusLine("Lobby", lobbyCreated ? "aangemaakt" : (lobbyExists() ? "oude rest" : "nog niet"),
                         lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                statusLine("Lobby bescherming", lobbyProtect ? "aan" : "uit",
-                        lobbyProtect ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Bescherming", lobbyProtect ? "aan" : "uit",
+                        lobbyProtect ? NamedTextColor.GREEN : NamedTextColor.RED));
+        showMenu(admin, "Lobby", body, buttons, backButton("Terug naar wereld.", () -> openWorldMenu(admin)));
+    }
+
+    /** Wereld > Spawnpunten */
+    private void openSpawnMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_SPAWN_N, "Spawn Noord zetten", NamedTextColor.RED),
+                "Zet het spawnpunt van Noord op jouw plek.", 150, () -> {
+                    setTeamSpawn(admin, Side.NOORD);
+                    openSpawnMenu(admin);
+                }));
+        buttons.add(button(iconLabel(M_SPAWN_Z, "Spawn Zuid zetten", NamedTextColor.BLUE),
+                "Zet het spawnpunt van Zuid op jouw plek.", 150, () -> {
+                    setTeamSpawn(admin, Side.ZUID);
+                    openSpawnMenu(admin);
+                }));
+        buttons.add(button(iconLabel(M_MAIN, "Naar main eiland", NamedTextColor.WHITE),
+                "Teleporteert jou naar de gamewereld (laatste plek of team spawn).", 150,
+                () -> enterGame(admin, false, true)));
+        Component body = joinLines(
                 statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
                         spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
                 statusLine("Spawn Zuid", spawnZuid != null ? "ingesteld" : "niet ingesteld",
                         spawnZuid != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
-        showMenu(admin, "Wereld", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+        showMenu(admin, "Spawnpunten", body, buttons, backButton("Terug naar wereld.", () -> openWorldMenu(admin)));
     }
 
     // ---- section: Spelers
