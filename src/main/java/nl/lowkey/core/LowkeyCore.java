@@ -4923,8 +4923,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return bots;
     }
 
+    /** True when the fake player plugin (FPP) is installed, whatever exact name its plugin.yml has. */
     private boolean fakePlayerPluginPresent() {
-        return getServer().getPluginManager().getPlugin("FakePlayerPlugin") != null;
+        for (org.bukkit.plugin.Plugin plugin : getServer().getPluginManager().getPlugins()) {
+            String name = plugin.getName().toLowerCase(Locale.ROOT);
+            if (name.equals("fpp") || (name.contains("fake") && name.contains("player"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
