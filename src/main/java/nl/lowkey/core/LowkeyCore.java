@@ -38,7 +38,9 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Display;
+import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
@@ -95,6 +97,8 @@ import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.SkullMeta;
+import org.bukkit.util.Vector;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -126,6 +130,7 @@ import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -360,6 +365,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         sideKey = new NamespacedKey(this, "side");
         eliminatedKey = new NamespacedKey(this, "eliminated");
         lobbyItemKey = new NamespacedKey(this, "lobby_item");
+        losersItemKey = new NamespacedKey(this, "losers_item");
         launched = state.getBoolean("launched", false);
         mainOpen = state.getBoolean("main-open", true);
         lobbyProtect = state.getBoolean("lobby-protect", true);
@@ -381,6 +387,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         lobbySpawn = readLoc(state, "lobby-spawn");
         spawnNoord = readLoc(state, "spawn-noord");
         spawnZuid = readLoc(state, "spawn-zuid");
+        losersCreated = state.getBoolean("losers-created", false);
+        losersOpen = state.getBoolean("losers-open", false);
+        if (losersCreated) {
+            loadLosersWorld();
+        }
+        losersSpawn = readLoc(state, "losers-spawn");
         try {
             countdownTarget = LocalDateTime.parse(state.getString("countdown-target", DEFAULT_COUNTDOWN.toString()));
         } catch (DateTimeParseException e) {
@@ -394,6 +406,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         mace = new MaceManager(this);
         mace.start();
         loadChecklist();
+        loadEventCamera();
 
         LocalTime startupTime = LocalTime.now(LOWKEY_ZONE);
         hoursOpen = startupTime.getHour() >= HOURS_OPEN_FROM;
@@ -407,6 +420,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::tickServerHours, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::tickLobby, 40L, 200L);
         getServer().getScheduler().runTaskTimer(this, this::tickLobbyPlayers, 10L, 10L);
+        getServer().getScheduler().runTaskTimer(this, this::tickLosers, 40L, 40L);
         getServer().getScheduler().runTaskTimer(this, this::tickCountdown, 40L, 20L);
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
@@ -421,6 +435,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        if (eventRunning) {
+            eventCleanup();
+        }
         if (mace != null) {
             mace.stop();
         }
@@ -773,18 +790,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         team.addEntry(player.getName());
         teamNames.put(id, wanted);
 
-        // tab list entry: icons + name in the team colour. Eliminated players are grey and struck through,
-        // players that are in the lobby get a small grey "lobby" behind their name.
+        // tab list entry: icons + name in the team colour. Eliminated players are grey and struck through.
         TextColor nameColor = side == Side.NONE ? NamedTextColor.WHITE : TextColor.color(side.rgb);
-        boolean out = isEliminated(player);
+        boolean out = isEliminated(player) && !inLosers(player);
         TextComponent.Builder entry = Component.text().append(icons);
         if (out) {
             entry.append(Component.text(player.getName(), NamedTextColor.GRAY, TextDecoration.STRIKETHROUGH));
         } else {
             entry.append(Component.text(player.getName(), nameColor));
-            if (inLobby(player)) {
-                entry.append(Component.text(" lobby", NamedTextColor.DARK_GRAY));
-            }
         }
         player.playerListName(entry.build());
     }
@@ -813,25 +826,27 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ tab list header + footer
 
-    /** The logo (36 px = 4 lines), then a gradient tagline and a little room before the player list. */
+    /** The logo, followed by blank lines so the list starts below it (logo is 36 px = 4 lines). */
     private Component tabHeader() {
-        Component tagline = MiniMessage.miniMessage()
-                .deserialize("<gradient:#c084fc:#f472b6><bold>L O W K E Y   P E A K</bold></gradient>");
         return Component.text()
                 .append(glyph(LOGO))
                 .append(Component.newline()).append(Component.text(" "))
                 .append(Component.newline()).append(Component.text(" "))
                 .append(Component.newline()).append(Component.text(" "))
-                .append(Component.newline()).append(tagline)
                 .append(Component.newline()).append(Component.text(" "))
                 .build();
     }
 
-    /** Team counts, online count and the website in a gradient. */
-    private Component tabFooter() {
+    /** Team counts, online count and the website in a gradient, counted for the viewer's own tab list (lobby or main). */
+    private Component tabFooter(Player viewer) {
         int noord = 0;
         int zuid = 0;
+        int visibleCount = 0;
         for (Player online : getServer().getOnlinePlayers()) {
+            if (worldGroup(online) != worldGroup(viewer)) {
+                continue;
+            }
+            visibleCount++;
             Side side = sideCache.getOrDefault(online.getUniqueId(), Side.NONE);
             if (side == Side.NOORD) {
                 noord++;
@@ -852,7 +867,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build();
         Component online = Component.text()
                 .append(Component.text("Online: ", NamedTextColor.GRAY))
-                .append(Component.text(String.valueOf(getServer().getOnlinePlayers().size()), NamedTextColor.WHITE))
+                .append(Component.text(String.valueOf(visibleCount), NamedTextColor.WHITE))
                 .build();
         String url = getConfig().getString("website-url", DEFAULT_WEBSITE_URL).trim();
         if (!url.startsWith("https://") && !url.startsWith("http://")) {
@@ -871,10 +886,32 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     private void updateTablist() {
+        syncTabVisibility();
         Component header = tabHeader();
-        Component footer = tabFooter();
         for (Player player : getServer().getOnlinePlayers()) {
-            player.sendPlayerListHeaderAndFooter(header, footer);
+            player.sendPlayerListHeaderAndFooter(header, tabFooter(player));
+        }
+    }
+
+    /**
+     * Separate tab lists: players in the lobby only see the other lobby players in their tab list, players in the main
+     * world only see the other main world players. Only the tab list entry is hidden, nothing else.
+     */
+    private void syncTabVisibility() {
+        for (Player viewer : getServer().getOnlinePlayers()) {
+            int viewerGroup = worldGroup(viewer);
+            for (Player other : getServer().getOnlinePlayers()) {
+                if (other.equals(viewer)) {
+                    continue;
+                }
+                boolean sameGroup = worldGroup(other) == viewerGroup;
+                boolean listed = viewer.isListed(other);
+                if (sameGroup && !listed) {
+                    viewer.listPlayer(other);
+                } else if (!sameGroup && listed) {
+                    viewer.unlistPlayer(other);
+                }
+            }
         }
     }
 
@@ -917,6 +954,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build());
 
         persist(player);
+        eventPlayerLeft(player);
         storedSide.remove(player.getUniqueId());
         storedEliminated.remove(player.getUniqueId());
         graceLeft.remove(player.getUniqueId());
@@ -956,10 +994,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     .append(message);
         }));
 
-        // in the lobby everybody can talk to everybody who is in the lobby too (staff sees it as well)
-        if (inLobby(sender)) {
-            event.viewers().removeIf(viewer -> viewer instanceof Player && !viewer.equals(sender)
-                    && !inLobby((Player) viewer) && !isAdmin((Player) viewer));
+        // lobby, main world and Verliezerseiland each have their own chat (staff sees all of them)
+        final int senderGroup = worldGroup(sender);
+        event.viewers().removeIf(viewer -> viewer instanceof Player && !viewer.equals(sender)
+                && worldGroup((Player) viewer) != senderGroup && !isAdmin((Player) viewer));
+        if (senderGroup != 1) {
             return;
         }
 
@@ -988,6 +1027,21 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         // never show the vanilla death message
         event.deathMessage(null);
+
+        // Verliezerseiland: just die and come back on the island
+        if (inLosers(player)) {
+            losersRespawn.add(player.getUniqueId());
+            Component died = Component.text()
+                    .append(glyph(LOWKEY_BADGE_RED))
+                    .append(Component.space())
+                    .append(Component.text(player.getName(), NamedTextColor.WHITE))
+                    .append(Component.text(" is doodgegaan.", NamedTextColor.RED))
+                    .build();
+            for (Player other : player.getWorld().getPlayers()) {
+                other.sendMessage(died);
+            }
+            return;
+        }
 
         // GRACE: a completely normal death and respawn, only with our own message
         if (graceRemaining(player) > 0L) {
@@ -1393,16 +1447,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         event.motd(line1.append(Component.newline()).append(line2));
     }
 
-    // ------------------------------------------------------------------ no private messages between the teams
+    // ------------------------------------------------------------------ private messages: lobby, main world and teams
 
     private static final Set<String> WHISPER_COMMANDS = Set.of("tell", "msg", "w", "whisper", "t", "pm", "m", "dm");
 
-    /** Until the borders drop, Noord and Zuid cannot send each other private messages (staff may). */
+    /**
+     * Nobody can send a private message across worlds (lobby to main world or the other way around), and until the
+     * borders drop Noord and Zuid cannot send each other private messages either. Staff may always.
+     */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onWhisper(PlayerCommandPreprocessEvent event) {
-        if (bordersDropped) {
-            return;
-        }
         Player sender = event.getPlayer();
         if (isAdmin(sender)) {
             return;
@@ -1421,6 +1475,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         Player target = getServer().getPlayerExact(parts[1]);
         if (target == null) {
+            return;
+        }
+        if (worldGroup(sender) != worldGroup(target)) {
+            event.setCancelled(true);
+            sender.sendMessage(Component.text()
+                    .append(glyph(LOWKEY_BADGE))
+                    .append(Component.space())
+                    .append(Component.text("Je kunt alleen priv\u00E9berichten sturen naar spelers in dezelfde wereld.",
+                            NamedTextColor.RED))
+                    .build());
+            return;
+        }
+        if (bordersDropped) {
             return;
         }
         Side from = getSide(sender);
@@ -1458,6 +1525,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         writeLoc(state, "lobby-spawn", lobbySpawn);
         writeLoc(state, "spawn-noord", spawnNoord);
         writeLoc(state, "spawn-zuid", spawnZuid);
+        state.set("losers-created", losersCreated);
+        state.set("losers-open", losersOpen);
+        writeLoc(state, "losers-spawn", losersSpawn);
         try {
             getDataFolder().mkdirs();
             state.save(stateFile);
@@ -1962,7 +2032,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         player.teleport(lobbySpawn);
 
         if (eliminated) {
+            // the LowkeySMP star only says "you are dead", the red star leads to the Verliezerseiland
             removeLobbyItems(player);
+            giveLobbyItem(player);
+            giveLosersItem(player);
         } else {
             giveLobbyItem(player);
         }
@@ -2038,7 +2111,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** Right-click on the lobby item. */
     private void useLobbyItem(Player player) {
-        if (!inLobby(player) || isEliminated(player)) {
+        if (!inLobby(player)) {
+            return;
+        }
+        if (isEliminated(player)) {
+            player.sendActionBar(Component.text("Je kunt niet joinen, je bent dood!", NamedTextColor.RED));
             return;
         }
         if (!launched) {
@@ -2164,7 +2241,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveState();
         int moved = 0;
         for (Player player : new ArrayList<>(getServer().getOnlinePlayers())) {
-            if (inLobby(player) || isAdmin(player)) {
+            if (inLobby(player) || inLosers(player) || isAdmin(player)) {
                 continue;
             }
             YamlConfiguration data = loadPlayerData(player.getUniqueId());
@@ -2214,6 +2291,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     public void onWorldChange(PlayerChangedWorldEvent event) {
         Player player = event.getPlayer();
         refreshTags(player);
+        updateTablist();
         // coming from the lobby into the game: this is where the grace message belongs
         boolean fromLobby = lobbySpawn != null && event.getFrom().equals(lobbySpawn.getWorld());
         if (fromLobby && !inLobby(player) && !isEliminated(player)) {
@@ -2228,6 +2306,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     @EventHandler
     public void onRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
+        if (losersRespawn.remove(player.getUniqueId()) && losersSpawn != null && losersSpawn.getWorld() != null) {
+            event.setRespawnLocation(losersSpawn);
+            return;
+        }
         if (event.isBedSpawn() || event.isAnchorSpawn() || isEliminated(player)) {
             return;
         }
@@ -2529,6 +2611,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             event.setCancelled(true);
             if (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK) {
                 useLobbyItem(player);
+            }
+            return;
+        }
+        if (isLosersItem(event.getItem())) {
+            event.setCancelled(true);
+            if (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK) {
+                useLosersItem(player);
             }
             return;
         }
@@ -3254,6 +3343,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey setspawn <noord|zuid> : zet het spawnpunt van een team op jouw positie
      * /lowkey main : stuurt jou (admin) naar de gamewereld, ook als de server nog niet gelanceerd is
      * /lowkey mace [status|aan|uit|cooldown <minuten>|cooldownreset|give <speler>|reset|test <noord|zuid|geen>] : de ene mace van de server
+     * /lowkey event <start|test [aantal]|stop|camera|teams|reset> : het team verdeling event (camera, shuffle, teams toepassen)
+     * /lowkey losers <create [seed]|tp|setspawn|open|close|return <speler>|delete> : het Verliezerseiland (aparte survival wereld, rode ster)
      * /lowkey checklist : de checklist met alles wat je moet doen voor je de grenzen dropt
      * /lowkey say <bericht> : stuurt een bericht met de LOWKEY badge naar iedereen
      */
@@ -3521,6 +3612,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             enterGame((Player) sender, false, true);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("losers")) {
+            handleLosersCommand(sender, args);
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("event")) {
+            handleEventCommand(sender, args);
+            return true;
+        }
         if (args.length == 1 && args[0].equalsIgnoreCase("checklist")) {
             if (sender instanceof Player) {
                 openChecklistMenu((Player) sender);
@@ -3596,7 +3695,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test>  |  /lowkey checklist  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test>  |  /lowkey checklist  |  /lowkey event <start|test|stop|camera|teams|reset>  |  /lowkey losers <create|tp|setspawn|open|close|return|delete>  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -3687,6 +3786,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "De ene mace: cooldown, houder en reset.", 150, () -> mace.openMenu(admin)));
         buttons.add(button(iconLabel(M_BORDERS, "Checklist", NamedTextColor.WHITE),
                 "Alles wat je moet doen voor je de grenzen dropt.", 150, () -> openChecklistMenu(admin)));
+        buttons.add(button(iconLabel(M_TEAM, "Team event", NamedTextColor.WHITE),
+                "Verdeel iedereen over Noord en Zuid met een show.", 150, () -> openEventMenu(admin)));
+        buttons.add(button(iconLabel(M_REVIVE, "Verliezerseiland", NamedTextColor.WHITE),
+                "De aparte wereld voor iedereen die dood is.", 150, () -> openLosersMenu(admin)));
         if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
             buttons.add(button(Component.text("Uitloggen", NamedTextColor.RED),
                     "Log uit en verlies je toegang tot /lowkey en de commands.", 150, () -> logout(admin, true)));
@@ -4330,6 +4433,1293 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 () -> openChecklistMenu(admin));
     }
 
+    // ------------------------------------------------------------------ Verliezerseiland (own world for everybody who died)
+
+    private static final String LOSERS_WORLD = "lowkey_losers";
+    private boolean losersCreated;
+    /** false until an admin opens it: until then the red star only says it is not open yet */
+    private boolean losersOpen;
+    private Location losersSpawn;
+    private NamespacedKey losersItemKey;
+    /** players who died on the island and must respawn there */
+    private final Set<UUID> losersRespawn = new HashSet<>();
+    private int losersAmbient;
+
+    private static final Sound[] LOSERS_SOUNDS = {Sound.AMBIENT_CAVE, Sound.ENTITY_WITHER_AMBIENT,
+            Sound.BLOCK_PORTAL_AMBIENT, Sound.ENTITY_GHAST_AMBIENT};
+
+    private World losersWorld() {
+        return Bukkit.getWorld(LOSERS_WORLD);
+    }
+
+    private World loadLosersWorld() {
+        return loadLosersWorld(null);
+    }
+
+    /** A normal survival world with real terrain. An existing world folder is loaded as it is. */
+    private World loadLosersWorld(Long seed) {
+        World existing = Bukkit.getWorld(LOSERS_WORLD);
+        if (existing != null) {
+            return existing;
+        }
+        WorldCreator creator = new WorldCreator(LOSERS_WORLD).environment(World.Environment.NORMAL);
+        if (seed != null) {
+            creator.seed(seed);
+        }
+        World world = creator.createWorld();
+        if (world == null) {
+            getLogger().warning("Kon de Verliezerseiland wereld niet laden.");
+        }
+        return world;
+    }
+
+    boolean inLosers(Player player) {
+        return losersSpawn != null && losersSpawn.getWorld() != null && player.getWorld().equals(losersSpawn.getWorld());
+    }
+
+    /** Lobby, main world and Verliezerseiland each have their own tab list, chat and private messages. */
+    private int worldGroup(Player player) {
+        if (inLosers(player)) {
+            return 2;
+        }
+        return inLobby(player) ? 0 : 1;
+    }
+
+    // ---- the red star
+
+    private boolean isLosersItem(ItemStack item) {
+        if (item == null || item.getType().isAir() || !item.hasItemMeta()) {
+            return false;
+        }
+        return item.getItemMeta().getPersistentDataContainer().has(losersItemKey, PersistentDataType.BYTE);
+    }
+
+    private ItemStack createLosersItem() {
+        ItemStack item = new ItemStack(Material.NETHER_STAR);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text("Verliezerseiland", NamedTextColor.RED, TextDecoration.BOLD)
+                .decoration(TextDecoration.ITALIC, false));
+        meta.lore(List.of(Component.text("Rechtermuisklik om naar het Verliezerseiland te gaan.", NamedTextColor.GRAY)
+                .decoration(TextDecoration.ITALIC, false)));
+        meta.setEnchantmentGlintOverride(true);
+        NamespacedKey model = NamespacedKey.fromString("lowkey:losers_star"); // red star from the resource pack
+        if (model != null) {
+            meta.setItemModel(model);
+        }
+        meta.getPersistentDataContainer().set(losersItemKey, PersistentDataType.BYTE, (byte) 1);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private void giveLosersItem(Player player) {
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (isLosersItem(item)) {
+                return;
+            }
+        }
+        player.getInventory().setItem(5, createLosersItem());
+    }
+
+    private void removeLosersItems(Player player) {
+        ItemStack[] contents = player.getInventory().getContents();
+        for (int i = 0; i < contents.length; i++) {
+            if (isLosersItem(contents[i])) {
+                player.getInventory().setItem(i, null);
+            }
+        }
+    }
+
+    /** Right-click on the red star. */
+    private void useLosersItem(Player player) {
+        if (!inLobby(player) || !isEliminated(player)) {
+            return;
+        }
+        if (!losersOpen || losersSpawn == null || losersSpawn.getWorld() == null) {
+            player.sendActionBar(Component.text("Verliezerseiland is nog niet geopend!", NamedTextColor.RED));
+            return;
+        }
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("Verliezerseiland", NamedTextColor.RED, TextDecoration.BOLD))
+                        .body(List.of(DialogBody.plainMessage(
+                                Component.text("Wil je naar het Verliezerseiland teleporteren?", NamedTextColor.WHITE))))
+                        .build())
+                .type(DialogType.confirmation(
+                        playerButton(Component.text("Ja", NamedTextColor.GREEN),
+                                "Teleporteer naar het Verliezerseiland.", 100, this::teleportToLosers),
+                        ActionButton.create(Component.text("Nee", NamedTextColor.RED),
+                                Component.text("Sluit dit venster."), 100, null))));
+        player.showDialog(dialog);
+    }
+
+    private void teleportToLosers(Player player) {
+        if (!player.isOnline() || !inLobby(player) || !isEliminated(player) || !losersOpen
+                || losersSpawn == null || losersSpawn.getWorld() == null) {
+            return;
+        }
+        removeLobbyItems(player);
+        removeLosersItems(player);
+        if (!isBypass(player)) {
+            player.setGameMode(GameMode.SURVIVAL);
+        }
+        AttributeInstance maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
+        player.setHealth(maxHealth == null ? 20.0 : maxHealth.getValue());
+        player.setFoodLevel(20);
+        player.setFallDistance(0f);
+        player.teleport(losersSpawn);
+    }
+
+    /** Gives the red star to everybody who is eliminated and waiting in the lobby. */
+    private void giveLosersItemsInLobby() {
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (inLobby(p) && isEliminated(p)) {
+                giveLosersItem(p);
+            }
+        }
+    }
+
+    // ---- admin actions
+
+    private void createLosers(CommandSender sender, Long seed) {
+        if (losersCreated && losersWorld() != null) {
+            sender.sendMessage(Component.text("Het Verliezerseiland bestaat al.", NamedTextColor.RED));
+            return;
+        }
+        World world = loadLosersWorld(seed);
+        if (world == null) {
+            sender.sendMessage(Component.text("De wereld kon niet gemaakt worden, kijk in de console.",
+                    NamedTextColor.RED));
+            return;
+        }
+        losersCreated = true;
+        Location base = world.getSpawnLocation();
+        int y = world.getHighestBlockYAt(base.getBlockX(), base.getBlockZ()) + 1;
+        losersSpawn = new Location(world, base.getBlockX() + 0.5, y, base.getBlockZ() + 0.5, 0f, 0f);
+        saveState();
+        sender.sendMessage(Component.text("Het Verliezerseiland is gemaakt: een normale survival wereld (seed "
+                + world.getSeed() + ") met altijd onweer en nacht. Het spawnpunt staat op de wereld spawn, verplaats het "
+                + "met /lowkey losers setspawn.", NamedTextColor.GREEN));
+    }
+
+    private void teleportAdminToLosers(Player admin) {
+        if (losersSpawn == null || losersSpawn.getWorld() == null) {
+            admin.sendMessage(Component.text("Maak eerst het Verliezerseiland aan.", NamedTextColor.RED));
+            return;
+        }
+        admin.teleport(losersSpawn);
+    }
+
+    private void setLosersSpawn(Player admin) {
+        if (losersWorld() == null || !admin.getWorld().equals(losersWorld())) {
+            admin.sendMessage(Component.text("Je moet op het Verliezerseiland staan om het spawnpunt te zetten.",
+                    NamedTextColor.RED));
+            return;
+        }
+        losersSpawn = admin.getLocation().clone();
+        saveState();
+        admin.sendMessage(Component.text("Het spawnpunt van het Verliezerseiland staat nu op jouw plek.",
+                NamedTextColor.GREEN));
+    }
+
+    private void openLosers(CommandSender sender) {
+        if (!losersCreated || losersSpawn == null) {
+            sender.sendMessage(Component.text("Maak eerst het Verliezerseiland aan.", NamedTextColor.RED));
+            return;
+        }
+        if (losersOpen) {
+            sender.sendMessage(Component.text("Het Verliezerseiland is al open.", NamedTextColor.YELLOW));
+            return;
+        }
+        losersOpen = true;
+        saveState();
+        giveLosersItemsInLobby();
+        Title title = Title.title(
+                Component.text("Verliezerseiland is open!", NamedTextColor.RED),
+                Component.text("Gebruik de rode ster in je hotbar", NamedTextColor.GRAY),
+                Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(3000), Duration.ofMillis(1000)));
+        int told = 0;
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (isEliminated(p)) {
+                p.sendMessage(Component.text()
+                        .append(glyph(LOWKEY_BADGE_RED))
+                        .append(Component.space())
+                        .append(Component.text("Het Verliezerseiland is open! Gebruik de rode ster in je hotbar.",
+                                NamedTextColor.RED))
+                        .build());
+                p.showTitle(title);
+                p.playSound(p.getLocation(), Sound.ENTITY_WITHER_SPAWN, 0.6f, 0.8f);
+                told++;
+            }
+        }
+        sender.sendMessage(Component.text("Het Verliezerseiland is open. " + told + " uitgeschakelde spelers zijn "
+                + "verwittigd.", NamedTextColor.GREEN));
+    }
+
+    private void closeLosers(CommandSender sender) {
+        if (!losersOpen) {
+            sender.sendMessage(Component.text("Het Verliezerseiland is al dicht.", NamedTextColor.YELLOW));
+            return;
+        }
+        losersOpen = false;
+        saveState();
+        sender.sendMessage(Component.text("Het Verliezerseiland is dicht. Wie er al is blijft er, nieuwe spelers kunnen "
+                + "er niet meer heen.", NamedTextColor.GREEN));
+    }
+
+    /** Sends a loser back into the real game: alive again, at the spawn of his team. */
+    private void returnFromLosers(CommandSender sender, Player target) {
+        if (!isEliminated(target)) {
+            sender.sendMessage(Component.text(target.getName() + " is niet uitgeschakeld.", NamedTextColor.RED));
+            return;
+        }
+        setEliminated(target, false);
+        removeLosersItems(target);
+        removeLobbyItems(target);
+        Location dest = teamSpawn(getSide(target));
+        if (dest == null || dest.getWorld() == null) {
+            dest = gameWorld().getSpawnLocation();
+        }
+        if (!isBypass(target)) {
+            target.setGameMode(GameMode.SURVIVAL);
+        }
+        target.setFallDistance(0f);
+        target.teleport(dest);
+        refreshTags(target);
+        target.sendMessage(Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text("Je bent terug in het spel!", NamedTextColor.GREEN))
+                .build());
+        sender.sendMessage(Component.text(target.getName() + " is terug in de main wereld gezet.",
+                NamedTextColor.GREEN));
+    }
+
+    private void deleteLosers(CommandSender sender) {
+        World world = losersWorld();
+        File folder = world != null ? world.getWorldFolder() : new File(getServer().getWorldContainer(), LOSERS_WORLD);
+        if (!losersCreated && world == null && !folder.isDirectory()) {
+            sender.sendMessage(Component.text("Er is geen Verliezerseiland om te verwijderen.", NamedTextColor.RED));
+            return;
+        }
+        if (world != null) {
+            for (Player p : new ArrayList<>(world.getPlayers())) {
+                if (lobbySpawn != null && lobbySpawn.getWorld() != null) {
+                    sendToLobby(p);
+                } else {
+                    p.teleport(gameWorld().getSpawnLocation());
+                }
+            }
+            if (!Bukkit.unloadWorld(world, false)) {
+                sender.sendMessage(Component.text("De wereld kon niet worden afgesloten, probeer het opnieuw.",
+                        NamedTextColor.RED));
+                return;
+            }
+        }
+        boolean wiped = !folder.exists() || deleteRecursively(folder);
+        losersCreated = false;
+        losersOpen = false;
+        losersSpawn = null;
+        saveState();
+        sender.sendMessage(Component.text(wiped ? "Het Verliezerseiland is verwijderd."
+                : "Het Verliezerseiland is losgekoppeld, maar de map '" + folder.getName()
+                + "' kon niet helemaal gewist worden.", wiped ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
+    }
+
+    // ---- atmosphere: always a thunderstorm at night, with scary sounds and lightning
+
+    private void tickLosers() {
+        World world = losersWorld();
+        if (world == null) {
+            return;
+        }
+        world.setTime(18000L);
+        if (!world.hasStorm()) {
+            world.setStorm(true);
+        }
+        if (!world.isThundering()) {
+            world.setThundering(true);
+        }
+        List<Player> players = world.getPlayers();
+        if (players.isEmpty()) {
+            return;
+        }
+        if (--losersAmbient > 0) {
+            return;
+        }
+        losersAmbient = 6 + random.nextInt(12); // every 12 to 36 seconds
+        Sound sound = LOSERS_SOUNDS[random.nextInt(LOSERS_SOUNDS.length)];
+        for (Player p : players) {
+            p.playSound(p.getLocation(), sound, 1.0f, 0.7f + random.nextFloat() * 0.5f);
+        }
+        Player target = players.get(random.nextInt(players.size()));
+        Location strike = target.getLocation().clone().add(random.nextInt(61) - 30, 0, random.nextInt(61) - 30);
+        world.strikeLightningEffect(strike);
+    }
+
+    /** The weather on the island never clears. */
+    @EventHandler
+    public void onLosersWeather(WeatherChangeEvent event) {
+        if (!event.toWeatherState() && event.getWorld().getName().equals(LOSERS_WORLD)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onLosersThunder(ThunderChangeEvent event) {
+        if (!event.toThunderState() && event.getWorld().getName().equals(LOSERS_WORLD)) {
+            event.setCancelled(true);
+        }
+    }
+
+    // ---- menu and command
+
+    private void openLosersMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        if (losersCreated && losersWorld() != null) {
+            buttons.add(button(iconLabel(M_REVIVE, "Naar het eiland", NamedTextColor.WHITE),
+                    "Teleporteert jou naar het Verliezerseiland.", 150, () -> teleportAdminToLosers(admin)));
+            buttons.add(button(iconLabel(M_REVIVE, "Spawn zetten", NamedTextColor.WHITE),
+                    "Zet het spawnpunt op jouw plek. Je moet op het eiland staan.", 150, () -> {
+                        setLosersSpawn(admin);
+                        openLosersMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(iconLabel(M_REVIVE, "Eiland aanmaken", NamedTextColor.GREEN),
+                    "Maakt een normale survival wereld met altijd onweer en nacht.", 150, () -> {
+                        createLosers(admin, null);
+                        openLosersMenu(admin);
+                    }));
+        }
+        if (losersOpen) {
+            buttons.add(button(iconLabel(M_REVIVE, "Eiland sluiten", NamedTextColor.RED),
+                    "Nieuwe spelers kunnen er niet meer heen. Wie er is blijft er.", 150, () -> {
+                        closeLosers(admin);
+                        openLosersMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(iconLabel(M_REVIVE, "Eiland openen", NamedTextColor.GREEN),
+                    "Uitgeschakelde spelers kunnen de rode ster gebruiken.", 150, () -> confirm(admin,
+                            "Verliezerseiland openen?",
+                            "Alle uitgeschakelde spelers krijgen een melding en kunnen de rode ster gebruiken.",
+                            "Je kunt het later weer sluiten.",
+                            Component.text("Ja, openen", NamedTextColor.GREEN),
+                            () -> {
+                                openLosers(admin);
+                                openLosersMenu(admin);
+                            },
+                            () -> openLosersMenu(admin))));
+        }
+        buttons.add(button(iconLabel(M_REVIVE, "Speler terugsturen", NamedTextColor.WHITE),
+                "Zet een uitgeschakelde speler weer levend in de main wereld.", 150,
+                () -> pickPlayer(admin, "Speler terugsturen", target -> {
+                    returnFromLosers(admin, target);
+                    openLosersMenu(admin);
+                }, () -> openLosersMenu(admin))));
+        if (losersCreated || losersWorld() != null) {
+            buttons.add(button(iconLabel(M_REVIVE, "Eiland verwijderen", NamedTextColor.RED),
+                    "Wist de hele wereld.", 150, () -> confirm(admin,
+                            "Verliezerseiland verwijderen?",
+                            "De hele wereld wordt gewist, met alles wat erin staat.",
+                            "Spelers op het eiland gaan naar de lobby.",
+                            Component.text("Ja, verwijderen", NamedTextColor.RED),
+                            () -> {
+                                deleteLosers(admin);
+                                openLosersMenu(admin);
+                            },
+                            () -> openLosersMenu(admin))));
+        }
+        int onIsland = 0;
+        int waiting = 0;
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (inLosers(p)) {
+                onIsland++;
+            } else if (inLobby(p) && isEliminated(p)) {
+                waiting++;
+            }
+        }
+        Component body = joinLines(
+                statusLine("Eiland", losersCreated ? "aangemaakt" : "nog niet",
+                        losersCreated ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
+                statusLine("Status", losersOpen ? "open" : "dicht",
+                        losersOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Op het eiland", String.valueOf(onIsland), NamedTextColor.WHITE),
+                statusLine("Wachten in de lobby", String.valueOf(waiting), NamedTextColor.WHITE));
+        showMenu(admin, "Verliezerseiland", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+    }
+
+    private void handleLosersCommand(CommandSender sender, String[] args) {
+        String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+        if (sub.equals("create")) {
+            Long seed = null;
+            if (args.length >= 3) {
+                try {
+                    seed = Long.parseLong(args[2]);
+                } catch (NumberFormatException e) {
+                    seed = (long) args[2].hashCode(); // like in vanilla: text becomes a number
+                }
+            }
+            createLosers(sender, seed);
+        } else if (sub.equals("open")) {
+            openLosers(sender);
+        } else if (sub.equals("close")) {
+            closeLosers(sender);
+        } else if (sub.equals("delete")) {
+            if (args.length == 3 && args[2].equalsIgnoreCase("confirm")) {
+                deleteLosers(sender);
+            } else {
+                sender.sendMessage(Component.text("Bevestig met: /lowkey losers delete confirm", NamedTextColor.GRAY));
+            }
+        } else if (sub.equals("tp") || sub.equals("setspawn")) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
+            } else if (sub.equals("tp")) {
+                teleportAdminToLosers((Player) sender);
+            } else {
+                setLosersSpawn((Player) sender);
+            }
+        } else if (sub.equals("return")) {
+            Player target = args.length == 3 ? getServer().getPlayerExact(args[2]) : null;
+            if (args.length != 3) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey losers return <speler>", NamedTextColor.GRAY));
+            } else if (target == null) {
+                sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
+            } else {
+                returnFromLosers(sender, target);
+            }
+        } else if (sender instanceof Player) {
+            openLosersMenu((Player) sender);
+        } else {
+            sender.sendMessage(Component.text("Gebruik: /lowkey losers <create|tp|setspawn|open|close|return|delete>",
+                    NamedTextColor.GRAY));
+        }
+    }
+
+    // ------------------------------------------------------------------ team division event
+
+    private static final String NOORD_BIG = "\uE060";
+    private static final String ZUID_BIG = "\uE061";
+    /** wide space glyph (advance 56) between the two big logos in the title */
+    private static final String EVENT_GAP = "\uE012";
+
+    private static final String[] FAKE_NAMES = {"Alex", "Steve", "Notch", "Herobrine", "Jeb_", "Dinnerbone", "Grumm",
+            "Kelly", "Mara", "Ravi", "Luna", "Finn", "Zoe", "Max", "Nora", "Sam", "Eli", "Ivo", "Pien", "Bram"};
+
+    // Layout of the stage in blocks, relative to the camera. Tune these numbers if it does not look right on screen.
+    private static final double EV_DIST = 8.0;            // how far in front of the camera everything hangs
+    private static final double EV_COL_X = 3.4;           // distance of each team column from the middle
+    private static final double EV_TOP_Y = -0.2;          // height of the first row (0 = camera height)
+    private static final double EV_CELL_W = 1.25;         // width of one head + name cell
+    private static final double EV_ROW_MAX = 0.8;         // biggest distance between two rows
+    private static final double EV_ROWS_H = 3.2;          // all rows together stay inside this height
+    private static final float EV_HEAD_SCALE = 0.55f;
+    private static final float EV_NAME_SCALE = 0.4f;
+    private static final double EV_CENTER_Y = 0.7;        // height of the big shuffle head
+    private static final float EV_CENTER_HEAD_SCALE = 1.5f;
+
+    /** One person in the event (a real player, or a fake name in test mode). */
+    private static final class EvPlayer {
+        final UUID id;
+        final String name;
+        final boolean fake;
+        Side side = Side.NONE;
+        boolean placed;
+
+        EvPlayer(UUID id, String name, boolean fake) {
+            this.id = id;
+            this.name = name;
+            this.fake = fake;
+        }
+    }
+
+    private boolean eventRunning;
+    private boolean eventTest;
+    private Location eventCamera;
+    private ArmorStand eventStand;
+    private ItemDisplay eventCenterHead;
+    private BukkitRunnable eventTask;
+    private final List<Entity> eventEntities = new ArrayList<>();
+    private final List<EvPlayer> eventPlayers = new ArrayList<>();
+    private final Map<UUID, Location> eventOrigin = new HashMap<>();
+    private final Map<UUID, GameMode> eventMode = new HashMap<>();
+    private final Set<UUID> eventLocked = new HashSet<>();
+    private final int[] eventPlan = new int[2];
+    private final int[] eventPlaced = new int[2];
+    private int eventPhase;       // 0 intro, 1 shuffle, 2 hold, 3 outro
+    private int eventTick;
+    private int eventAbsTick;
+    private int eventPick;
+    private int eventDone;
+    private int eventShuffleEnd;
+    private int eventNextFrame;
+    private double eventInterval;
+    private int eventShown;
+
+    private File eventFile() {
+        return new File(getDataFolder(), "event.yml");
+    }
+
+    private void loadEventCamera() {
+        eventCamera = readLoc(YamlConfiguration.loadConfiguration(eventFile()), "camera");
+    }
+
+    private void setEventCameraHere(Player admin) {
+        if (!inLobby(admin)) {
+            admin.sendMessage(Component.text("Ga eerst naar de lobby, de camera hoort daar.", NamedTextColor.RED));
+            return;
+        }
+        if (eventRunning) {
+            admin.sendMessage(Component.text("Er is nu een event bezig.", NamedTextColor.RED));
+            return;
+        }
+        eventCamera = admin.getEyeLocation().clone();
+        YamlConfiguration y = new YamlConfiguration();
+        writeLoc(y, "camera", eventCamera);
+        try {
+            getDataFolder().mkdirs();
+            y.save(eventFile());
+        } catch (IOException e) {
+            getLogger().warning("Kon event.yml niet opslaan: " + e.getMessage());
+        }
+        admin.sendMessage(Component.text("De camera staat nu op jouw ogen en kijkrichting. Start een test om het beeld "
+                + "te zien.", NamedTextColor.GREEN));
+    }
+
+    private Component eventLogos() {
+        return Component.text()
+                .append(glyph(NOORD_BIG))
+                .append(glyph(EVENT_GAP))
+                .append(glyph(ZUID_BIG))
+                .build();
+    }
+
+    /** The big logos on the left and right as the title, with the given line under it. */
+    private void eventTitle(Component subtitle, int stayTicks) {
+        Title title = Title.title(eventLogos(), subtitle,
+                Title.Times.times(Duration.ZERO, Duration.ofMillis(stayTicks * 50L), Duration.ZERO));
+        for (UUID id : eventLocked) {
+            Player p = getServer().getPlayer(id);
+            if (p != null) {
+                p.showTitle(title);
+            }
+        }
+    }
+
+    private void eventSound(Sound sound, float volume, float pitch) {
+        for (UUID id : eventLocked) {
+            Player p = getServer().getPlayer(id);
+            if (p != null) {
+                p.playSound(p.getLocation(), sound, volume, pitch);
+            }
+        }
+    }
+
+    /** A point on the stage: x to the right, y up, EV_DIST blocks in front of the camera. */
+    private Location eventPoint(double x, double y) {
+        Vector forward = eventCamera.getDirection().normalize();
+        Vector right = forward.clone().crossProduct(new Vector(0, 1, 0)).normalize();
+        Vector up = right.clone().crossProduct(forward).normalize();
+        return eventCamera.clone()
+                .add(forward.clone().multiply(EV_DIST))
+                .add(right.multiply(x))
+                .add(up.multiply(y));
+    }
+
+    private ItemStack eventHead(EvPlayer ep) {
+        ItemStack head = new ItemStack(Material.PLAYER_HEAD);
+        if (!ep.fake) {
+            SkullMeta meta = (SkullMeta) head.getItemMeta();
+            Player online = getServer().getPlayer(ep.id);
+            if (online != null) {
+                meta.setPlayerProfile(online.getPlayerProfile());
+            } else {
+                meta.setOwningPlayer(getServer().getOfflinePlayer(ep.id));
+            }
+            head.setItemMeta(meta);
+        }
+        return head;
+    }
+
+    private ItemDisplay spawnEventHead(Location at, ItemStack head, float scale) {
+        ItemDisplay display = at.getWorld().spawn(at, ItemDisplay.class, d -> {
+            d.setItemStack(head);
+            d.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
+            d.setBillboard(Display.Billboard.CENTER);
+            d.setBrightness(new Display.Brightness(15, 15));
+            d.setViewRange(2.5f);
+            d.setPersistent(false);
+            d.setTransformation(new Transformation(new Vector3f(), new AxisAngle4f(),
+                    new Vector3f(scale, scale, scale), new AxisAngle4f()));
+        });
+        eventEntities.add(display);
+        return display;
+    }
+
+    private TextDisplay spawnEventText(Location at, Component text, float scale) {
+        TextDisplay display = at.getWorld().spawn(at, TextDisplay.class, d -> {
+            d.text(text);
+            d.setAlignment(TextDisplay.TextAlignment.CENTER);
+            d.setBillboard(Display.Billboard.CENTER);
+            d.setBackgroundColor(Color.fromARGB(0, 0, 0, 0));
+            d.setShadowed(true);
+            d.setSeeThrough(false);
+            d.setBrightness(new Display.Brightness(15, 15));
+            d.setViewRange(2.5f);
+            d.setPersistent(false);
+            d.setTransformation(new Transformation(new Vector3f(), new AxisAngle4f(),
+                    new Vector3f(scale, scale, scale), new AxisAngle4f()));
+        });
+        eventEntities.add(display);
+        return display;
+    }
+
+    // ---- start / stop
+
+    private void startEvent(CommandSender admin, boolean test, int fakeCount) {
+        if (eventRunning) {
+            admin.sendMessage(Component.text("Er is al een event bezig. Stop het eerst met /lowkey event stop.",
+                    NamedTextColor.RED));
+            return;
+        }
+        if (lobbySpawn == null || lobbySpawn.getWorld() == null) {
+            admin.sendMessage(Component.text("Maak eerst de lobby aan.", NamedTextColor.RED));
+            return;
+        }
+        if (eventCamera == null || eventCamera.getWorld() == null
+                || !eventCamera.getWorld().equals(lobbySpawn.getWorld())) {
+            admin.sendMessage(Component.text("Zet eerst de camera in de lobby (menu Team event, Camera zetten).",
+                    NamedTextColor.RED));
+            return;
+        }
+        List<Player> real = new ArrayList<>();
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (!isEliminated(p)) {
+                real.add(p);
+            }
+        }
+        int fakes = test ? Math.max(0, Math.min(fakeCount, FAKE_NAMES.length)) : 0;
+        if (real.size() + fakes < 2) {
+            admin.sendMessage(Component.text(test ? "Kies minstens 1 nep-speler als je alleen bent."
+                    : "Er zijn minstens 2 spelers nodig.", NamedTextColor.RED));
+            return;
+        }
+
+        // everybody who is not in the lobby goes there first (their things are put away like always)
+        for (Player p : real) {
+            if (!inLobby(p)) {
+                YamlConfiguration data = loadPlayerData(p.getUniqueId());
+                data.set("entered", true);
+                savePlayerData(p.getUniqueId(), data);
+                sendToLobby(p);
+            }
+        }
+
+        // who takes part, in which order, and who ends up where (decided now, the show is only the show)
+        eventPlayers.clear();
+        for (Player p : real) {
+            eventPlayers.add(new EvPlayer(p.getUniqueId(), p.getName(), false));
+        }
+        if (fakes > 0) {
+            List<String> names = new ArrayList<>(Arrays.asList(FAKE_NAMES));
+            Collections.shuffle(names, random);
+            for (int i = 0; i < fakes; i++) {
+                eventPlayers.add(new EvPlayer(UUID.randomUUID(), names.get(i), true));
+            }
+        }
+        Collections.shuffle(eventPlayers, random);
+        int n = eventPlayers.size();
+        int noord = n / 2;
+        int zuid = n / 2;
+        if (n % 2 == 1) {
+            if (random.nextBoolean()) {
+                noord++;
+            } else {
+                zuid++;
+            }
+        }
+        List<Side> sides = new ArrayList<>();
+        for (int i = 0; i < noord; i++) {
+            sides.add(Side.NOORD);
+        }
+        for (int i = 0; i < zuid; i++) {
+            sides.add(Side.ZUID);
+        }
+        Collections.shuffle(sides, random);
+        for (int i = 0; i < n; i++) {
+            eventPlayers.get(i).side = sides.get(i);
+        }
+        eventPlan[0] = noord;
+        eventPlan[1] = zuid;
+        eventPlaced[0] = 0;
+        eventPlaced[1] = 0;
+
+        // the camera: an invisible armor stand that everybody spectates
+        Location eye = eventCamera.clone();
+        eventStand = eye.getWorld().spawn(eye, ArmorStand.class, a -> {
+            a.setInvisible(true);
+            a.setMarker(true);
+            a.setGravity(false);
+            a.setInvulnerable(true);
+            a.setSilent(true);
+            a.setBasePlate(false);
+            a.setPersistent(false);
+        });
+        Location at = eye.clone().subtract(0, eventStand.getEyeHeight(), 0);
+        eventStand.teleport(at);
+
+        eventCenterHead = spawnEventHead(eventPoint(0, EV_CENTER_Y), new ItemStack(Material.PLAYER_HEAD),
+                EV_CENTER_HEAD_SCALE);
+
+        eventLocked.clear();
+        eventOrigin.clear();
+        eventMode.clear();
+        for (Player p : real) {
+            eventLocked.add(p.getUniqueId());
+            eventOrigin.put(p.getUniqueId(), p.getLocation().clone());
+            eventMode.put(p.getUniqueId(), p.getGameMode());
+            p.setGameMode(GameMode.SPECTATOR);
+            p.teleport(eye);
+        }
+        getServer().getScheduler().runTaskLater(this, this::eventEnforceCamera, 5L);
+
+        eventTest = test;
+        eventPhase = 0;
+        eventTick = 0;
+        eventAbsTick = 0;
+        eventPick = 0;
+        eventDone = 0;
+        eventShown = -1;
+        eventRunning = true;
+        eventTask = new BukkitRunnable() {
+            @Override
+            public void run() {
+                eventStep();
+            }
+        };
+        eventTask.runTaskTimer(this, 1L, 1L);
+        admin.sendMessage(Component.text("Het team event is gestart" + (test ? " (testmodus, er worden geen teams "
+                + "veranderd)." : "."), NamedTextColor.GREEN));
+    }
+
+    /** Stops everything and puts every player back. Nothing is removed that was already applied. */
+    private void eventCleanup() {
+        if (eventTask != null) {
+            eventTask.cancel();
+            eventTask = null;
+        }
+        for (Entity e : eventEntities) {
+            if (e.isValid()) {
+                e.remove();
+            }
+        }
+        eventEntities.clear();
+        eventCenterHead = null;
+        if (eventStand != null) {
+            eventStand.remove();
+            eventStand = null;
+        }
+        for (UUID id : new ArrayList<>(eventLocked)) {
+            Player p = getServer().getPlayer(id);
+            if (p == null) {
+                continue;
+            }
+            p.setSpectatorTarget(null);
+            p.clearTitle();
+            GameMode back = eventMode.getOrDefault(id, GameMode.ADVENTURE);
+            if (back == GameMode.SPECTATOR || back == GameMode.SURVIVAL) {
+                back = GameMode.ADVENTURE;
+            }
+            p.setGameMode(back);
+            Location origin = eventOrigin.get(id);
+            if (origin != null && origin.getWorld() != null) {
+                p.teleport(origin);
+            }
+        }
+        eventLocked.clear();
+        eventOrigin.clear();
+        eventMode.clear();
+        eventPlayers.clear();
+        eventRunning = false;
+    }
+
+    private void stopEvent(CommandSender sender) {
+        if (!eventRunning) {
+            sender.sendMessage(Component.text("Er is geen event bezig.", NamedTextColor.RED));
+            return;
+        }
+        eventCleanup();
+        sender.sendMessage(Component.text("Het event is gestopt en iedereen staat weer vrij.", NamedTextColor.GREEN));
+    }
+
+    /** A locked player left: he stays out of the event. */
+    private void eventPlayerLeft(Player player) {
+        eventLocked.remove(player.getUniqueId());
+        eventOrigin.remove(player.getUniqueId());
+        eventMode.remove(player.getUniqueId());
+    }
+
+    private void eventEnforceCamera() {
+        if (!eventRunning || eventStand == null) {
+            return;
+        }
+        for (UUID id : eventLocked) {
+            Player p = getServer().getPlayer(id);
+            if (p == null) {
+                continue;
+            }
+            if (p.getGameMode() != GameMode.SPECTATOR) {
+                p.setGameMode(GameMode.SPECTATOR);
+            }
+            if (!p.getWorld().equals(eventStand.getWorld())) {
+                p.teleport(eventCamera);
+            }
+            if (!eventStand.equals(p.getSpectatorTarget())) {
+                p.setSpectatorTarget(eventStand);
+            }
+        }
+    }
+
+    // ---- the show, one step per tick
+
+    private boolean eventAvailable(EvPlayer ep) {
+        return ep.fake || getServer().getPlayer(ep.id) != null;
+    }
+
+    private void eventStep() {
+        if (!eventRunning) {
+            return;
+        }
+        if (eventStand == null || !eventStand.isValid()) {
+            eventCleanup();
+            return;
+        }
+        if (eventAbsTick++ % 10 == 0) {
+            eventEnforceCamera();
+        }
+        if (eventPhase == 0) {
+            eventStepIntro();
+        } else if (eventPhase == 1) {
+            eventStepShuffle();
+        } else if (eventPhase == 2) {
+            if (eventTick >= 30) {
+                eventBeginPick();
+                return;
+            }
+        } else if (eventTick >= 120) {
+            eventCleanup();
+            return;
+        }
+        eventTick++;
+    }
+
+    private void eventStepIntro() {
+        if (eventTick == 0) {
+            eventTitle(Component.text("Teams worden verdeeld", NamedTextColor.WHITE, TextDecoration.BOLD), 60);
+            eventSound(Sound.BLOCK_BEACON_ACTIVATE, 1.0f, 1.0f);
+        } else if (eventTick == 40 || eventTick == 60 || eventTick == 80) {
+            String number = eventTick == 40 ? "3" : (eventTick == 60 ? "2" : "1");
+            eventTitle(Component.text(number, NamedTextColor.YELLOW, TextDecoration.BOLD), 25);
+            eventSound(Sound.UI_BUTTON_CLICK, 1.0f, 1.0f + (eventTick - 40) / 80f);
+        } else if (eventTick >= 100) {
+            eventBeginPick();
+        }
+    }
+
+    /** Next person: how long the shuffle takes depends on how many are already done (the first ones take longest). */
+    private void eventBeginPick() {
+        while (eventPick < eventPlayers.size() && !eventAvailable(eventPlayers.get(eventPick))) {
+            eventPick++;
+        }
+        if (eventPick >= eventPlayers.size()) {
+            eventStartOutro();
+            return;
+        }
+        double seconds = Math.max(3.0, 8.0 - 0.35 * eventDone);
+        eventShuffleEnd = (int) (seconds * 20);
+        eventNextFrame = 0;
+        eventInterval = 2.0;
+        eventShown = -1;
+        eventPhase = 1;
+        eventTick = 0;
+    }
+
+    private void eventStepShuffle() {
+        EvPlayer chosen = eventPlayers.get(eventPick);
+        if (eventTick >= eventShuffleEnd) {
+            eventReveal(chosen);
+            eventPhase = 2;
+            eventTick = 0;
+            return;
+        }
+        if (eventTick < eventNextFrame) {
+            return;
+        }
+        List<Integer> pool = new ArrayList<>();
+        for (int i = eventPick; i < eventPlayers.size(); i++) {
+            if (eventAvailable(eventPlayers.get(i))) {
+                pool.add(i);
+            }
+        }
+        int index = pool.get(random.nextInt(pool.size()));
+        for (int guard = 0; guard < 10 && pool.size() > 1 && index == eventShown; guard++) {
+            index = pool.get(random.nextInt(pool.size()));
+        }
+        eventShown = index;
+        EvPlayer shown = eventPlayers.get(index);
+        if (eventCenterHead != null && eventCenterHead.isValid()) {
+            eventCenterHead.setItemStack(eventHead(shown));
+        }
+        eventTitle(Component.text(shown.name, NamedTextColor.WHITE, TextDecoration.BOLD), 30);
+        eventSound(Sound.BLOCK_NOTE_BLOCK_HAT, 0.7f, 0.8f + 0.8f * eventTick / Math.max(1, eventShuffleEnd));
+        eventInterval = eventInterval * 1.17 + 0.2;
+        eventNextFrame = eventTick + (int) Math.round(eventInterval);
+    }
+
+    private void eventReveal(EvPlayer ep) {
+        ep.placed = true;
+        eventDone++;
+        eventPick++;
+        TextColor color = TextColor.color(ep.side.rgb);
+        if (eventCenterHead != null && eventCenterHead.isValid()) {
+            eventCenterHead.setItemStack(eventHead(ep));
+        }
+        eventTitle(Component.text(ep.name, color, TextDecoration.BOLD), 40);
+
+        boolean noord = ep.side == Side.NOORD;
+        eventSound(Sound.ENTITY_PLAYER_LEVELUP, 1.0f, noord ? 0.75f : 1.3f);
+        eventSound(noord ? Sound.BLOCK_NOTE_BLOCK_BASS : Sound.BLOCK_NOTE_BLOCK_CHIME, 1.0f, noord ? 0.7f : 1.4f);
+
+        // the head and the name go into the column under the logo
+        int sideIndex = noord ? 0 : 1;
+        int k = eventPlaced[sideIndex]++;
+        int cols = 3;
+        int rows = (int) Math.ceil(Math.max(1, eventPlan[sideIndex]) / (double) cols);
+        double spacing = Math.min(EV_ROW_MAX, EV_ROWS_H / Math.max(1, rows));
+        double x = (noord ? -EV_COL_X : EV_COL_X) + ((k % cols) - 1) * EV_CELL_W;
+        double y = EV_TOP_Y - (k / cols) * spacing;
+        Location headAt = eventPoint(x, y);
+        spawnEventHead(headAt, eventHead(ep), EV_HEAD_SCALE);
+        spawnEventText(eventPoint(x, y - 0.45), Component.text(ep.name, color, TextDecoration.BOLD), EV_NAME_SCALE);
+        headAt.getWorld().spawnParticle(Particle.END_ROD, headAt, 25, 0.3, 0.3, 0.3, 0.05);
+
+        Component bar = Component.text("Verdeeld: " + eventDone + " van " + eventPlayers.size(), NamedTextColor.GRAY);
+        for (UUID id : eventLocked) {
+            Player p = getServer().getPlayer(id);
+            if (p != null) {
+                p.sendActionBar(bar);
+            }
+        }
+    }
+
+    private void eventStartOutro() {
+        eventPhase = 3;
+        eventTick = 0;
+        if (eventCenterHead != null && eventCenterHead.isValid()) {
+            eventCenterHead.remove();
+        }
+        List<String> noord = new ArrayList<>();
+        List<String> zuid = new ArrayList<>();
+        for (EvPlayer ep : eventPlayers) {
+            if (!ep.placed) {
+                continue;
+            }
+            (ep.side == Side.NOORD ? noord : zuid).add(ep.name);
+            if (!eventTest && !ep.fake) {
+                setSideByUuid(ep.id, ep.side); // the teams are only applied for real now
+            }
+        }
+        eventTitle(Component.text(eventTest ? "Test klaar" : "Teams verdeeld!", NamedTextColor.GREEN,
+                TextDecoration.BOLD), 110);
+        eventSound(Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+
+        Component summary = Component.text()
+                .append(glyph(LOWKEY_BADGE)).append(Component.space())
+                .append(Component.text("Noord: ", TextColor.color(Side.NOORD.rgb), TextDecoration.BOLD))
+                .append(Component.text(String.join(", ", noord), NamedTextColor.WHITE))
+                .append(Component.newline())
+                .append(glyph(LOWKEY_BADGE)).append(Component.space())
+                .append(Component.text("Zuid: ", TextColor.color(Side.ZUID.rgb), TextDecoration.BOLD))
+                .append(Component.text(String.join(", ", zuid), NamedTextColor.WHITE))
+                .build();
+        for (UUID id : eventLocked) {
+            Player p = getServer().getPlayer(id);
+            if (p != null) {
+                p.sendMessage(summary);
+            }
+        }
+    }
+
+    // ---- teams of players, also for players who are offline
+
+    private void setSideByUuid(UUID id, Side side) {
+        Player online = getServer().getPlayer(id);
+        if (online != null) {
+            setSide(online, side);
+            return;
+        }
+        YamlConfiguration data = loadPlayerData(id);
+        data.set("identity.migrated", true);
+        data.set("identity.side", side == Side.NONE ? null : side.id);
+        savePlayerData(id, data);
+    }
+
+    /** Everybody back to "no team", online and offline. For testing. */
+    private void resetAllTeams(CommandSender sender) {
+        if (eventRunning) {
+            sender.sendMessage(Component.text("Stop eerst het event.", NamedTextColor.RED));
+            return;
+        }
+        int count = 0;
+        Set<UUID> online = new HashSet<>();
+        for (Player p : getServer().getOnlinePlayers()) {
+            online.add(p.getUniqueId());
+            if (getSide(p) != Side.NONE) {
+                count++;
+            }
+            setSide(p, Side.NONE);
+        }
+        File[] files = new File(getDataFolder(), "players").listFiles((d, n) -> n.endsWith(".yml"));
+        if (files != null) {
+            for (File f : files) {
+                UUID id;
+                try {
+                    id = UUID.fromString(f.getName().substring(0, f.getName().length() - 4));
+                } catch (IllegalArgumentException e) {
+                    continue;
+                }
+                if (online.contains(id)) {
+                    continue;
+                }
+                YamlConfiguration y = YamlConfiguration.loadConfiguration(f);
+                if (y.getString("identity.side") != null) {
+                    y.set("identity.side", null);
+                    try {
+                        y.save(f);
+                        count++;
+                    } catch (IOException e) {
+                        getLogger().warning("Kon speler data niet opslaan: " + e.getMessage());
+                    }
+                }
+            }
+        }
+        sender.sendMessage(Component.text("Alle teams zijn gereset (" + count + " spelers hadden een team).",
+                NamedTextColor.GREEN));
+    }
+
+    // ---- menu
+
+    private void openEventMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        if (eventRunning) {
+            buttons.add(button(iconLabel(M_TEAM, "Event afbreken", NamedTextColor.RED),
+                    "Stopt het event meteen en zet iedereen weer vrij.", 150, () -> {
+                        stopEvent(admin);
+                        openEventMenu(admin);
+                    }));
+        } else {
+            buttons.add(button(iconLabel(M_TEAM, "Event starten", NamedTextColor.GREEN),
+                    "Verdeelt iedereen die online is over Noord en Zuid.", 150, () -> confirm(admin,
+                            "Team event starten?",
+                            "Iedereen die online is (ook in de main wereld) gaat naar de lobby en kijkt mee. "
+                                    + "Ieders team wordt opnieuw verdeeld.",
+                            "Dit duurt ongeveer 2 tot 3 minuten.",
+                            Component.text("Ja, starten", NamedTextColor.GREEN),
+                            () -> {
+                                startEvent(admin, false, 0);
+                            },
+                            () -> openEventMenu(admin))));
+            buttons.add(button(iconLabel(M_TEAM, "Testen", NamedTextColor.WHITE),
+                    "Oefenen met nep-spelers. Er verandert geen enkel team.", 150, () -> openEventTestDialog(admin)));
+        }
+        buttons.add(button(iconLabel(M_SPAWN_N, "Camera zetten", NamedTextColor.WHITE),
+                "Zet de camera op jouw ogen en kijkrichting. Je moet in de lobby staan.", 150, () -> {
+                    setEventCameraHere(admin);
+                    openEventMenu(admin);
+                }));
+        buttons.add(button(iconLabel(M_PLAYERS, "Teamverdeling", NamedTextColor.WHITE),
+                "Alle spelers met hun team.", 150, () -> openTeamListMenu(admin)));
+        buttons.add(button(iconLabel(M_REVIVE, "Alle teams resetten", NamedTextColor.RED),
+                "Haalt van iedereen het team weg (voor testen).", 150, () -> confirm(admin,
+                        "Alle teams resetten?",
+                        "Iedereen, ook wie offline is, heeft daarna geen team meer.",
+                        "Dit kan niet ongedaan gemaakt worden.",
+                        Component.text("Ja, resetten", NamedTextColor.RED),
+                        () -> {
+                            resetAllTeams(admin);
+                            openEventMenu(admin);
+                        },
+                        () -> openEventMenu(admin))));
+
+        int eligible = 0;
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (!isEliminated(p)) {
+                eligible++;
+            }
+        }
+        Component body = joinLines(
+                statusLine("Event", eventRunning ? "bezig" : "niet bezig",
+                        eventRunning ? NamedTextColor.YELLOW : NamedTextColor.GRAY),
+                statusLine("Camera", eventCamera != null ? "ingesteld" : "niet ingesteld",
+                        eventCamera != null ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Lobby", lobbyCreated ? "aangemaakt" : "nog niet",
+                        lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Spelers die meedoen", String.valueOf(eligible), NamedTextColor.WHITE));
+        showMenu(admin, "Team event", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+    }
+
+    private void openEventTestDialog(Player admin) {
+        DialogInput count = DialogInput.text("aantal", Component.text("Aantal nep-spelers (1 tot 20)"))
+                .width(300).initial("8").maxLength(2).build();
+        DialogAction go = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String text = view.getText("aantal");
+            getServer().getScheduler().runTask(this, () -> {
+                int value;
+                try {
+                    value = Integer.parseInt(text == null ? "" : text.trim());
+                } catch (NumberFormatException e) {
+                    value = -1;
+                }
+                if (value < 1 || value > FAKE_NAMES.length) {
+                    clicker.sendMessage(Component.text("Geef een getal tussen 1 en " + FAKE_NAMES.length + ".",
+                            NamedTextColor.RED));
+                    openEventMenu(clicker);
+                } else {
+                    startEvent(clicker, true, value);
+                }
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(menuTitle("Test met nep-spelers"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Jij en de nep-spelers worden verdeeld. Er verandert geen enkel echt team.",
+                                NamedTextColor.GRAY))))
+                        .inputs(List.of(count))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_TEAM, "Starten", NamedTextColor.GREEN),
+                                Component.text("Start de test."), 150, go),
+                        backButton("Terug naar het event.", () -> openEventMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+    /** Everybody with their team, online and offline. */
+    private void openTeamListMenu(Player admin) {
+        List<String> noord = new ArrayList<>();
+        List<String> zuid = new ArrayList<>();
+        List<String> geen = new ArrayList<>();
+        Set<UUID> seen = new HashSet<>();
+        for (Player p : getServer().getOnlinePlayers()) {
+            seen.add(p.getUniqueId());
+            Side side = getSide(p);
+            (side == Side.NOORD ? noord : (side == Side.ZUID ? zuid : geen)).add(p.getName());
+        }
+        File[] files = new File(getDataFolder(), "players").listFiles((d, n) -> n.endsWith(".yml"));
+        if (files != null) {
+            for (File f : files) {
+                UUID id;
+                try {
+                    id = UUID.fromString(f.getName().substring(0, f.getName().length() - 4));
+                } catch (IllegalArgumentException e) {
+                    continue;
+                }
+                if (seen.contains(id)) {
+                    continue;
+                }
+                Side side = Side.fromId(YamlConfiguration.loadConfiguration(f).getString("identity.side"));
+                String name = getServer().getOfflinePlayer(id).getName();
+                if (name == null) {
+                    name = id.toString().substring(0, 8);
+                }
+                name = name + " (offline)";
+                (side == Side.NOORD ? noord : (side == Side.ZUID ? zuid : geen)).add(name);
+            }
+        }
+        noord.sort(String.CASE_INSENSITIVE_ORDER);
+        zuid.sort(String.CASE_INSENSITIVE_ORDER);
+        geen.sort(String.CASE_INSENSITIVE_ORDER);
+
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(menuTitle("Teamverdeling"))
+                        .body(List.of(
+                                DialogBody.plainMessage(teamLine("Noord", noord, TextColor.color(Side.NOORD.rgb))),
+                                DialogBody.plainMessage(teamLine("Zuid", zuid, TextColor.color(Side.ZUID.rgb))),
+                                DialogBody.plainMessage(teamLine("Geen team", geen, NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.confirmation(
+                        button(iconLabel(M_PLAYERS, "Verversen", NamedTextColor.WHITE), "Laad de lijst opnieuw.", 150,
+                                () -> openTeamListMenu(admin)),
+                        backButton("Terug naar het event.", () -> openEventMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+    private static Component teamLine(String title, List<String> names, TextColor color) {
+        return Component.text()
+                .append(Component.text(title + " (" + names.size() + "): ", color, TextDecoration.BOLD))
+                .append(Component.text(names.isEmpty() ? "-" : String.join(", ", names), NamedTextColor.WHITE))
+                .build();
+    }
+
+    private void handleEventCommand(CommandSender sender, String[] args) {
+        String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+        if (sub.equals("start")) {
+            startEvent(sender, false, 0);
+        } else if (sub.equals("test")) {
+            int count = 8;
+            if (args.length >= 3) {
+                try {
+                    count = Integer.parseInt(args[2]);
+                } catch (NumberFormatException e) {
+                    count = -1;
+                }
+            }
+            if (count < 1 || count > FAKE_NAMES.length) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey event test [1 tot " + FAKE_NAMES.length + "]",
+                        NamedTextColor.GRAY));
+            } else {
+                startEvent(sender, true, count);
+            }
+        } else if (sub.equals("stop")) {
+            stopEvent(sender);
+        } else if (sub.equals("camera")) {
+            if (sender instanceof Player) {
+                setEventCameraHere((Player) sender);
+            } else {
+                sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
+            }
+        } else if (sub.equals("teams")) {
+            if (sender instanceof Player) {
+                openTeamListMenu((Player) sender);
+            } else {
+                sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
+            }
+        } else if (sub.equals("reset")) {
+            if (args.length == 3 && args[2].equalsIgnoreCase("confirm")) {
+                resetAllTeams(sender);
+            } else if (sender instanceof Player) {
+                openEventMenu((Player) sender);
+            } else {
+                sender.sendMessage(Component.text("Gebruik in de console: /lowkey event reset confirm",
+                        NamedTextColor.GRAY));
+            }
+        } else if (sender instanceof Player) {
+            openEventMenu((Player) sender);
+        } else {
+            sender.sendMessage(Component.text("Gebruik: /lowkey event <start|test [aantal]|stop|camera|teams|reset>",
+                    NamedTextColor.GRAY));
+        }
+    }
+
     // ------------------------------------------------------------------ tab completion
 
     /** Typing /lowkey (and pressing space / tab) suggests every possibility. */
@@ -4340,6 +5730,26 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         if (args.length >= 2 && args[0].equalsIgnoreCase("mace")) {
             return mace.tabComplete(args);
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("losers")) {
+            List<String> losersOptions = new ArrayList<>(Arrays.asList("create", "tp", "setspawn", "open", "close",
+                    "return", "delete"));
+            losersOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
+            return losersOptions;
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("losers") && args[1].equalsIgnoreCase("return")) {
+            List<String> names = new ArrayList<>();
+            for (Player online : getServer().getOnlinePlayers()) {
+                if (online.getName().toLowerCase(Locale.ROOT).startsWith(args[2].toLowerCase(Locale.ROOT))) {
+                    names.add(online.getName());
+                }
+            }
+            return names;
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("event")) {
+            List<String> eventOptions = new ArrayList<>(Arrays.asList("start", "test", "stop", "camera", "teams", "reset"));
+            eventOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
+            return eventOptions;
         }
         List<String> options = new ArrayList<>();
         if (args.length == 1) {
@@ -4365,6 +5775,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("countdown");
             options.add("mace");
             options.add("checklist");
+            options.add("event");
+            options.add("losers");
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
