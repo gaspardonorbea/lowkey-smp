@@ -1,5 +1,5 @@
 name: LowkeyCore
-version: 0.28.0
+version: 0.29.0
 main: nl.lowkey.core.LowkeyCore
 api-version: '26.1'
 description: LowkeySMP chat tags, join/leave messages, grace period, elimination effects, server hours, donation broadcaster, lobby, server launch and the one and only mace
