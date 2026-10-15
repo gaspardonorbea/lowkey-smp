@@ -11,6 +11,7 @@ import io.papermc.paper.registry.data.dialog.input.DialogInput;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.event.ClickCallback;
@@ -1246,6 +1247,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void clearEliminated(Player target) {
         setEliminated(target, false);
         setLosersOut(target, false);
+        removeLosersItems(target);
         refreshTags(target);
         if (inLobby(target)) {
             sendToLobby(target); // gives the lobby item back
@@ -2093,7 +2095,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 writeLoc(data, "last", player.getLocation());
             }
             if (!data.getBoolean("stashed", false)) {
-                data.set("inv", Arrays.asList(player.getInventory().getContents()));
+                ItemStack[] stash = player.getInventory().getContents().clone();
+                for (int i = 0; i < stash.length; i++) {
+                    if (isLobbyItem(stash[i]) || isLosersItem(stash[i])) {
+                        stash[i] = null; // the stars belong to the lobby, never to the real inventory
+                    }
+                }
+                data.set("inv", Arrays.asList(stash));
                 data.set("stashed", true);
             }
             if (!savePlayerData(id, data)) {
@@ -2128,6 +2136,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         UUID id = player.getUniqueId();
         YamlConfiguration data = loadPlayerData(id);
         removeLobbyItems(player);
+        removeLosersItems(player);
         if (!data.getBoolean("stashed", false)) {
             return;
         }
@@ -2143,6 +2152,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         player.getInventory().clear();
         player.getInventory().setContents(contents);
+        removeLobbyItems(player);  // stars that were stashed by an older version
+        removeLosersItems(player);
         data.set("stashed", false);
         data.set("inv", null);
         savePlayerData(id, data);
@@ -2645,7 +2656,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }, CLICK_OPTIONS);
 
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Countdown instellingen"))
+                .base(DialogBase.builder(dlgTitle(admin, "Countdown instellingen"))
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 "De countdown loopt naar deze datum en tijd.", NamedTextColor.GRAY))))
                         .inputs(List.of(date, time, size))
@@ -3876,11 +3887,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     void showMenu(Player admin, String title, Component body, List<ActionButton> buttons, ActionButton exit) {
         if (newDesign(admin)) {
-            showThemedMenu(admin, themedTitle(title), body, buttons, exit, true);
+            showThemedMenu(admin, title, body, buttons, exit, true, false);
             return;
         }
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle(title))
+                .base(DialogBase.builder(dlgTitle(admin, title))
                         .body(List.of(DialogBody.plainMessage(body)))
                         .build())
                 .type(DialogType.multiAction(buttons, exit, 2)));
@@ -4297,7 +4308,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }, CLICK_OPTIONS);
 
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Eigen bericht"))
+                .base(DialogBase.builder(dlgTitle(admin, "Eigen bericht"))
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 "Dit bericht gaat naar iedereen, met de LOWKEY badge ervoor.", NamedTextColor.GRAY))))
                         .inputs(List.of(input))
@@ -4314,6 +4325,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** A yes / no screen. "Annuleren" runs `back`. */
     void confirm(Player admin, String title, String line1, String line2, Component yesLabel,
                  Runnable yes, Runnable back) {
+        if (newDesign(admin)) {
+            Component text = joinLines(Component.text(line1, NamedTextColor.WHITE),
+                    Component.text(line2, NamedTextColor.GRAY));
+            Dialog themed = Dialog.create(builder -> builder.empty()
+                    .base(DialogBase.builder(themedTitle(title))
+                            .body(List.of(headerCard(Material.BARRIER, text)))
+                            .build())
+                    .type(DialogType.confirmation(
+                            button(yesLabel, "Bevestigen", 190, yes),
+                            button(Component.text("Annuleren", NamedTextColor.GRAY), "Terug.", 190, back))));
+            admin.showDialog(themed);
+            return;
+        }
         Dialog dialog = Dialog.create(builder -> builder.empty()
                 .base(DialogBase.builder(Component.text(title, NamedTextColor.RED, TextDecoration.BOLD))
                         .body(List.of(
@@ -4347,7 +4371,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         ActionButton back = backButton("Terug.", backTo);
 
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle(title))
+                .base(DialogBase.builder(dlgTitle(admin, title))
                         .body(List.of(DialogBody.plainMessage(Component.text("Kies een speler:", NamedTextColor.GRAY))))
                         .build())
                 .type(DialogType.multiAction(buttons, back, 3)));
@@ -4362,7 +4386,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         ActionButton back = backButton("Terug naar spelers.", () -> openPlayersMenu(admin));
 
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Team voor " + target.getName()))
+                .base(DialogBase.builder(dlgTitle(admin, "Team voor " + target.getName()))
                         .body(List.of(DialogBody.plainMessage(
                                 Component.text("Nu: " + getSide(target).id, NamedTextColor.GRAY))))
                         .build())
@@ -4393,7 +4417,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         ActionButton back = backButton("Terug naar spelers.", () -> openPlayersMenu(admin));
 
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Crew badge voor " + target.getName()))
+                .base(DialogBase.builder(dlgTitle(admin, "Crew badge voor " + target.getName()))
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 "Nu: " + (isCrew(target) ? "crew" : "geen crew"), NamedTextColor.GRAY))))
                         .build())
@@ -4411,7 +4435,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         long leftMinutes = (graceRemaining(target) + 59_999L) / 60_000L;
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Grace voor " + target.getName()))
+                .base(DialogBase.builder(dlgTitle(admin, "Grace voor " + target.getName()))
                         .body(List.of(DialogBody.plainMessage(
                                 Component.text("Nu nog: " + leftMinutes + " minuten", NamedTextColor.GRAY))))
                         .build())
@@ -4540,7 +4564,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 Component.text("Klik een stap aan als je hem gedaan hebt.", NamedTextColor.GRAY));
         ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Border checklist"))
+                .base(DialogBase.builder(dlgTitle(admin, "Border checklist"))
                         .body(List.of(DialogBody.plainMessage(body)))
                         .build())
                 .type(DialogType.multiAction(buttons, back, 1)));
@@ -4717,7 +4741,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         NamedTextColor.WHITE));
         ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Tijdlijn"))
+                .base(DialogBase.builder(dlgTitle(admin, "Tijdlijn"))
                         .body(List.of(DialogBody.plainMessage(body)))
                         .build())
                 .type(DialogType.multiAction(buttons, back, 1)));
@@ -5363,7 +5387,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         ActionButton back = backButton("Terug naar het Verliezerseiland.", () -> openLosersMenu(admin));
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Speler terugsturen"))
+                .base(DialogBase.builder(dlgTitle(admin, "Speler terugsturen"))
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 "Kies wie weer levend terug in de main wereld gaat:", NamedTextColor.GRAY))))
                         .build())
@@ -6287,7 +6311,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             });
         }, CLICK_OPTIONS);
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Test met nep-spelers"))
+                .base(DialogBase.builder(dlgTitle(admin, "Test met nep-spelers"))
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 "Jij en de nep-spelers worden verdeeld. Er verandert geen enkel echt team.",
                                 NamedTextColor.GRAY))))
@@ -6337,7 +6361,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         geen.sort(String.CASE_INSENSITIVE_ORDER);
 
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Teamverdeling"))
+                .base(DialogBase.builder(dlgTitle(admin, "Teamverdeling"))
                         .body(List.of(
                                 DialogBody.plainMessage(teamLine("Noord", noord, TextColor.color(Side.NOORD.rgb))),
                                 DialogBody.plainMessage(teamLine("Zuid", zuid, TextColor.color(Side.ZUID.rgb))),
@@ -6462,19 +6486,116 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 + mm.escapeTags(title) + "</white>");
     }
 
-    /** New design: every screen gets the breadcrumb title and, at the end, a Home button. */
-    private void showThemedMenu(Player admin, Component title, Component body, List<ActionButton> buttons,
-                                ActionButton exit, boolean withHome) {
-        List<ActionButton> all = new ArrayList<>(buttons);
-        if (withHome) {
-            all.add(button(iconLabel(M_WORLD, "Home", NamedTextColor.LIGHT_PURPLE),
-                    "Terug naar het beginscherm.", 150, () -> openMenu(admin)));
+    private static final PlainTextComponentSerializer PLAIN = PlainTextComponentSerializer.plainText();
+
+    /** Title for any dialog: the new gradient breadcrumb in the new design, the old purple title in the classic one. */
+    Component dlgTitle(Player admin, String text) {
+        return newDesign(admin) ? themedTitle(text) : menuTitle(text);
+    }
+
+    /** A big icon on the left with text beside it (the header of every screen). */
+    private DialogBody headerCard(Material icon, Component text) {
+        return DialogBody.item(new ItemStack(icon))
+                .description(DialogBody.plainMessage(text, 300))
+                .showDecorations(false)
+                .showTooltip(false)
+                .width(48)
+                .height(48)
+                .build();
+    }
+
+    /** A small icon with one line of text beside it (a status row). */
+    private DialogBody miniCard(Material icon, Component text) {
+        return DialogBody.item(new ItemStack(icon))
+                .description(DialogBody.plainMessage(text, 320))
+                .showDecorations(false)
+                .showTooltip(false)
+                .width(20)
+                .height(20)
+                .build();
+    }
+
+    private DialogBody statusCard(Material icon, String name, boolean on, String onText, String offText) {
+        return miniCard(icon, Component.text()
+                .append(Component.text(name, NamedTextColor.WHITE, TextDecoration.BOLD))
+                .append(Component.text("   "))
+                .append(Component.text((on ? onText : offText).toUpperCase(Locale.ROOT),
+                        on ? NamedTextColor.GREEN : NamedTextColor.RED, TextDecoration.BOLD))
+                .build());
+    }
+
+    /** The icon of a screen, shown big at the top of it. */
+    private static Material screenIcon(String title) {
+        switch (title) {
+            case "Spelers":
+                return Material.PLAYER_HEAD;
+            case "Wereld en server":
+                return Material.GRASS_BLOCK;
+            case "Snelle acties":
+                return Material.LEVER;
+            case "Mace":
+                return Material.MACE;
+            case "Berichten":
+                return Material.WRITABLE_BOOK;
+            case "Team event":
+                return Material.FIREWORK_ROCKET;
+            case "Verliezerseiland":
+                return Material.WITHER_SKELETON_SKULL;
+            case "Nether en grenzen":
+                return Material.NETHERRACK;
+            case "Lobby":
+                return Material.NETHER_STAR;
+            case "Spawnpunten":
+                return Material.COMPASS;
+            case "Countdown":
+                return Material.CLOCK;
+            case "Testen en herstellen":
+                return Material.TOTEM_OF_UNDYING;
+            case "Titel testen":
+                return Material.OAK_SIGN;
+            default:
+                return Material.BOOK;
         }
+    }
+
+    /** A wide button: the title, and the explanation in grey right behind it. */
+    private ActionButton cardButton(ActionButton b) {
+        Component tip = b.tooltip();
+        String label = PLAIN.serialize(b.label());
+        String desc = tip == null ? "" : PLAIN.serialize(tip);
+        int room = 56 - label.length();
+        if (room < 12) {
+            desc = "";
+        } else if (desc.length() > room) {
+            desc = desc.substring(0, room - 3).trim() + "...";
+        }
+        Component label2 = Component.text()
+                .append(b.label())
+                .append(desc.isEmpty() ? Component.empty() : Component.text("   " + desc, NamedTextColor.GRAY))
+                .build();
+        return ActionButton.create(label2, b.tooltip(), 380, b.action());
+    }
+
+    /**
+     * New design for every screen: a big icon with the status text beside it, then wide buttons with the explanation
+     * on each button, and a Home button at the end. Compact screens use a grid of switches instead.
+     */
+    private void showThemedMenu(Player admin, String title, Component body, List<ActionButton> buttons,
+                                ActionButton exit, boolean withHome, boolean compact) {
+        List<ActionButton> all = new ArrayList<>();
+        for (ActionButton b : buttons) {
+            all.add(compact ? b : cardButton(b));
+        }
+        if (withHome) {
+            ActionButton home = button(iconLabel(M_WORLD, "Home", NamedTextColor.LIGHT_PURPLE),
+                    "Terug naar het beginscherm.", compact ? 190 : 380, () -> openMenu(admin));
+            all.add(compact ? home : cardButton(home));
+        }
+        List<DialogBody> bodies = new ArrayList<>();
+        bodies.add(headerCard(screenIcon(title), body));
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(title)
-                        .body(List.of(DialogBody.plainMessage(body)))
-                        .build())
-                .type(DialogType.multiAction(all, exit, 2)));
+                .base(DialogBase.builder(themedTitle(title)).body(bodies).build())
+                .type(DialogType.multiAction(all, exit, compact ? 2 : 1)));
         admin.showDialog(dialog);
     }
 
@@ -6486,7 +6607,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         on ? NamedTextColor.GREEN : NamedTextColor.RED, TextDecoration.BOLD))
                 .append(Component.text(name, NamedTextColor.WHITE))
                 .build();
-        return button(label, tooltip, 150, action);
+        return button(label, tooltip, 190, action);
     }
 
     private static Component stateWord(String name, boolean on) {
@@ -6525,68 +6646,74 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 geen++;
             }
         }
-        Component switches = Component.text()
-                .append(stateWord("Server", !serverClosed)).append(Component.text("  "))
-                .append(stateWord("Launch", launched)).append(Component.text("  "))
-                .append(stateWord("Main", mainOpen)).append(Component.text("  "))
-                .append(stateWord("Nether", netherOpen)).append(Component.text("  "))
-                .append(stateWord("End", endOpen)).append(Component.text("  "))
-                .append(stateWord("Grenzen", bordersDropped)).append(Component.text("  "))
-                .append(stateWord("Eiland", losersOpen))
-                .build();
         Component people = Component.text()
                 .append(Component.text("Online ", NamedTextColor.GRAY))
                 .append(Component.text(String.valueOf(getServer().getOnlinePlayers().size()), NamedTextColor.WHITE))
-                .append(Component.text("  |  ", NamedTextColor.DARK_GRAY))
-                .append(Component.text("Noord ", TextColor.color(Side.NOORD.rgb)))
+                .append(Component.text("   Noord ", TextColor.color(Side.NOORD.rgb)))
                 .append(Component.text(String.valueOf(noord), NamedTextColor.WHITE))
-                .append(Component.text("  |  ", NamedTextColor.DARK_GRAY))
-                .append(Component.text("Zuid ", TextColor.color(Side.ZUID.rgb)))
+                .append(Component.text("   Zuid ", TextColor.color(Side.ZUID.rgb)))
                 .append(Component.text(String.valueOf(zuid), NamedTextColor.WHITE))
-                .append(Component.text("  |  ", NamedTextColor.DARK_GRAY))
-                .append(Component.text("Geen team ", NamedTextColor.GRAY))
+                .append(Component.text("   Geen ", NamedTextColor.GRAY))
                 .append(Component.text(String.valueOf(geen), NamedTextColor.WHITE))
                 .build();
-        Component body = joinLines(
+        Component headline = MiniMessage.miniMessage()
+                .deserialize("<gradient:#c084fc:#f472b6><bold>LOWKEY BEHEER</bold></gradient>");
+        Component header = joinLines(
+                headline,
                 Component.text(todayLine, NamedTextColor.WHITE, TextDecoration.BOLD),
-                switches,
-                Component.text("groen = aan, rood = uit", NamedTextColor.DARK_GRAY),
                 people,
                 eventRunning ? Component.text("Team event is bezig", NamedTextColor.YELLOW) : Component.empty());
 
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(iconLabel(M_LAUNCH, "Snelle acties", NamedTextColor.GREEN),
-                "Alle schakelaars op een plek: launch, Nether, End, grenzen en meer.", 150, () -> openQuickMenu(admin)));
-        buttons.add(button(iconLabel(M_COUNTDOWN, "Seizoen", NamedTextColor.WHITE),
-                "Alle dagen van 7 tot 21 nov met wat je moet doen.", 150, () -> openTimelineMenu(admin)));
-        buttons.add(button(iconLabel(M_PLAYERS, "Spelers", NamedTextColor.WHITE),
-                "Teams, crew, grace, reviven en de teamverdeling.", 150, () -> openPlayersMenu(admin)));
-        buttons.add(button(iconLabel(M_WORLD, "Wereld en server", NamedTextColor.WHITE),
-                "Launch, main wereld, Nether, End, grenzen, lobby en spawnpunten.", 150, () -> openWorldMenu(admin)));
-        buttons.add(button(iconLabel(M_TEAM, "Team event", NamedTextColor.WHITE),
-                "Verdeel iedereen over Noord en Zuid met een show.", 150, () -> openEventMenu(admin)));
-        buttons.add(button(iconLabel(M_REVIVE, "Verliezerseiland", NamedTextColor.WHITE),
-                "De aparte wereld voor iedereen die dood is.", 150, () -> openLosersMenu(admin)));
-        buttons.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
-                "Eigen bericht, donatiebericht en websitebericht.", 150, () -> openMessagesMenu(admin)));
-        buttons.add(button(iconLabel(M_MACE, "Mace", NamedTextColor.WHITE),
-                "De ene mace: cooldown, houder en reset.", 150, () -> mace.openMenu(admin)));
-        buttons.add(button(iconLabel(M_BORDERS, "Checklist", NamedTextColor.WHITE),
-                "Alles wat je moet doen voor je de grenzen dropt.", 150, () -> openChecklistMenu(admin)));
-        buttons.add(button(iconLabel(M_REVIVE, "Testen en herstellen", NamedTextColor.AQUA),
-                "Reviven, teams en launch resetten, alles terugzetten.", 150, () -> openRepairMenu(admin)));
-        buttons.add(button(iconLabel(M_BACK, "Klassiek menu", NamedTextColor.GRAY),
-                "Schakel terug naar het oude menu-ontwerp.", 150, () -> {
+        List<DialogBody> bodies = new ArrayList<>();
+        bodies.add(headerCard(Material.NETHER_STAR, header));
+        bodies.add(statusCard(Material.BEACON, "Server", !serverClosed, "open", "dicht"));
+        bodies.add(statusCard(Material.FIREWORK_ROCKET, "Launch", launched, "gelanceerd", "nog niet"));
+        bodies.add(statusCard(Material.GRASS_BLOCK, "Main wereld", mainOpen, "open", "dicht"));
+        bodies.add(statusCard(Material.NETHERRACK, "Nether", netherOpen, "open", "dicht"));
+        bodies.add(statusCard(Material.END_STONE, "End", endOpen, "open", "dicht"));
+        bodies.add(statusCard(Material.BLUE_ICE, "Grenzen (ijsmuur)", bordersDropped, "open", "dicht"));
+        bodies.add(statusCard(Material.WITHER_SKELETON_SKULL, "Verliezerseiland", losersOpen, "open", "dicht"));
+
+        List<ActionButton> raw = new ArrayList<>();
+        raw.add(button(iconLabel(M_LAUNCH, "Snelle acties", NamedTextColor.GREEN),
+                "Alle schakelaars op een plek: launch, Nether, End, grenzen en meer.", 380, () -> openQuickMenu(admin)));
+        raw.add(button(iconLabel(M_COUNTDOWN, "Seizoen", NamedTextColor.WHITE),
+                "Alle dagen van 7 tot 21 nov met wat je op elke dag moet doen.", 380, () -> openTimelineMenu(admin)));
+        raw.add(button(iconLabel(M_PLAYERS, "Spelers", NamedTextColor.WHITE),
+                "Teams, crew, grace, reviven en de teamverdeling.", 380, () -> openPlayersMenu(admin)));
+        raw.add(button(iconLabel(M_WORLD, "Wereld en server", NamedTextColor.WHITE),
+                "Launch, main wereld, Nether, End, grenzen, lobby en spawnpunten.", 380, () -> openWorldMenu(admin)));
+        raw.add(button(iconLabel(M_TEAM, "Team event", NamedTextColor.WHITE),
+                "Verdeel iedereen over Noord en Zuid met een show.", 380, () -> openEventMenu(admin)));
+        raw.add(button(iconLabel(M_REVIVE, "Verliezerseiland", NamedTextColor.WHITE),
+                "De aparte wereld voor iedereen die dood is.", 380, () -> openLosersMenu(admin)));
+        raw.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
+                "Eigen bericht, donatiebericht en websitebericht.", 380, () -> openMessagesMenu(admin)));
+        raw.add(button(iconLabel(M_MACE, "Mace", NamedTextColor.WHITE),
+                "De ene mace: cooldown, houder en reset.", 380, () -> mace.openMenu(admin)));
+        raw.add(button(iconLabel(M_BORDERS, "Checklist", NamedTextColor.WHITE),
+                "Alles wat je moet doen voor je de grenzen dropt.", 380, () -> openChecklistMenu(admin)));
+        raw.add(button(iconLabel(M_REVIVE, "Testen en herstellen", NamedTextColor.AQUA),
+                "Reviven, teams en launch resetten, alles terugzetten.", 380, () -> openRepairMenu(admin)));
+        raw.add(button(iconLabel(M_BACK, "Klassiek menu", NamedTextColor.GRAY),
+                "Schakel terug naar het oude menu-ontwerp.", 380, () -> {
                     setMenuDesign(admin, false);
                     openMenu(admin);
                 }));
         if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
-            buttons.add(button(Component.text("Uitloggen", NamedTextColor.RED),
-                    "Log uit en verlies je toegang tot /lowkey en de commands.", 150, () -> logout(admin, true)));
+            raw.add(button(Component.text("Uitloggen", NamedTextColor.RED),
+                    "Log uit en verlies je toegang tot /lowkey en de commands.", 380, () -> logout(admin, true)));
+        }
+        List<ActionButton> all = new ArrayList<>();
+        for (ActionButton b : raw) {
+            all.add(cardButton(b));
         }
         ActionButton close = ActionButton.create(Component.text("Sluiten", NamedTextColor.GRAY),
-                Component.text("Sluit dit menu."), 150, null);
-        showThemedMenu(admin, themedTitle("Beheer"), body, buttons, close, false);
+                Component.text("Sluit dit menu."), 380, null);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(themedTitle("Beheer")).body(bodies).build())
+                .type(DialogType.multiAction(all, close, 1)));
+        admin.showDialog(dialog);
     }
 
     // ---- new design: quick actions (every switch, with its state, on one screen)
@@ -6730,7 +6857,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Component body = joinLines(
                 Component.text("Klik op een schakelaar om hem om te zetten.", NamedTextColor.GRAY),
                 Component.text("Groen is aan, rood is uit.", NamedTextColor.DARK_GRAY));
-        showMenu(admin, "Snelle acties", body, buttons, backButton("Terug naar Home.", () -> openMenu(admin)));
+        showThemedMenu(admin, "Snelle acties", body, buttons, backButton("Terug naar Home.", () -> openMenu(admin)),
+                true, true);
     }
 
     // ---- new design: Spelers (one screen, everything about players)
@@ -8045,7 +8173,7 @@ final class MaceManager implements Listener {
         }, LowkeyCore.CLICK_OPTIONS);
 
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(LowkeyCore.menuTitle("Mace cooldown"))
+                .base(DialogBase.builder(core.dlgTitle(admin, "Mace cooldown"))
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 "Zo lang moet de mace wachten na een smash attack op een speler.", NamedTextColor.GRAY))))
                         .inputs(List.of(minutes))
