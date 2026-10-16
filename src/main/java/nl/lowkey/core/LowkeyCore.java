@@ -9,6 +9,7 @@ import io.papermc.paper.registry.data.dialog.action.DialogAction;
 import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.input.DialogInput;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
+import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -23,6 +24,7 @@ import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
+import org.bukkit.FireworkEffect;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -30,6 +32,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
+import org.bukkit.WorldBorder;
 import org.bukkit.WorldCreator;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
@@ -43,6 +46,7 @@ import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Display;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.Firework;
 import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
@@ -97,6 +101,7 @@ import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.FireworkMeta;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.util.Vector;
@@ -135,11 +140,13 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -364,6 +371,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         YamlConfiguration state = YamlConfiguration.loadConfiguration(stateFile);
         netherOpen = state.getBoolean("nether-open", false);
         endOpen = state.getBoolean("end-open", false);
+        loadFinaleState(state);
         serverClosed = state.getBoolean("server-closed", false);
         bordersDropped = state.getBoolean("borders-dropped", false);
         graceKey = new NamespacedKey(this, "grace_left");
@@ -415,6 +423,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         loadChecklist();
         loadEventCamera();
         loadMenuDesigns();
+        loadMenuEdits();
+        finaleOnEnable();
 
         LocalTime startupTime = LocalTime.now(LOWKEY_ZONE);
         hoursOpen = startupTime.getHour() >= HOURS_OPEN_FROM;
@@ -430,6 +440,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::tickLobbyPlayers, 10L, 10L);
         getServer().getScheduler().runTaskTimer(this, this::tickLosers, 40L, 40L);
         getServer().getScheduler().runTaskTimer(this, this::tickCountdown, 40L, 20L);
+        getServer().getScheduler().runTaskTimer(this, this::tickFinale, 20L, 2L);
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
                 donationIntervalTicks, donationIntervalTicks);
@@ -443,6 +454,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        finaleOnDisable();
         if (eventRunning) {
             eventCleanup();
         }
@@ -1135,6 +1147,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         if (eliminateOnDeath && world != null) {
             setEliminated(player, true);
+            finaleOnElimination(player);
             if (!event.getKeepInventory()) {
                 for (ItemStack drop : event.getDrops()) {
                     if (drop != null && !drop.getType().isAir()) {
@@ -1610,6 +1623,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         state.set("losers-open", losersOpen);
         state.set("losers-ended", losersEnded);
         writeLoc(state, "losers-spawn", losersSpawn);
+        saveFinaleState(state);
         try {
             getDataFolder().mkdirs();
             state.save(stateFile);
@@ -3485,6 +3499,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 setMenuDesign((Player) sender, false);
             } else if (choice.equals("nieuw") || choice.equals("new")) {
                 setMenuDesign((Player) sender, true);
+            } else if (choice.equals("edit") || choice.equals("bewerk") || choice.equals("bewerken")) {
+                toggleMenuEditMode((Player) sender);
+            } else if (choice.equals("geavanceerd") || choice.equals("advanced")) {
+                setMenuAdvanced((Player) sender, true);
+                sender.sendMessage(Component.text("Geavanceerde modus staat aan.", NamedTextColor.GREEN));
+            } else if (choice.equals("simpel") || choice.equals("simple")) {
+                setMenuAdvanced((Player) sender, false);
+                sender.sendMessage(Component.text("Simpele modus staat aan.", NamedTextColor.GREEN));
             }
             openMenu((Player) sender);
             return true;
@@ -3738,6 +3760,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             enterGame((Player) sender, false, true);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("finale")) {
+            handleFinaleCommand(sender, args);
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("losers")) {
             handleLosersCommand(sender, args);
             return true;
@@ -3846,6 +3872,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
             getServer().getScheduler().runTask(this, action);
         }, CLICK_OPTIONS);
+        buttonActions.put(dialogAction, action);
         return ActionButton.create(label, Component.text(tooltip), width, dialogAction);
     }
 
@@ -3886,15 +3913,22 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     void showMenu(Player admin, String title, Component body, List<ActionButton> buttons, ActionButton exit) {
+        showMenuKeyed(admin, title, title, body, buttons, exit);
+    }
+
+    /** The key says which screen this is (for the menu editor), the title is what is shown. */
+    void showMenuKeyed(Player admin, String key, String title, Component body, List<ActionButton> buttons,
+                       ActionButton exit) {
         if (newDesign(admin)) {
-            showThemedMenu(admin, title, body, buttons, exit, true, false);
+            showThemedMenuKeyed(admin, key, title, body, buttons, exit, true, false);
             return;
         }
+        EditedScreen es = applyMenuEdits(admin, key, title, body, buttons, 150, 2);
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, title))
-                        .body(List.of(DialogBody.plainMessage(body)))
+                .base(DialogBase.builder(dlgTitle(admin, es.title))
+                        .body(List.of(DialogBody.plainMessage(es.body)))
                         .build())
-                .type(DialogType.multiAction(buttons, exit, 2)));
+                .type(DialogType.multiAction(es.buttons, exit, es.columns)));
         admin.showDialog(dialog);
     }
 
@@ -3935,6 +3969,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             buttons.add(button(Component.text("Uitloggen", NamedTextColor.RED),
                     "Log uit en verlies je toegang tot /lowkey en de commands.", 150, () -> logout(admin, true)));
         }
+        buttons.add(button(iconLabel(M_BORDERS, "Finale", NamedTextColor.LIGHT_PURPLE),
+                "De krimpende border, de winnaarsshow en de instellingen.", 150, () -> openFinaleMenu(admin)));
+        buttons.add(button(iconLabel(M_MESSAGES, "Menu bewerken", NamedTextColor.YELLOW),
+                "Pas alle menu's aan in de game zelf.", 150, () -> {
+                    menuEditMode.add(admin.getUniqueId());
+                    openMenu(admin);
+                }));
         buttons.add(button(iconLabel(M_BACK, "Nieuw menu", NamedTextColor.GREEN),
                 "Schakel naar het nieuwe menu-ontwerp.", 150, () -> {
                     setMenuDesign(admin, true);
@@ -4563,11 +4604,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
                 Component.text("Klik een stap aan als je hem gedaan hebt.", NamedTextColor.GRAY));
         ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
+        EditedScreen es = applyMenuEdits(admin, "Border checklist", "Border checklist", body, buttons, 300, 1);
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, "Border checklist"))
-                        .body(List.of(DialogBody.plainMessage(body)))
+                .base(DialogBase.builder(dlgTitle(admin, es.title))
+                        .body(List.of(DialogBody.plainMessage(es.body)))
                         .build())
-                .type(DialogType.multiAction(buttons, back, 1)));
+                .type(DialogType.multiAction(es.buttons, back, es.columns)));
         admin.showDialog(dialog);
     }
 
@@ -4698,6 +4740,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return endOpen;
             case 18:
                 return losersEnded;
+            case 21:
+                return finaleState == FinaleState.ENDED;
             default:
                 return false;
         }
@@ -4725,9 +4769,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 boolean done = seasonDone(day);
                 label.append(Component.text(done ? "[x] " : "[ ] ", done ? NamedTextColor.GREEN : NamedTextColor.GRAY));
                 label.append(Component.text(event, done ? NamedTextColor.GREEN : NamedTextColor.WHITE));
-                if (day == 21) {
-                    label.append(Component.text(" (nog niet gebouwd)", NamedTextColor.GRAY));
-                }
             }
             buttons.add(button(label.build(), event == null ? "Niets te doen op deze dag."
                     : "Open de acties voor deze dag.", 300, () -> openDayMenu(admin, d)));
@@ -4740,11 +4781,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 statusLine("Vandaag", today.format(DateTimeFormatter.ofPattern("d MMMM", Locale.forLanguageTag("nl-BE"))),
                         NamedTextColor.WHITE));
         ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
+        EditedScreen es = applyMenuEdits(admin, "Tijdlijn", "Tijdlijn", body, buttons, 300, 1);
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, "Tijdlijn"))
-                        .body(List.of(DialogBody.plainMessage(body)))
+                .base(DialogBase.builder(dlgTitle(admin, es.title))
+                        .body(List.of(DialogBody.plainMessage(es.body)))
                         .build())
-                .type(DialogType.multiAction(buttons, back, 1)));
+                .type(DialogType.multiAction(es.buttons, back, es.columns)));
         admin.showDialog(dialog);
     }
 
@@ -4861,7 +4903,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             losersEnded ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
                     statusLine("Nog levend op het eiland", String.valueOf(aliveOnIsland().size()), NamedTextColor.WHITE));
         } else if (day == 21) {
-            body = Component.text("De hoofdfinale met de krimpende border is nog niet gebouwd.", NamedTextColor.GRAY);
+            buttons.add(button(iconLabel(M_BORDERS, "Finale", NamedTextColor.LIGHT_PURPLE),
+                    "Start, pauzeer en stel de krimpende border in.", 150, () -> openFinaleMenu(admin)));
+            buttons.add(button(iconLabel(M_REVIVE, "Winnaarsshow testen", NamedTextColor.AQUA),
+                    "Title en vuurwerk rond jou, zonder iets van de finale te raken.", 150,
+                    () -> winnerShow(admin, true)));
+            body = finaleStatusBody();
         } else {
             body = Component.text("Niets te doen.", NamedTextColor.GRAY);
         }
@@ -4909,6 +4956,2135 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             again.run();
                         },
                         again));
+    }
+
+    // ------------------------------------------------------------------ finale (shrinking border)
+
+    private enum FinaleState { IDLE, RUNNING, PAUSED, ENDED }
+
+    /** One elimination during the finale, with the server tick it happened in. */
+    private static final class FinaleDeath {
+        final UUID id;
+        final int tick;
+
+        FinaleDeath(UUID id, int tick) {
+            this.id = id;
+            this.tick = tick;
+        }
+    }
+
+    // settings (saved in state.yml)
+    private boolean finaleTargetSet;
+    private double finaleTargetX;
+    private double finaleTargetZ;
+    private double finaleTargetSize = 30.0;
+    private int finaleDurationMin = 10;
+    private int finaleRoundMin = 3;
+    private int finaleShrinkSec = 30;
+    private int finalePauseSec = 30;
+    private double finaleDamage = 1.0;
+    private double finaleBuffer = 2.0;
+    private boolean finaleCloseDims = true;
+    private boolean finaleAutoTie = true;
+
+    // the run itself (saved in state.yml, so a restart does not lose it)
+    private FinaleState finaleState = FinaleState.IDLE;
+    private long finaleElapsedMs;
+    private double runStartCx;
+    private double runStartCz;
+    private double runStartSize;
+    private double runEndCx;
+    private double runEndCz;
+    private double runEndSize;
+    private long runTotalMs;
+    private long runShrinkMs;
+    private long runPauseMs;
+    private int runRounds;
+    private double origDamage = 0.2;
+    private double origBuffer = 5.0;
+    private String finaleWinner;
+    private boolean finaleRestartNotice;
+
+    // not saved
+    private long finaleLastTickMs;
+    private int finaleAppliedKey = -1;
+    private boolean finaleSilentApply;
+    private int finaleTickCount;
+    private boolean finaleCheckPending;
+    private final List<FinaleDeath> finaleDeaths = new ArrayList<>();
+    private final Set<Integer> finaleAnnounced = new HashSet<>();
+    private BossBar finaleBar;
+    private final Set<UUID> showInvulnerable = new HashSet<>();
+    private final Random finaleRandom = new Random();
+
+    private void loadFinaleState(YamlConfiguration s) {
+        finaleTargetSet = s.getBoolean("finale.target-set", false);
+        finaleTargetX = s.getDouble("finale.target-x", 0.0);
+        finaleTargetZ = s.getDouble("finale.target-z", 0.0);
+        finaleTargetSize = s.getDouble("finale.target-size", 30.0);
+        finaleDurationMin = s.getInt("finale.duration-min", 10);
+        finaleRoundMin = s.getInt("finale.round-min", 3);
+        finaleShrinkSec = s.getInt("finale.shrink-sec", 30);
+        finalePauseSec = s.getInt("finale.pause-sec", 30);
+        finaleDamage = s.getDouble("finale.damage", 1.0);
+        finaleBuffer = s.getDouble("finale.buffer", 2.0);
+        finaleCloseDims = s.getBoolean("finale.close-dimensions", true);
+        finaleAutoTie = s.getBoolean("finale.auto-tie", true);
+        try {
+            finaleState = FinaleState.valueOf(s.getString("finale.state", "IDLE"));
+        } catch (IllegalArgumentException e) {
+            finaleState = FinaleState.IDLE;
+        }
+        finaleElapsedMs = s.getLong("finale.elapsed-ms", 0L);
+        runStartCx = s.getDouble("finale.run.start-x", 0.0);
+        runStartCz = s.getDouble("finale.run.start-z", 0.0);
+        runStartSize = s.getDouble("finale.run.start-size", 0.0);
+        runEndCx = s.getDouble("finale.run.end-x", 0.0);
+        runEndCz = s.getDouble("finale.run.end-z", 0.0);
+        runEndSize = s.getDouble("finale.run.end-size", 30.0);
+        runTotalMs = s.getLong("finale.run.total-ms", 0L);
+        runShrinkMs = s.getLong("finale.run.shrink-ms", 0L);
+        runPauseMs = s.getLong("finale.run.pause-ms", 0L);
+        runRounds = s.getInt("finale.run.rounds", 0);
+        origDamage = s.getDouble("finale.run.orig-damage", 0.2);
+        origBuffer = s.getDouble("finale.run.orig-buffer", 5.0);
+        finaleWinner = s.getString("finale.winner", null);
+    }
+
+    private void saveFinaleState(YamlConfiguration s) {
+        s.set("finale.target-set", finaleTargetSet);
+        s.set("finale.target-x", finaleTargetX);
+        s.set("finale.target-z", finaleTargetZ);
+        s.set("finale.target-size", finaleTargetSize);
+        s.set("finale.duration-min", finaleDurationMin);
+        s.set("finale.round-min", finaleRoundMin);
+        s.set("finale.shrink-sec", finaleShrinkSec);
+        s.set("finale.pause-sec", finalePauseSec);
+        s.set("finale.damage", finaleDamage);
+        s.set("finale.buffer", finaleBuffer);
+        s.set("finale.close-dimensions", finaleCloseDims);
+        s.set("finale.auto-tie", finaleAutoTie);
+        s.set("finale.state", finaleState.name());
+        s.set("finale.elapsed-ms", finaleElapsedMs);
+        s.set("finale.run.start-x", runStartCx);
+        s.set("finale.run.start-z", runStartCz);
+        s.set("finale.run.start-size", runStartSize);
+        s.set("finale.run.end-x", runEndCx);
+        s.set("finale.run.end-z", runEndCz);
+        s.set("finale.run.end-size", runEndSize);
+        s.set("finale.run.total-ms", runTotalMs);
+        s.set("finale.run.shrink-ms", runShrinkMs);
+        s.set("finale.run.pause-ms", runPauseMs);
+        s.set("finale.run.rounds", runRounds);
+        s.set("finale.run.orig-damage", origDamage);
+        s.set("finale.run.orig-buffer", origBuffer);
+        s.set("finale.winner", finaleWinner);
+    }
+
+    /** After a restart a running finale is put on pause: the admin decides when it continues. */
+    private void finaleOnEnable() {
+        if (finaleState == FinaleState.RUNNING) {
+            finaleState = FinaleState.PAUSED;
+            finaleRestartNotice = true;
+            saveState();
+        }
+        if (finaleState == FinaleState.PAUSED) {
+            finaleFreezeBorder();
+        }
+        if (finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED) {
+            finaleBarEnsure();
+            finaleBarUpdate();
+        }
+    }
+
+    private void finaleOnDisable() {
+        if (finaleState != FinaleState.IDLE) {
+            saveState();
+        }
+        for (UUID id : new ArrayList<>(showInvulnerable)) {
+            Player p = getServer().getPlayer(id);
+            if (p != null) {
+                p.setInvulnerable(false);
+            }
+        }
+        showInvulnerable.clear();
+    }
+
+    private static String finaleNum(double d) {
+        if (Math.abs(d - Math.rint(d)) < 0.05) {
+            return String.valueOf((long) Math.rint(d));
+        }
+        return String.format(Locale.ROOT, "%.1f", d);
+    }
+
+    private static double parseNum(String raw) {
+        return Double.parseDouble(raw.trim().replace(',', '.'));
+    }
+
+    private static String clock(long ms) {
+        long s = Math.max(0L, (ms + 999L) / 1000L);
+        return String.format(Locale.ROOT, "%02d:%02d", s / 60L, s % 60L);
+    }
+
+    private Component finaleLine(Component text) {
+        return Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(text)
+                .build();
+    }
+
+    private void finaleBroadcast(Component text) {
+        Component line = finaleLine(text);
+        for (Player p : getServer().getOnlinePlayers()) {
+            p.sendMessage(line);
+        }
+    }
+
+    private void finaleNotifyAdmins(String text, TextColor color) {
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (isAdmin(p)) {
+                p.sendMessage(finaleLine(Component.text(text, color)));
+            }
+        }
+    }
+
+    /** Is this world part of the main game (overworld, Nether or End), so not the lobby and not the island? */
+    private boolean inMainGroup(World world) {
+        String main = gameWorld().getName();
+        String name = world.getName();
+        return name.equals(main) || name.equals(main + "_nether") || name.equals(main + "_the_end");
+    }
+
+    /** Everybody who still counts as alive in the finale. Admins in creative or spectator are not players. */
+    private List<Player> finaleAlivePlayers() {
+        List<Player> result = new ArrayList<>();
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (!inMainGroup(p.getWorld())) {
+                continue;
+            }
+            if (isEliminated(p) || isLosersOut(p)) {
+                continue;
+            }
+            GameMode mode = p.getGameMode();
+            if (mode != GameMode.SURVIVAL && mode != GameMode.ADVENTURE) {
+                continue;
+            }
+            result.add(p);
+        }
+        return result;
+    }
+
+    // ---- the timeline: continuous shrinking first, then rounds of shrink + pause
+
+    private long finaleContMs() {
+        return Math.max(0L, runTotalMs - (long) runRounds * (runShrinkMs + runPauseMs));
+    }
+
+    private long finaleShrinkTotal() {
+        return finaleContMs() + (long) runRounds * runShrinkMs;
+    }
+
+    /**
+     * Where the finale is at `e` ms of active time. Returns {phase, shrunkMs, msLeftInPhase, shrunkAtPhaseEnd, index}.
+     * Phase 0 = continuous shrink, 1 = round shrink (red), 2 = round pause (blue), 3 = done.
+     */
+    private long[] finalePhaseAt(long e) {
+        long cont = finaleContMs();
+        long shrinkTotal = finaleShrinkTotal();
+        long cycle = runShrinkMs + runPauseMs;
+        if (e < cont) {
+            return new long[] {0L, e, cont - e, cont, 0L};
+        }
+        long r = e - cont;
+        long idx = cycle <= 0L ? runRounds : r / cycle;
+        if (idx >= runRounds) {
+            return new long[] {3L, shrinkTotal, 0L, shrinkTotal, runRounds};
+        }
+        long within = r - idx * cycle;
+        if (within < runShrinkMs) {
+            long shrunk = cont + idx * runShrinkMs + within;
+            return new long[] {1L, shrunk, runShrinkMs - within, cont + (idx + 1L) * runShrinkMs, idx};
+        }
+        return new long[] {2L, cont + (idx + 1L) * runShrinkMs, cycle - within, cont + (idx + 1L) * runShrinkMs, idx};
+    }
+
+    private double finaleProgress(long shrunkMs) {
+        long total = finaleShrinkTotal();
+        return total <= 0L ? 1.0 : Math.min(1.0, Math.max(0.0, (double) shrunkMs / total));
+    }
+
+    /** Puts the border in the state the phase asks for: red lerp while shrinking, still (blue) while paused. */
+    private void finaleApply(long[] ph, boolean announce) {
+        WorldBorder border = gameWorld().getWorldBorder();
+        int phase = (int) ph[0];
+        double p = finaleProgress(ph[1]);
+        double sizeNow = runStartSize + (runEndSize - runStartSize) * p;
+        double cxNow = runStartCx + (runEndCx - runStartCx) * p;
+        double czNow = runStartCz + (runEndCz - runStartCz) * p;
+        if (phase == 3) {
+            border.setCenter(runEndCx, runEndCz);
+            border.setSize(runEndSize);
+            if (announce) {
+                finaleBroadcast(Component.text("De border heeft zijn eindgrootte bereikt!", NamedTextColor.WHITE));
+            }
+            return;
+        }
+        border.setCenter(cxNow, czNow);
+        if (phase == 2) {
+            border.setSize(sizeNow);
+            if (announce) {
+                finaleBroadcast(Component.text("De border staat even stil.", NamedTextColor.AQUA));
+            }
+            return;
+        }
+        double pEnd = finaleProgress(ph[3]);
+        double sizeEnd = runStartSize + (runEndSize - runStartSize) * pEnd;
+        border.setSize(sizeNow);
+        long seconds = Math.max(1L, (ph[2] + 999L) / 1000L);
+        border.setSize(sizeEnd, seconds);
+        if (announce && phase == 1) {
+            finaleBroadcast(Component.text("De border is aan het krimpen!", NamedTextColor.RED));
+        }
+    }
+
+    /** Runs every 2 ticks. Moves the centre smoothly and switches phase when it is time. */
+    private void tickFinale() {
+        if (finaleState != FinaleState.RUNNING) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long delta = Math.max(0L, Math.min(now - finaleLastTickMs, 5000L));
+        finaleLastTickMs = now;
+        finaleElapsedMs = Math.min(runTotalMs, finaleElapsedMs + delta);
+
+        long[] ph = finalePhaseAt(finaleElapsedMs);
+        int key = (int) (ph[0] * 1000L + ph[4]);
+        if (key != finaleAppliedKey) {
+            finaleApply(ph, !finaleSilentApply);
+            finaleAppliedKey = key;
+            finaleSilentApply = false;
+        } else if (ph[0] == 0L || ph[0] == 1L) {
+            double p = finaleProgress(ph[1]);
+            gameWorld().getWorldBorder().setCenter(
+                    runStartCx + (runEndCx - runStartCx) * p,
+                    runStartCz + (runEndCz - runStartCz) * p);
+        }
+        finaleTickCount++;
+        if (finaleTickCount % 5 == 0) {
+            finaleBarUpdate();
+        }
+        if (finaleTickCount % 50 == 0) {
+            saveState();
+        }
+    }
+
+    private void finaleFreezeBorder() {
+        WorldBorder border = gameWorld().getWorldBorder();
+        border.setSize(border.getSize());
+    }
+
+    // ---- boss bar
+
+    private void finaleBarEnsure() {
+        if (finaleBar == null) {
+            finaleBar = BossBar.bossBar(Component.text("FINALE"), 1.0f, BossBar.Color.PINK, BossBar.Overlay.PROGRESS);
+        }
+        for (Player p : getServer().getOnlinePlayers()) {
+            p.showBossBar(finaleBar);
+        }
+    }
+
+    private void finaleBarHide() {
+        if (finaleBar == null) {
+            return;
+        }
+        for (Player p : getServer().getOnlinePlayers()) {
+            p.hideBossBar(finaleBar);
+        }
+        finaleBar = null;
+    }
+
+    private void finaleBarUpdate() {
+        if (finaleBar == null) {
+            return;
+        }
+        long left = Math.max(0L, runTotalMs - finaleElapsedMs);
+        double size = gameWorld().getWorldBorder().getSize();
+        TextComponent.Builder name = Component.text()
+                .append(Component.text("FINALE", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD))
+                .append(Component.text("   Border: ", NamedTextColor.GRAY))
+                .append(Component.text(finaleNum(size) + " blokken", NamedTextColor.WHITE))
+                .append(Component.text("   Nog ", NamedTextColor.GRAY))
+                .append(Component.text(clock(left), NamedTextColor.WHITE));
+        if (finaleState == FinaleState.PAUSED) {
+            name.append(Component.text("   (gepauzeerd)", NamedTextColor.YELLOW));
+        }
+        finaleBar.name(name.build());
+        float progress = runTotalMs <= 0L ? 0f : (float) Math.min(1.0, Math.max(0.0, (double) left / runTotalMs));
+        finaleBar.progress(progress);
+    }
+
+    @EventHandler
+    public void onFinaleJoin(PlayerJoinEvent event) {
+        final Player player = event.getPlayer();
+        if (finaleState != FinaleState.RUNNING && finaleState != FinaleState.PAUSED) {
+            return;
+        }
+        getServer().getScheduler().runTaskLater(this, () -> {
+            if (!player.isOnline() || finaleBar == null) {
+                return;
+            }
+            player.showBossBar(finaleBar);
+            if (finaleRestartNotice && finaleState == FinaleState.PAUSED && isAdmin(player)) {
+                player.sendMessage(finaleLine(Component.text("De finale stond aan toen de server herstartte en staat nu "
+                        + "op pauze. Open /lowkey finale om hem te hervatten.", NamedTextColor.YELLOW)));
+            }
+        }, 40L);
+    }
+
+    @EventHandler
+    public void onFinaleQuit(PlayerQuitEvent event) {
+        if (showInvulnerable.remove(event.getPlayer().getUniqueId())) {
+            event.getPlayer().setInvulnerable(false);
+        }
+    }
+
+    // ---- start, pause, resume, stop
+
+    private void finaleStart(CommandSender sender) {
+        if (finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED) {
+            sender.sendMessage(Component.text("De finale is al bezig. Stop hem eerst.", NamedTextColor.RED));
+            return;
+        }
+        WorldBorder border = gameWorld().getWorldBorder();
+        double startSize = border.getSize();
+        double endSize = finaleTargetSize;
+        if (endSize < 1.0 || endSize >= startSize) {
+            sender.sendMessage(Component.text("De eindgrootte (" + finaleNum(endSize) + ") moet kleiner zijn dan de "
+                    + "huidige border (" + finaleNum(startSize) + "). Pas het doel aan.", NamedTextColor.RED));
+            return;
+        }
+        long total = finaleDurationMin * 60_000L;
+        long shrink = finaleShrinkSec * 1000L;
+        long pause = finalePauseSec * 1000L;
+        long cycle = shrink + pause;
+        int rounds = cycle <= 0L ? 0 : (int) (Math.min(finaleRoundMin * 60_000L, total) / cycle);
+        runStartCx = border.getCenter().getX();
+        runStartCz = border.getCenter().getZ();
+        runStartSize = startSize;
+        runEndCx = finaleTargetSet ? finaleTargetX : runStartCx;
+        runEndCz = finaleTargetSet ? finaleTargetZ : runStartCz;
+        runEndSize = endSize;
+        runTotalMs = total;
+        runShrinkMs = shrink;
+        runPauseMs = pause;
+        runRounds = rounds;
+        origDamage = border.getDamageAmount();
+        origBuffer = border.getDamageBuffer();
+        border.setDamageAmount(finaleDamage);
+        border.setDamageBuffer(finaleBuffer);
+
+        if (finaleCloseDims) {
+            if (netherOpen) {
+                setNether(false);
+            }
+            if (endOpen) {
+                setEnd(false);
+            }
+        }
+
+        finaleElapsedMs = 0L;
+        finaleWinner = null;
+        finaleAnnounced.clear();
+        finaleDeaths.clear();
+        finaleCheckPending = false;
+        finaleRestartNotice = false;
+        finaleAppliedKey = -1;
+        finaleSilentApply = true;
+        finaleLastTickMs = System.currentTimeMillis();
+        finaleState = FinaleState.RUNNING;
+        saveState();
+        finaleBarEnsure();
+        finaleBarUpdate();
+
+        int alive = finaleAlivePlayers().size();
+        Title title = Title.title(
+                Component.text("De finale is van start!", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD),
+                Component.text("Ga bovengronds!", NamedTextColor.WHITE),
+                Title.Times.times(Duration.ofMillis(400), Duration.ofMillis(3500), Duration.ofMillis(1000)));
+        for (Player p : getServer().getOnlinePlayers()) {
+            p.showTitle(title);
+            p.playSound(p.getLocation(), Sound.ENTITY_ENDER_DRAGON_GROWL, 0.6f, 1.0f);
+        }
+        finaleBroadcast(Component.text("De finale is van start!", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD));
+        finaleBroadcast(Component.text("De border begint te krimpen, ga bovengronds!", NamedTextColor.WHITE));
+        finaleBroadcast(Component.text("Er zijn nog " + alive + (alive == 1 ? " speler" : " spelers") + " over.",
+                NamedTextColor.GRAY));
+        if (sender != null) {
+            sender.sendMessage(Component.text("De finale is gestart.", NamedTextColor.GREEN));
+        }
+    }
+
+    private void finalePause(CommandSender sender) {
+        if (finaleState != FinaleState.RUNNING) {
+            sender.sendMessage(Component.text("De finale loopt niet.", NamedTextColor.RED));
+            return;
+        }
+        finaleState = FinaleState.PAUSED;
+        finaleFreezeBorder();
+        saveState();
+        finaleBarUpdate();
+        finaleBroadcast(Component.text("De finale staat even op pauze.", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("De finale staat op pauze. De border blijft staan.", NamedTextColor.GREEN));
+    }
+
+    private void finaleResume(CommandSender sender) {
+        if (finaleState != FinaleState.PAUSED) {
+            sender.sendMessage(Component.text("De finale staat niet op pauze.", NamedTextColor.RED));
+            return;
+        }
+        finaleRestartNotice = false;
+        finaleAppliedKey = -1;
+        finaleSilentApply = true;
+        finaleLastTickMs = System.currentTimeMillis();
+        finaleState = FinaleState.RUNNING;
+        saveState();
+        finaleBarEnsure();
+        finaleBarUpdate();
+        finaleBroadcast(Component.text("De finale gaat weer verder!", NamedTextColor.WHITE));
+        sender.sendMessage(Component.text("De finale loopt weer.", NamedTextColor.GREEN));
+    }
+
+    /** Stops the finale and puts the border (and its damage settings) back like it was at the start. */
+    private void finaleStop(CommandSender sender) {
+        if (finaleState == FinaleState.IDLE) {
+            sender.sendMessage(Component.text("Er is geen finale bezig.", NamedTextColor.RED));
+            return;
+        }
+        WorldBorder border = gameWorld().getWorldBorder();
+        border.setCenter(runStartCx, runStartCz);
+        border.setSize(runStartSize);
+        border.setDamageAmount(origDamage);
+        border.setDamageBuffer(origBuffer);
+        finaleState = FinaleState.IDLE;
+        finaleWinner = null;
+        finaleElapsedMs = 0L;
+        finaleDeaths.clear();
+        finaleCheckPending = false;
+        finaleRestartNotice = false;
+        finaleBarHide();
+        saveState();
+        sender.sendMessage(Component.text("De finale is gestopt en de border staat weer als bij de start.",
+                NamedTextColor.GREEN));
+    }
+
+    // ---- eliminations, the player count and the winner
+
+    /** Called from onDeath when somebody is eliminated. The check runs 2 ticks later, so deaths in the same tick count together. */
+    private void finaleOnElimination(Player player) {
+        if (finaleState != FinaleState.RUNNING) {
+            return;
+        }
+        finaleDeaths.add(new FinaleDeath(player.getUniqueId(), getServer().getCurrentTick()));
+        if (finaleCheckPending) {
+            return;
+        }
+        finaleCheckPending = true;
+        getServer().getScheduler().runTaskLater(this, this::finaleCheck, 2L);
+    }
+
+    private void finaleCheck() {
+        finaleCheckPending = false;
+        if (finaleState != FinaleState.RUNNING) {
+            finaleDeaths.clear();
+            return;
+        }
+        List<Player> alive = finaleAlivePlayers();
+        int n = alive.size();
+        if (n == 1) {
+            finaleWin(alive.get(0));
+            return;
+        }
+        if (n == 0) {
+            finaleTie();
+            return;
+        }
+        if ((n == 10 || n == 5 || n == 3 || n == 2) && finaleAnnounced.add(n)) {
+            finaleBroadcast(Component.text()
+                    .append(Component.text("Nog ", NamedTextColor.WHITE))
+                    .append(Component.text(String.valueOf(n), NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD))
+                    .append(Component.text(" spelers over!", NamedTextColor.WHITE))
+                    .build());
+        }
+    }
+
+    /** Nobody is left: the last two (or more) died in the same tick, or the only player died. */
+    private void finaleTie() {
+        int now = getServer().getCurrentTick();
+        List<Player> candidates = new ArrayList<>();
+        Player last = null;
+        for (FinaleDeath d : finaleDeaths) {
+            Player p = getServer().getPlayer(d.id);
+            if (p == null) {
+                continue;
+            }
+            last = p;
+            if (now - d.tick <= 5 && !candidates.contains(p)) {
+                candidates.add(p);
+            }
+        }
+        finaleDeaths.clear();
+        if (last == null) {
+            finaleNotifyAdmins("Niemand is meer over in de finale en er is geen winnaar te bepalen.", NamedTextColor.RED);
+            return;
+        }
+        if (finaleAutoTie) {
+            finaleNotifyAdmins("Gelijktijdige dood: " + last.getName() + " was als laatste aan de beurt en is teruggehaald "
+                    + "als winnaar.", NamedTextColor.YELLOW);
+            finaleReviveInPlace(last);
+            finaleWin(last);
+            return;
+        }
+        if (candidates.isEmpty()) {
+            candidates.add(last);
+        }
+        final List<Player> choices = candidates;
+        for (Player admin : getServer().getOnlinePlayers()) {
+            if (!isAdmin(admin)) {
+                continue;
+            }
+            admin.sendMessage(finaleLine(Component.text("Gelijkspel in de finale. Kies de winnaar in het menu.",
+                    NamedTextColor.YELLOW)));
+            List<ActionButton> buttons = new ArrayList<>();
+            for (Player c : choices) {
+                buttons.add(button(Component.text(c.getName()), "Maak " + c.getName() + " de winnaar.", 150, () -> {
+                    if (finaleState != FinaleState.RUNNING) {
+                        admin.sendMessage(Component.text("De winnaar is al bepaald.", NamedTextColor.GRAY));
+                        return;
+                    }
+                    if (!c.isOnline()) {
+                        admin.sendMessage(Component.text("Die speler is niet meer online.", NamedTextColor.RED));
+                        return;
+                    }
+                    finaleReviveInPlace(c);
+                    finaleWin(c);
+                }));
+            }
+            ActionButton later = ActionButton.create(Component.text("Later beslissen", NamedTextColor.GRAY),
+                    Component.text("Sluit dit menu."), 150, null);
+            showMenu(admin, "Gelijkspel", Component.text("Meerdere spelers gingen tegelijk dood. Wie wint er?",
+                    NamedTextColor.WHITE), buttons, later);
+        }
+    }
+
+    /** Full health, alive again, on the spot where he died (he is in spectator for a tick or two). */
+    private void finaleReviveInPlace(Player p) {
+        setEliminated(p, false);
+        setLosersOut(p, false);
+        p.setGameMode(GameMode.SURVIVAL);
+        AttributeInstance maxHealth = p.getAttribute(Attribute.MAX_HEALTH);
+        p.setHealth(maxHealth == null ? 20.0 : maxHealth.getValue());
+        p.setFoodLevel(20);
+        p.setFireTicks(0);
+        p.setFallDistance(0f);
+        World w = p.getWorld();
+        if (p.getLocation().getY() < w.getMinHeight() + 5) {
+            p.teleport(w.getSpawnLocation());
+        }
+        refreshTags(p);
+    }
+
+    private void finaleWin(Player winner) {
+        finaleState = FinaleState.ENDED;
+        finaleWinner = winner.getName();
+        finaleDeaths.clear();
+        finaleFreezeBorder();
+        saveState();
+        finaleBarHide();
+        winnerShow(winner, false);
+        finaleNotifyAdmins("De finale is afgelopen. " + winner.getName() + " heeft gewonnen. Zet de border terug met "
+                + "/lowkey finale stop.", NamedTextColor.GREEN);
+    }
+
+    /**
+     * Title, chat and about 20 seconds of fireworks in a ring around the winner. With test = true it is only for the
+     * admin who pressed the button and nothing about the finale changes.
+     */
+    private void winnerShow(Player winner, boolean test) {
+        List<Player> audience = new ArrayList<>();
+        if (test) {
+            audience.add(winner);
+        } else {
+            audience.addAll(getServer().getOnlinePlayers());
+        }
+        Side side = getSide(winner);
+        TextColor nameColor = side == Side.NONE ? NamedTextColor.WHITE : TextColor.color(side.rgb);
+        Component subtitle = MiniMessage.miniMessage()
+                .deserialize("<gradient:#c084fc:#f472b6><bold>heeft LowkeySMP gewonnen!</bold></gradient>");
+        Title title = Title.title(
+                Component.text(winner.getName(), nameColor, TextDecoration.BOLD),
+                subtitle,
+                Title.Times.times(Duration.ofMillis(500), Duration.ofMillis(7000), Duration.ofMillis(1500)));
+        Component chat = finaleLine(Component.text()
+                .append(Component.text(winner.getName(), nameColor, TextDecoration.BOLD))
+                .append(Component.text(" heeft LowkeySMP gewonnen!", NamedTextColor.WHITE))
+                .append(Component.text(test ? " (test)" : "", NamedTextColor.GRAY))
+                .build());
+        for (Player p : audience) {
+            p.showTitle(title);
+            p.sendMessage(chat);
+            p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+        }
+
+        // fireworks hurt everybody within about 5 blocks, so the ring is wider than that and the winner is safe
+        winner.setInvulnerable(true);
+        showInvulnerable.add(winner.getUniqueId());
+        new BukkitRunnable() {
+            int runs = 0;
+
+            @Override
+            public void run() {
+                if (!winner.isOnline() || runs >= 40) {
+                    if (showInvulnerable.remove(winner.getUniqueId()) && winner.isOnline()) {
+                        winner.setInvulnerable(false);
+                    }
+                    cancel();
+                    return;
+                }
+                Location center = winner.getLocation();
+                World world = center.getWorld();
+                if (world != null) {
+                    for (int k = 0; k < 3; k++) {
+                        double angle = Math.toRadians(runs * 37 + k * 120 + finaleRandom.nextInt(30));
+                        double radius = 8.0 + finaleRandom.nextDouble() * 4.0;
+                        Location spot = center.clone().add(Math.cos(angle) * radius, 1.0, Math.sin(angle) * radius);
+                        boolean burst = finaleRandom.nextBoolean();
+                        if (burst) {
+                            spot.setY(center.getY() + 3.0 + finaleRandom.nextInt(6));
+                        }
+                        Firework firework = world.spawn(spot, Firework.class, f -> {
+                            FireworkMeta meta = f.getFireworkMeta();
+                            meta.addEffect(finaleEffect());
+                            meta.setPower(1 + finaleRandom.nextInt(2));
+                            f.setFireworkMeta(meta);
+                        });
+                        if (burst) {
+                            firework.detonate();
+                        }
+                    }
+                }
+                runs++;
+            }
+        }.runTaskTimer(this, 10L, 10L);
+    }
+
+    private FireworkEffect finaleEffect() {
+        Color[] palette = {
+                Color.fromRGB(0xC0, 0x84, 0xFC), Color.fromRGB(0xF4, 0x72, 0xB6), Color.WHITE, Color.YELLOW, Color.AQUA
+        };
+        FireworkEffect.Type[] types = {
+                FireworkEffect.Type.BALL_LARGE, FireworkEffect.Type.STAR, FireworkEffect.Type.BURST,
+                FireworkEffect.Type.BALL, FireworkEffect.Type.CREEPER
+        };
+        return FireworkEffect.builder()
+                .with(types[finaleRandom.nextInt(types.length)])
+                .withColor(palette[finaleRandom.nextInt(palette.length)])
+                .withColor(palette[finaleRandom.nextInt(palette.length)])
+                .withFade(palette[finaleRandom.nextInt(palette.length)])
+                .flicker(finaleRandom.nextBoolean())
+                .trail(finaleRandom.nextBoolean())
+                .build();
+    }
+
+    // ---- command: /lowkey finale <menu|start|pauze|hervat|stop|status|test>
+
+    private void handleFinaleCommand(CommandSender sender, String[] args) {
+        String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "menu";
+        switch (sub) {
+            case "start":
+                finaleStart(sender);
+                return;
+            case "pauze":
+            case "pause":
+                finalePause(sender);
+                return;
+            case "hervat":
+            case "resume":
+                finaleResume(sender);
+                return;
+            case "stop":
+                finaleStop(sender);
+                return;
+            case "status":
+                sender.sendMessage(finaleStatusBody());
+                return;
+            case "test":
+                if (sender instanceof Player) {
+                    winnerShow((Player) sender, true);
+                } else {
+                    sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
+                }
+                return;
+            default:
+                if (sender instanceof Player) {
+                    openFinaleMenu((Player) sender);
+                } else {
+                    sender.sendMessage(finaleStatusBody());
+                }
+        }
+    }
+
+    // ---- menu
+
+    private String finaleStateText() {
+        switch (finaleState) {
+            case RUNNING:
+                return "bezig";
+            case PAUSED:
+                return "gepauzeerd";
+            case ENDED:
+                return "afgelopen";
+            default:
+                return "niet gestart";
+        }
+    }
+
+    private Component finaleStatusBody() {
+        boolean active = finaleState != FinaleState.IDLE;
+        double cx = finaleTargetSet ? finaleTargetX : gameWorld().getWorldBorder().getCenter().getX();
+        double cz = finaleTargetSet ? finaleTargetZ : gameWorld().getWorldBorder().getCenter().getZ();
+        List<Component> lines = new ArrayList<>();
+        lines.add(statusLine("Finale", finaleStateText(), finaleState == FinaleState.RUNNING ? NamedTextColor.GREEN
+                : (finaleState == FinaleState.IDLE ? NamedTextColor.YELLOW : NamedTextColor.AQUA)));
+        lines.add(statusLine("Border nu", finaleNum(gameWorld().getWorldBorder().getSize()) + " blokken",
+                NamedTextColor.WHITE));
+        lines.add(statusLine("Doel", "x " + finaleNum(cx) + ", z " + finaleNum(cz) + ", " + finaleNum(finaleTargetSize)
+                + " blokken" + (finaleTargetSet ? "" : " (midden blijft)"), NamedTextColor.WHITE));
+        lines.add(statusLine("Duur", finaleDurationMin + " min, laatste " + finaleRoundMin + " min in rondes van "
+                + finaleShrinkSec + " s krimpen en " + finalePauseSec + " s pauze", NamedTextColor.WHITE));
+        if (active && finaleState != FinaleState.ENDED) {
+            lines.add(statusLine("Tijd over", clock(Math.max(0L, runTotalMs - finaleElapsedMs)), NamedTextColor.WHITE));
+        }
+        if (finaleState == FinaleState.ENDED && finaleWinner != null) {
+            lines.add(statusLine("Winnaar", finaleWinner, NamedTextColor.LIGHT_PURPLE));
+        }
+        lines.add(statusLine("Spelers over", String.valueOf(finaleAlivePlayers().size()), NamedTextColor.WHITE));
+        return joinLines(lines.toArray(new Component[0]));
+    }
+
+    private void openFinaleMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        Runnable again = () -> openFinaleMenu(admin);
+        List<ActionButton> buttons = new ArrayList<>();
+        if (finaleState == FinaleState.IDLE) {
+            buttons.add(button(iconLabel(M_LAUNCH, "Finale starten", NamedTextColor.GREEN),
+                    "Titel, bericht en de border begint te krimpen.", 150, () -> confirm(admin,
+                            "Finale starten?",
+                            "De border begint direct te krimpen naar het doel en iedereen krijgt de titel.",
+                            finaleCloseDims ? "De Nether en het End gaan automatisch dicht."
+                                    : "De Nether en het End blijven zoals ze zijn.",
+                            Component.text("Ja, starten", NamedTextColor.GREEN),
+                            () -> {
+                                finaleStart(admin);
+                                again.run();
+                            },
+                            again)));
+        } else if (finaleState == FinaleState.RUNNING) {
+            buttons.add(button(iconLabel(M_BORDERS, "Pauzeren", NamedTextColor.YELLOW),
+                    "Zet de border stil en stopt de tijd.", 150, () -> {
+                        finalePause(admin);
+                        again.run();
+                    }));
+        } else if (finaleState == FinaleState.PAUSED) {
+            buttons.add(button(iconLabel(M_LAUNCH, "Hervatten", NamedTextColor.GREEN),
+                    "De border en de tijd lopen verder.", 150, () -> {
+                        finaleResume(admin);
+                        again.run();
+                    }));
+        }
+        if (finaleState != FinaleState.IDLE) {
+            buttons.add(button(iconLabel(M_BACK, "Stoppen en border terugzetten", NamedTextColor.RED),
+                    "Stopt de finale en zet de border terug zoals bij de start.", 150, () -> confirm(admin,
+                            "Finale stoppen?",
+                            "De border gaat meteen terug naar zijn grootte en plek van voor de finale.",
+                            "De finale begint daarna weer van nul als je hem opnieuw start.",
+                            Component.text("Ja, stoppen", NamedTextColor.RED),
+                            () -> {
+                                finaleStop(admin);
+                                again.run();
+                            },
+                            again)));
+        }
+        buttons.add(button(iconLabel(M_BORDERS, "Doel en grootte", NamedTextColor.WHITE),
+                "Het midden en de eindgrootte van de border.", 150, () -> openFinaleTargetDialog(admin)));
+        buttons.add(button(iconLabel(M_BORDERS, "Doel is mijn positie", NamedTextColor.WHITE),
+                "Zet het midden van de eindborder op waar jij staat.", 150, () -> {
+                    finaleTargetSet = true;
+                    finaleTargetX = admin.getLocation().getBlockX() + 0.5;
+                    finaleTargetZ = admin.getLocation().getBlockZ() + 0.5;
+                    saveState();
+                    admin.sendMessage(Component.text("Het doel staat op x " + finaleNum(finaleTargetX) + ", z "
+                            + finaleNum(finaleTargetZ) + ".", NamedTextColor.GREEN));
+                    again.run();
+                }));
+        buttons.add(button(iconLabel(M_COUNTDOWN, "Tijden en schade", NamedTextColor.WHITE),
+                "Duur, rondes, pauzes en de schade buiten de border.", 150, () -> openFinaleTimeDialog(admin)));
+        buttons.add(stateButton("Nether en End sluiten bij start", finaleCloseDims, "aan", "uit",
+                "Sluit de Nether en het End automatisch als de finale start.", () -> {
+                    finaleCloseDims = !finaleCloseDims;
+                    saveState();
+                    again.run();
+                }));
+        buttons.add(stateButton("Gelijkspel automatisch oplossen", finaleAutoTie, "aan", "uit",
+                "Aan: de laatste die doodging wint. Uit: jij kiest de winnaar in een menu.", () -> {
+                    finaleAutoTie = !finaleAutoTie;
+                    saveState();
+                    again.run();
+                }));
+        buttons.add(button(iconLabel(M_REVIVE, "Winnaarsshow testen", NamedTextColor.AQUA),
+                "Title en vuurwerk rond jou. Raakt niemand anders en niets van de finale.", 150, () -> {
+                    winnerShow(admin, true);
+                }));
+
+        showMenu(admin, "Finale", finaleStatusBody(), buttons,
+                backButton("Terug naar de tijdlijn.", () -> openTimelineMenu(admin)));
+    }
+
+    private void openFinaleTargetDialog(Player admin) {
+        WorldBorder border = gameWorld().getWorldBorder();
+        double curX = finaleTargetSet ? finaleTargetX : border.getCenter().getX();
+        double curZ = finaleTargetSet ? finaleTargetZ : border.getCenter().getZ();
+        DialogInput x = DialogInput.text("x", Component.text("Midden X"))
+                .width(300).initial(finaleNum(curX)).maxLength(12).build();
+        DialogInput z = DialogInput.text("z", Component.text("Midden Z"))
+                .width(300).initial(finaleNum(curZ)).maxLength(12).build();
+        DialogInput size = DialogInput.text("grootte", Component.text("Eindgrootte (diameter in blokken)"))
+                .width(300).initial(finaleNum(finaleTargetSize)).maxLength(10).build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String sx = view.getText("x");
+            final String sz = view.getText("z");
+            final String sg = view.getText("grootte");
+            getServer().getScheduler().runTask(this, () -> {
+                applyFinaleTarget(clicker, sx, sz, sg);
+                openFinaleMenu(clicker);
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, "Finale doel"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Waar de border naartoe krimpt. Geldt voor de volgende start.", NamedTextColor.GRAY))))
+                        .inputs(List.of(x, z, size))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_BORDERS, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla het doel op."), 150, save),
+                        backButton("Terug naar de finale.", () -> openFinaleMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+    private void applyFinaleTarget(Player admin, String sx, String sz, String sg) {
+        try {
+            double x = parseNum(sx == null ? "" : sx);
+            double z = parseNum(sz == null ? "" : sz);
+            double size = parseNum(sg == null ? "" : sg);
+            if (Math.abs(x) > 29_999_000.0 || Math.abs(z) > 29_999_000.0) {
+                admin.sendMessage(Component.text("Het midden ligt te ver weg (maximaal 29999000).", NamedTextColor.RED));
+                return;
+            }
+            if (size < 1.0 || size > 59_999_000.0) {
+                admin.sendMessage(Component.text("De eindgrootte moet tussen 1 en 59999000 liggen.", NamedTextColor.RED));
+                return;
+            }
+            finaleTargetX = x;
+            finaleTargetZ = z;
+            finaleTargetSize = size;
+            finaleTargetSet = true;
+            saveState();
+            admin.sendMessage(Component.text("Het doel is opgeslagen.", NamedTextColor.GREEN));
+        } catch (NumberFormatException e) {
+            admin.sendMessage(Component.text("Geef getallen op voor het midden en de grootte.", NamedTextColor.RED));
+        }
+    }
+
+    private void openFinaleTimeDialog(Player admin) {
+        DialogInput duration = DialogInput.text("duur", Component.text("Totale duur (minuten)"))
+                .width(300).initial(String.valueOf(finaleDurationMin)).maxLength(3).build();
+        DialogInput rounds = DialogInput.text("ronde", Component.text("Laatste minuten in rondes"))
+                .width(300).initial(String.valueOf(finaleRoundMin)).maxLength(3).build();
+        DialogInput shrink = DialogInput.text("krimp", Component.text("Krimpen per ronde (seconden)"))
+                .width(300).initial(String.valueOf(finaleShrinkSec)).maxLength(4).build();
+        DialogInput pause = DialogInput.text("pauze", Component.text("Pauze per ronde (seconden)"))
+                .width(300).initial(String.valueOf(finalePauseSec)).maxLength(4).build();
+        DialogInput damage = DialogInput.text("schade", Component.text("Schade per blok per seconde buiten de border"))
+                .width(300).initial(finaleNum(finaleDamage)).maxLength(6).build();
+        DialogInput buffer = DialogInput.text("buffer", Component.text("Veilige afstand buiten de border (blokken)"))
+                .width(300).initial(finaleNum(finaleBuffer)).maxLength(6).build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String sd = view.getText("duur");
+            final String sr = view.getText("ronde");
+            final String sk = view.getText("krimp");
+            final String sp = view.getText("pauze");
+            final String sc = view.getText("schade");
+            final String sb = view.getText("buffer");
+            getServer().getScheduler().runTask(this, () -> {
+                applyFinaleTimes(clicker, sd, sr, sk, sp, sc, sb);
+                openFinaleMenu(clicker);
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, "Finale tijden"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "In de laatste minuten krimpt de border in rondes met pauzes ertussen. Geldt voor de "
+                                        + "volgende start.", NamedTextColor.GRAY))))
+                        .inputs(List.of(duration, rounds, shrink, pause, damage, buffer))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_COUNTDOWN, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla de tijden op."), 150, save),
+                        backButton("Terug naar de finale.", () -> openFinaleMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+    private void applyFinaleTimes(Player admin, String sd, String sr, String sk, String sp, String sc, String sb) {
+        try {
+            int duration = (int) Math.round(parseNum(sd == null ? "" : sd));
+            int rounds = (int) Math.round(parseNum(sr == null ? "" : sr));
+            int shrink = (int) Math.round(parseNum(sk == null ? "" : sk));
+            int pause = (int) Math.round(parseNum(sp == null ? "" : sp));
+            double damage = parseNum(sc == null ? "" : sc);
+            double buffer = parseNum(sb == null ? "" : sb);
+            if (duration < 1 || duration > 180) {
+                admin.sendMessage(Component.text("De duur moet tussen 1 en 180 minuten liggen.", NamedTextColor.RED));
+                return;
+            }
+            if (rounds < 0 || rounds > duration) {
+                admin.sendMessage(Component.text("De rondes mogen niet langer duren dan de totale duur.",
+                        NamedTextColor.RED));
+                return;
+            }
+            if (shrink < 5 || shrink > 3600 || pause < 0 || pause > 3600) {
+                admin.sendMessage(Component.text("Krimpen: 5 tot 3600 seconden. Pauze: 0 tot 3600 seconden.",
+                        NamedTextColor.RED));
+                return;
+            }
+            if (damage < 0.0 || damage > 100.0 || buffer < 0.0 || buffer > 1000.0) {
+                admin.sendMessage(Component.text("Schade: 0 tot 100. Veilige afstand: 0 tot 1000.", NamedTextColor.RED));
+                return;
+            }
+            finaleDurationMin = duration;
+            finaleRoundMin = rounds;
+            finaleShrinkSec = shrink;
+            finalePauseSec = pause;
+            finaleDamage = damage;
+            finaleBuffer = buffer;
+            saveState();
+            admin.sendMessage(Component.text("De tijden zijn opgeslagen.", NamedTextColor.GREEN));
+        } catch (NumberFormatException e) {
+            admin.sendMessage(Component.text("Geef getallen op.", NamedTextColor.RED));
+        }
+    }
+
+    // ------------------------------------------------------------------ menu editor (change the menus in the game)
+
+    /** Everything an admin changed in the menus, saved in menu-edits.yml. */
+    private YamlConfiguration menuEdits = new YamlConfiguration();
+    /** Admins who are in edit mode right now (not saved, so it is never left on after a restart). */
+    private final Set<UUID> menuEditMode = new HashSet<>();
+    /** What every menu button does, so edit mode can run the original action. */
+    private final Map<DialogAction, Runnable> buttonActions = Collections.synchronizedMap(new WeakHashMap<>());
+    /** The order the buttons of a screen were last shown in (for moving them up and down). */
+    private final Map<String, List<String>> menuLastKeys = new HashMap<>();
+    private final Random menuRandom = new Random();
+
+    /** The icons the resource pack has: {id, character, name}. New pictures need a new resource pack. */
+    private static final String[][] MENU_ICONS = {
+            {"LAUNCH", M_LAUNCH, "Launch"}, {"SERVER", M_SERVER, "Server"}, {"WORLD", M_WORLD, "Wereld"},
+            {"PLAYERS", M_PLAYERS, "Spelers"}, {"MESSAGES", M_MESSAGES, "Berichten"}, {"NETHER", M_NETHER, "Nether"},
+            {"BORDERS", M_BORDERS, "Grenzen"}, {"LOBBY", M_LOBBY, "Lobby"}, {"SPAWN_N", M_SPAWN_N, "Spawn noord"},
+            {"SPAWN_Z", M_SPAWN_Z, "Spawn zuid"}, {"MAIN", M_MAIN, "Main"}, {"TEAM", M_TEAM, "Team"},
+            {"CREW", M_CREW, "Crew"}, {"GRACE", M_GRACE, "Grace"}, {"REVIVE", M_REVIVE, "Revive"},
+            {"SAY", M_SAY, "Say"}, {"DONATE", M_DONATE, "Donatie"}, {"BACK", M_BACK, "Terug"},
+            {"COUNTDOWN", M_COUNTDOWN, "Klok"}, {"MACE", M_MACE, "Mace"}
+    };
+
+    private static final String[][] MENU_COLORS = {
+            {"white", "Wit"}, {"gray", "Grijs"}, {"dark_gray", "Donkergrijs"}, {"red", "Rood"}, {"dark_red", "Donkerrood"},
+            {"gold", "Goud"}, {"yellow", "Geel"}, {"green", "Groen"}, {"dark_green", "Donkergroen"}, {"aqua", "Aqua"},
+            {"dark_aqua", "Donker aqua"}, {"blue", "Blauw"}, {"light_purple", "Roze"}, {"dark_purple", "Paars"}
+    };
+
+    private static final String[][] MENU_CONDITIONS = {
+            {"server-open", "Server is open"}, {"server-closed", "Server is dicht"},
+            {"main-open", "Main wereld is open"}, {"main-closed", "Main wereld is dicht"},
+            {"nether-open", "Nether is open"}, {"nether-closed", "Nether is dicht"},
+            {"end-open", "End is open"}, {"end-closed", "End is dicht"},
+            {"launched", "Gelanceerd"}, {"not-launched", "Nog niet gelanceerd"},
+            {"borders-dropped", "Grenzen zijn open"}, {"borders-closed", "Grenzen zijn dicht"},
+            {"finale-running", "Finale is bezig"}, {"finale-idle", "Finale is niet bezig"},
+            {"owner", "Alleen de owner"}
+    };
+
+    /** One button of a screen while the screen is being put together. */
+    private static final class MenuEntry {
+        String key;
+        ActionButton button;
+        Runnable run;
+        boolean custom;
+        boolean hidden;
+        boolean conditionMet = true;
+        String baseText = "";
+        ConfigurationSection sec;
+    }
+
+    /** A screen after the edits: what to show. */
+    private static final class EditedScreen {
+        String title;
+        Component body;
+        final List<ActionButton> buttons = new ArrayList<>();
+        int columns;
+    }
+
+    private File menuEditsFile() {
+        return new File(getDataFolder(), "menu-edits.yml");
+    }
+
+    private void loadMenuEdits() {
+        menuEdits = YamlConfiguration.loadConfiguration(menuEditsFile());
+    }
+
+    private void saveMenuEdits() {
+        try {
+            getDataFolder().mkdirs();
+            menuEdits.save(menuEditsFile());
+        } catch (IOException e) {
+            getLogger().warning("Kon menu-edits.yml niet opslaan: " + e.getMessage());
+        }
+    }
+
+    private boolean menuAdvanced(Player p) {
+        return menuEdits.getBoolean("advanced." + p.getUniqueId(), false);
+    }
+
+    private void setMenuAdvanced(Player p, boolean on) {
+        menuEdits.set("advanced." + p.getUniqueId(), on ? Boolean.TRUE : null);
+        saveMenuEdits();
+    }
+
+    private static String ykey(String s) {
+        return s.replace('.', '_').trim();
+    }
+
+    private static boolean isGlyph(char ch) {
+        return ch >= '\uE000' && ch <= '\uF8FF';
+    }
+
+    private static String stripGlyphs(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            if (!isGlyph(ch)) {
+                sb.append(ch);
+            }
+        }
+        return sb.toString().replaceAll("\\s+", " ").trim();
+    }
+
+    /** A stable name for a button: its text without icon, [state] marks and capitals. */
+    private static String buttonKey(ActionButton b) {
+        String t = stripGlyphs(PLAIN.serialize(b.label()));
+        t = t.replaceAll("\\[[^\\]]*\\]", "").replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT);
+        return t.isEmpty() ? "knop" : t;
+    }
+
+    private Component menuText(String raw, boolean miniMessage) {
+        if (raw == null) {
+            return Component.empty();
+        }
+        if (miniMessage) {
+            return MiniMessage.miniMessage().deserialize(raw);
+        }
+        return Component.text(raw);
+    }
+
+    private static String iconChar(String id) {
+        if (id == null || id.isEmpty() || id.equals("NONE")) {
+            return null;
+        }
+        for (String[] icon : MENU_ICONS) {
+            if (icon[0].equals(id)) {
+                return icon[1];
+            }
+        }
+        return null;
+    }
+
+    private static TextColor menuColor(String id) {
+        switch (id == null ? "" : id) {
+            case "white":
+                return NamedTextColor.WHITE;
+            case "gray":
+                return NamedTextColor.GRAY;
+            case "dark_gray":
+                return NamedTextColor.DARK_GRAY;
+            case "red":
+                return NamedTextColor.RED;
+            case "dark_red":
+                return NamedTextColor.DARK_RED;
+            case "gold":
+                return NamedTextColor.GOLD;
+            case "yellow":
+                return NamedTextColor.YELLOW;
+            case "green":
+                return NamedTextColor.GREEN;
+            case "dark_green":
+                return NamedTextColor.DARK_GREEN;
+            case "aqua":
+                return NamedTextColor.AQUA;
+            case "dark_aqua":
+                return NamedTextColor.DARK_AQUA;
+            case "blue":
+                return NamedTextColor.BLUE;
+            case "light_purple":
+                return NamedTextColor.LIGHT_PURPLE;
+            case "dark_purple":
+                return NamedTextColor.DARK_PURPLE;
+            default:
+                return null;
+        }
+    }
+
+    private boolean menuCondition(Player admin, String cond) {
+        switch (cond) {
+            case "server-open":
+                return !serverClosed;
+            case "server-closed":
+                return serverClosed;
+            case "main-open":
+                return mainOpen;
+            case "main-closed":
+                return !mainOpen;
+            case "nether-open":
+                return netherOpen;
+            case "nether-closed":
+                return !netherOpen;
+            case "end-open":
+                return endOpen;
+            case "end-closed":
+                return !endOpen;
+            case "launched":
+                return launched;
+            case "not-launched":
+                return !launched;
+            case "borders-dropped":
+                return bordersDropped;
+            case "borders-closed":
+                return !bordersDropped;
+            case "finale-running":
+                return finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED;
+            case "finale-idle":
+                return finaleState == FinaleState.IDLE;
+            case "owner":
+                return isOwner(admin);
+            default:
+                return true;
+        }
+    }
+
+    // ---- where screens can be opened from
+
+    private Map<String, Consumer<Player>> screenOpeners() {
+        Map<String, Consumer<Player>> m = new LinkedHashMap<>();
+        m.put("Beheer", this::openMenu);
+        m.put("LowkeySMP Beheer", this::openMenu);
+        m.put("Snelle acties", this::openQuickMenu);
+        m.put("Tijdlijn", this::openTimelineMenu);
+        m.put("Spelers", this::openPlayersMenu);
+        m.put("Wereld en server", this::openWorldMenu);
+        m.put("Wereld", this::openWorldMenu);
+        m.put("Server", this::openServerMenu);
+        m.put("Berichten", this::openMessagesMenu);
+        m.put("Team event", this::openEventMenu);
+        m.put("Verliezerseiland", this::openLosersMenu);
+        m.put("Mace", p -> mace.openMenu(p));
+        m.put("Border checklist", this::openChecklistMenu);
+        m.put("Finale", this::openFinaleMenu);
+        m.put("Testen en herstellen", this::openRepairMenu);
+        m.put("Nether en grenzen", this::openAccessMenu);
+        m.put("Lobby", this::openLobbyMenu);
+        m.put("Spawnpunten", this::openSpawnMenu);
+        m.put("Countdown", this::openCountdownMenu);
+        return m;
+    }
+
+    /** Opens a built-in screen by its name, or a screen made in the editor ("custom:id"). */
+    private void openScreenByKey(Player admin, String key) {
+        if (key.startsWith("custom:")) {
+            openCustomScreen(admin, key.substring("custom:".length()));
+            return;
+        }
+        Consumer<Player> opener = screenOpeners().get(key);
+        if (opener == null) {
+            openMenu(admin);
+        } else {
+            opener.accept(admin);
+        }
+    }
+
+    private void reopenScreen(Player admin, String screenKey) {
+        openScreenByKey(admin, screenKey);
+    }
+
+    // ---- putting a screen together with all the edits
+
+    private Runnable customActionRunnable(Player admin, String screenKey, ConfigurationSection c, String label) {
+        final String command = c.getString("command", "");
+        final String opens = c.getString("opens", "");
+        final boolean asConsole = "console".equals(c.getString("run-as", "player"));
+        final boolean confirmFirst = c.getBoolean("confirm", false);
+        Runnable core = () -> {
+            if (!opens.isEmpty()) {
+                openScreenByKey(admin, opens);
+                return;
+            }
+            if (command.isEmpty()) {
+                admin.sendMessage(Component.text("Deze knop doet nog niets. Geef hem een actie in de menu-editor.",
+                        NamedTextColor.YELLOW));
+                return;
+            }
+            String cmd = command.startsWith("/") ? command.substring(1) : command;
+            cmd = cmd.replace("%player%", admin.getName());
+            if (asConsole) {
+                getServer().dispatchCommand(getServer().getConsoleSender(), cmd);
+            } else {
+                admin.performCommand(cmd);
+            }
+        };
+        if (!confirmFirst) {
+            return core;
+        }
+        return () -> confirm(admin, "Zeker weten?", label,
+                opens.isEmpty() ? "Voert uit: /" + (command.startsWith("/") ? command.substring(1) : command)
+                        : "Opent: " + opens,
+                Component.text("Ja, uitvoeren", NamedTextColor.GREEN), core, () -> reopenScreen(admin, screenKey));
+    }
+
+    /** Applies label, icon, colour and tooltip edits to the label of a button. */
+    private Component styledLabel(Component orig, ConfigurationSection s) {
+        if (s == null) {
+            return orig;
+        }
+        String labelRaw = s.getString("label", "");
+        String icon = s.getString("icon", "");
+        TextColor color = menuColor(s.getString("color", ""));
+        if (labelRaw.isEmpty() && icon.isEmpty() && color == null) {
+            return orig;
+        }
+        boolean mm = s.getBoolean("mm", false);
+        List<Component> kids = orig.children();
+        boolean structured = kids.size() == 3 && !PLAIN.serialize(kids.get(0)).isEmpty()
+                && isGlyph(PLAIN.serialize(kids.get(0)).charAt(0));
+        Component glyphPart = null;
+        Component textPart;
+        if (structured) {
+            glyphPart = kids.get(0);
+            textPart = kids.get(2);
+        } else {
+            textPart = orig;
+        }
+        if (!labelRaw.isEmpty()) {
+            Component t = menuText(labelRaw, mm);
+            TextColor base = color != null ? color : textPart.color();
+            textPart = base == null ? t : Component.text().color(base).append(t).build();
+        } else if (color != null) {
+            textPart = textPart.color(color);
+        }
+        if (!icon.isEmpty()) {
+            String ch = iconChar(icon);
+            glyphPart = ch == null ? null : glyph(ch);
+        }
+        if (glyphPart == null) {
+            return textPart;
+        }
+        return Component.text().append(glyphPart).append(Component.space()).append(textPart).build();
+    }
+
+    private ActionButton withWidth(ActionButton b, int width) {
+        return ActionButton.create(b.label(), b.tooltip(), width, b.action());
+    }
+
+    private static int widthForColumns(int columns) {
+        if (columns <= 1) {
+            return 380;
+        }
+        if (columns == 2) {
+            return 190;
+        }
+        return columns == 3 ? 125 : 95;
+    }
+
+    /**
+     * Takes the buttons a screen was built with and returns what to show: the edits applied (hidden buttons gone,
+     * texts, icons and order changed, own buttons added). In edit mode every button opens its editor instead.
+     */
+    private EditedScreen applyMenuEdits(Player admin, String screenKey, String title, Component body,
+                                        List<ActionButton> original, int defaultWidth, int defaultColumns) {
+        final boolean editing = menuEditMode.contains(admin.getUniqueId());
+        final String sk = ykey(screenKey);
+        ConfigurationSection screen = menuEdits.getConfigurationSection("screens." + sk);
+        EditedScreen result = new EditedScreen();
+        result.title = title;
+        result.body = body;
+        result.columns = defaultColumns;
+        if (screen == null && !editing) {
+            result.buttons.addAll(original);
+            return result;
+        }
+        if (screen != null) {
+            boolean smm = screen.getBoolean("mm", false);
+            String t = screen.getString("title", "");
+            if (!t.isEmpty()) {
+                result.title = t;
+            }
+            String replace = screen.getString("body", "");
+            if (!replace.isEmpty()) {
+                result.body = menuText(replace, smm);
+            }
+            String extra = screen.getString("body-extra", "");
+            if (!extra.isEmpty()) {
+                result.body = Component.text().append(result.body).append(Component.newline())
+                        .append(menuText(extra, smm)).build();
+            }
+            int cols = screen.getInt("columns", 0);
+            if (cols >= 1 && cols <= 4) {
+                result.columns = cols;
+            }
+        }
+        ConfigurationSection btnSec = screen == null ? null : screen.getConfigurationSection("buttons");
+        ConfigurationSection customSec = screen == null ? null : screen.getConfigurationSection("custom");
+
+        Map<String, MenuEntry> entries = new LinkedHashMap<>();
+        for (ActionButton b : original) {
+            String base = buttonKey(b);
+            String key = base;
+            int n = 2;
+            while (entries.containsKey(key)) {
+                key = base + " #" + n;
+                n++;
+            }
+            MenuEntry e = new MenuEntry();
+            e.key = key;
+            e.baseText = stripGlyphs(PLAIN.serialize(b.label()));
+            e.run = b.action() == null ? null : buttonActions.get(b.action());
+            ConfigurationSection s = btnSec == null ? null : btnSec.getConfigurationSection(ykey(key));
+            e.sec = s;
+            Component label = styledLabel(b.label(), s);
+            Component tip = b.tooltip();
+            int width = b.width();
+            e.button = b;
+            if (s != null) {
+                boolean mm = s.getBoolean("mm", false);
+                String tipRaw = s.getString("tooltip", "");
+                if (!tipRaw.isEmpty()) {
+                    tip = menuText(tipRaw, mm);
+                }
+                int w = s.getInt("width", 0);
+                if (w >= 50 && w <= 400) {
+                    width = w;
+                }
+                if (!s.getString("command", "").isEmpty() || !s.getString("opens", "").isEmpty()) {
+                    e.run = customActionRunnable(admin, screenKey, s, e.baseText);
+                    ActionButton tmp = button(label, "", width, e.run);
+                    e.button = ActionButton.create(tmp.label(), tip, tmp.width(), tmp.action());
+                } else {
+                    e.button = ActionButton.create(label, tip, width, b.action());
+                }
+                e.hidden = s.getBoolean("hidden", false);
+                String cond = s.getString("show-if", "");
+                e.conditionMet = cond.isEmpty() || menuCondition(admin, cond);
+            }
+            entries.put(key, e);
+        }
+        if (customSec != null) {
+            for (String id : customSec.getKeys(false)) {
+                ConfigurationSection c = customSec.getConfigurationSection(id);
+                if (c == null) {
+                    continue;
+                }
+                MenuEntry e = new MenuEntry();
+                e.key = "@" + id;
+                e.custom = true;
+                e.sec = c;
+                e.baseText = c.getString("label", "Knop");
+                e.run = customActionRunnable(admin, screenKey, c, e.baseText);
+                boolean mm = c.getBoolean("mm", false);
+                Component text = menuText(e.baseText, mm);
+                TextColor color = menuColor(c.getString("color", ""));
+                text = Component.text().color(color == null ? NamedTextColor.WHITE : color).append(text).build();
+                String ch = iconChar(c.getString("icon", ""));
+                Component label = ch == null ? text
+                        : Component.text().append(glyph(ch)).append(Component.space()).append(text).build();
+                int width = c.getInt("width", defaultWidth);
+                if (width < 50 || width > 400) {
+                    width = defaultWidth;
+                }
+                ActionButton tmp = button(label, "", width, e.run);
+                e.button = ActionButton.create(tmp.label(), menuText(c.getString("tooltip", ""), mm), tmp.width(),
+                        tmp.action());
+                e.hidden = c.getBoolean("hidden", false);
+                String cond = c.getString("show-if", "");
+                e.conditionMet = cond.isEmpty() || menuCondition(admin, cond);
+                entries.put(e.key, e);
+            }
+        }
+
+        List<String> keys = new ArrayList<>(entries.keySet());
+        List<String> order = screen == null ? new ArrayList<>() : screen.getStringList("order");
+        if (!order.isEmpty()) {
+            List<String> sorted = new ArrayList<>();
+            for (String k : order) {
+                if (entries.containsKey(k) && !sorted.contains(k)) {
+                    sorted.add(k);
+                }
+            }
+            for (String k : keys) {
+                if (!sorted.contains(k)) {
+                    sorted.add(k);
+                }
+            }
+            keys = sorted;
+        }
+        List<String> shown = new ArrayList<>();
+        for (String k : keys) {
+            MenuEntry e = entries.get(k);
+            boolean visible = !e.hidden && e.conditionMet;
+            if (!editing) {
+                if (visible) {
+                    result.buttons.add(e.button);
+                }
+                continue;
+            }
+            shown.add(k);
+            result.buttons.add(editEntryButton(admin, screenKey, e));
+        }
+        if (editing) {
+            menuLastKeys.put(admin.getUniqueId() + "|" + sk, shown);
+            result.title = "Bewerken: " + result.title;
+            result.buttons.add(button(iconLabel(M_MESSAGES, "Dit scherm bewerken", NamedTextColor.YELLOW),
+                    "Titel, tekst en nieuwe knoppen.", defaultWidth, () -> openScreenEditor(admin, screenKey)));
+            result.buttons.add(button(iconLabel(M_BACK, "Bewerkmodus uitzetten", NamedTextColor.RED),
+                    "Klik weer normaal op de knoppen.", defaultWidth, () -> {
+                        menuEditMode.remove(admin.getUniqueId());
+                        reopenScreen(admin, screenKey);
+                    }));
+        }
+        return result;
+    }
+
+    /** In edit mode a button opens its editor. The description of the original stays visible. */
+    private ActionButton editEntryButton(Player admin, String screenKey, MenuEntry e) {
+        String note = e.hidden ? "(verborgen) " : (!e.conditionMet ? "(voorwaarde) " : "");
+        Component marker = Component.text("\u00BB " + note, note.isEmpty() ? NamedTextColor.YELLOW : NamedTextColor.DARK_GRAY);
+        Component label = Component.text().append(marker).append(e.button.label()).build();
+        final String key = e.key;
+        final boolean custom = e.custom;
+        final Runnable run = e.run;
+        final String baseText = e.baseText;
+        ActionButton tmp = button(label, "", e.button.width(),
+                () -> openButtonEditor(admin, screenKey, key, custom, run, baseText));
+        return ActionButton.create(tmp.label(), e.button.tooltip(), tmp.width(), tmp.action());
+    }
+
+    // ---- helpers for the editor dialogs
+
+    private ConfigurationSection menuScreenSection(String screenKey, boolean create) {
+        String path = "screens." + ykey(screenKey);
+        ConfigurationSection s = menuEdits.getConfigurationSection(path);
+        if (s == null && create) {
+            s = menuEdits.createSection(path);
+        }
+        return s;
+    }
+
+    private String menuBtnPath(String screenKey, String bk) {
+        return bk.startsWith("@")
+                ? "screens." + ykey(screenKey) + ".custom." + ykey(bk.substring(1))
+                : "screens." + ykey(screenKey) + ".buttons." + ykey(bk);
+    }
+
+    private ConfigurationSection menuBtnSection(String screenKey, String bk, boolean create) {
+        String path = menuBtnPath(screenKey, bk);
+        ConfigurationSection s = menuEdits.getConfigurationSection(path);
+        if (s == null && create) {
+            s = menuEdits.createSection(path);
+        }
+        return s;
+    }
+
+    private void menuBtnSet(String screenKey, String bk, String field, Object value) {
+        ConfigurationSection s = menuBtnSection(screenKey, bk, value != null);
+        if (s == null) {
+            return;
+        }
+        s.set(field, value);
+        saveMenuEdits();
+    }
+
+    private static String menuValue(String raw) {
+        return raw == null ? "" : raw.trim();
+    }
+
+    private void showEditorDialog(Player admin, String title, Component body, List<ActionButton> buttons,
+                                  ActionButton exit) {
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, title))
+                        .body(List.of(DialogBody.plainMessage(body)))
+                        .build())
+                .type(DialogType.multiAction(buttons, exit, 2)));
+        admin.showDialog(dialog);
+    }
+
+    /** One dialog with text fields. fields: {key, label, initial, maxLength}. */
+    private void openTextDialog(Player admin, String title, String hint, List<String[]> fields,
+                                Consumer<Map<String, String>> onSave, Runnable back) {
+        List<DialogInput> inputs = new ArrayList<>();
+        for (String[] f : fields) {
+            inputs.add(DialogInput.text(f[0], Component.text(f[1]))
+                    .width(300)
+                    .initial(f[2] == null ? "" : f[2])
+                    .maxLength(Integer.parseInt(f[3]))
+                    .build());
+        }
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final Map<String, String> values = new HashMap<>();
+            for (String[] f : fields) {
+                String v = view.getText(f[0]);
+                values.put(f[0], v == null ? "" : v);
+            }
+            getServer().getScheduler().runTask(this, () -> onSave.accept(values));
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, title))
+                        .body(List.of(DialogBody.plainMessage(Component.text(hint, NamedTextColor.GRAY))))
+                        .inputs(inputs)
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_BORDERS, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla dit op."), 150, save),
+                        backButton("Terug zonder opslaan.", back))));
+        admin.showDialog(dialog);
+    }
+
+    // ---- the button editor
+
+    private void openButtonEditor(Player admin, String sk, String bk, boolean custom, Runnable run, String baseText) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        final boolean adv = menuAdvanced(admin);
+        ConfigurationSection s = menuBtnSection(sk, bk, false);
+        final boolean hidden = s != null && s.getBoolean("hidden", false);
+        final Runnable again = () -> openButtonEditor(admin, sk, bk, custom, run, baseText);
+        List<ActionButton> buttons = new ArrayList<>();
+        if (run != null) {
+            buttons.add(button(iconLabel(M_LAUNCH, "Uitvoeren", NamedTextColor.GREEN),
+                    "Doe wat deze knop normaal doet.", 190, run));
+        }
+        buttons.add(button(iconLabel(M_MESSAGES, "Tekst aanpassen", NamedTextColor.WHITE),
+                "De naam en de uitleg van deze knop.", 190, () -> openButtonTextDialog(admin, sk, bk, baseText, again)));
+        buttons.add(button(iconLabel(M_MAIN, "Icoon kiezen", NamedTextColor.WHITE),
+                "Kies een icoon uit de resourcepack.", 190, () -> openIconPicker(admin, sk, bk, again)));
+        buttons.add(button(iconLabel(M_TEAM, "Kleur kiezen", NamedTextColor.WHITE),
+                "De kleur van de tekst.", 190, () -> openColorPicker(admin, sk, bk, again)));
+        buttons.add(button(iconLabel(M_BACK, "Omhoog", NamedTextColor.WHITE),
+                "Zet de knop een plek hoger.", 190, () -> {
+                    menuMove(admin, sk, bk, -1);
+                    again.run();
+                }));
+        buttons.add(button(iconLabel(M_BACK, "Omlaag", NamedTextColor.WHITE),
+                "Zet de knop een plek lager.", 190, () -> {
+                    menuMove(admin, sk, bk, 1);
+                    again.run();
+                }));
+        buttons.add(stateButton("Verborgen", hidden, "ja", "nee",
+                "Een verborgen knop is alleen in de bewerkmodus te zien.", () -> {
+                    menuBtnSet(sk, bk, "hidden", hidden ? null : Boolean.TRUE);
+                    again.run();
+                }));
+        if (custom || adv) {
+            buttons.add(button(iconLabel(M_LAUNCH, "Actie", NamedTextColor.AQUA),
+                    "Wat de knop doet: een scherm openen of een commando uitvoeren.", 190,
+                    () -> openActionEditor(admin, sk, bk, custom, baseText, again)));
+        }
+        if (adv) {
+            buttons.add(button(iconLabel(M_SERVER, "Breedte", NamedTextColor.AQUA),
+                    "De breedte van de knop (50 tot 400).", 190, () -> openWidthDialog(admin, sk, bk, again)));
+            buttons.add(button(iconLabel(M_SERVER, "Voorwaarde", NamedTextColor.AQUA),
+                    "Toon de knop alleen als dit klopt, bijvoorbeeld als de server open is.", 190,
+                    () -> openConditionPicker(admin, sk, bk, again)));
+        }
+        if (custom) {
+            buttons.add(button(iconLabel(M_BACK, "Knop verwijderen", NamedTextColor.RED),
+                    "Haalt deze eigen knop weg.", 190, () -> confirm(admin, "Knop verwijderen?",
+                            baseText, "Deze eigen knop verdwijnt helemaal.",
+                            Component.text("Ja, verwijderen", NamedTextColor.RED), () -> {
+                                menuEdits.set(menuBtnPath(sk, bk), null);
+                                ConfigurationSection sc = menuScreenSection(sk, false);
+                                if (sc != null) {
+                                    List<String> order = new ArrayList<>(sc.getStringList("order"));
+                                    order.remove(bk);
+                                    sc.set("order", order);
+                                }
+                                saveMenuEdits();
+                                reopenScreen(admin, sk);
+                            }, again)));
+        } else if (s != null) {
+            buttons.add(button(iconLabel(M_BACK, "Terugzetten", NamedTextColor.RED),
+                    "Haalt alle aanpassingen van deze knop weg.", 190, () -> {
+                        menuEdits.set(menuBtnPath(sk, bk), null);
+                        saveMenuEdits();
+                        again.run();
+                    }));
+        }
+        Component body = joinLines(
+                statusLine("Knop", baseText, NamedTextColor.WHITE),
+                statusLine("Soort", custom ? "eigen knop" : "ingebouwde knop", NamedTextColor.GRAY),
+                statusLine("Modus", adv ? "geavanceerd" : "simpel", adv ? NamedTextColor.AQUA : NamedTextColor.GREEN));
+        showEditorDialog(admin, "Knop bewerken", body, buttons,
+                backButton("Terug naar het scherm.", () -> reopenScreen(admin, sk)));
+    }
+
+    private void openButtonTextDialog(Player admin, String sk, String bk, String baseText, Runnable back) {
+        boolean adv = menuAdvanced(admin);
+        ConfigurationSection s = menuBtnSection(sk, bk, false);
+        String curLabel = s != null && !s.getString("label", "").isEmpty() ? s.getString("label", "") : baseText;
+        String curTip = s == null ? "" : s.getString("tooltip", "");
+        List<String[]> fields = new ArrayList<>();
+        fields.add(new String[] {"label", "Naam van de knop", curLabel, "100"});
+        fields.add(new String[] {"tooltip", "Uitleg", curTip, "200"});
+        String hint = adv ? "Je mag MiniMessage gebruiken: <red>, <bold>, <gradient:#c084fc:#f472b6>, <br>."
+                : "Gewone tekst. Laat een veld leeg om het origineel terug te zetten.";
+        openTextDialog(admin, "Tekst aanpassen", hint, fields, values -> {
+            String label = menuValue(values.get("label"));
+            String tip = menuValue(values.get("tooltip"));
+            menuBtnSet(sk, bk, "label", label.isEmpty() || label.equals(baseText) ? null : label);
+            menuBtnSet(sk, bk, "tooltip", tip.isEmpty() ? null : tip);
+            menuBtnSet(sk, bk, "mm", adv ? Boolean.TRUE : null);
+            back.run();
+        }, back);
+    }
+
+    private void openIconPicker(Player admin, String sk, String bk, Runnable back) {
+        List<ActionButton> list = new ArrayList<>();
+        list.add(button(Component.text("Standaard"), "Het oorspronkelijke icoon.", 150, () -> {
+            menuBtnSet(sk, bk, "icon", null);
+            back.run();
+        }));
+        list.add(button(Component.text("Geen icoon"), "Alleen tekst.", 150, () -> {
+            menuBtnSet(sk, bk, "icon", "NONE");
+            back.run();
+        }));
+        for (String[] icon : MENU_ICONS) {
+            final String id = icon[0];
+            list.add(button(iconLabel(icon[1], icon[2], NamedTextColor.WHITE), "Gebruik dit icoon.", 150, () -> {
+                menuBtnSet(sk, bk, "icon", id);
+                back.run();
+            }));
+        }
+        showEditorDialog(admin, "Icoon kiezen",
+                Component.text("Dit zijn de iconen in de resourcepack. Nieuwe plaatjes vragen een nieuwe resourcepack.",
+                        NamedTextColor.GRAY),
+                list, backButton("Terug.", back));
+    }
+
+    private void openColorPicker(Player admin, String sk, String bk, Runnable back) {
+        List<ActionButton> list = new ArrayList<>();
+        list.add(button(Component.text("Standaard"), "De oorspronkelijke kleur.", 150, () -> {
+            menuBtnSet(sk, bk, "color", null);
+            back.run();
+        }));
+        for (String[] color : MENU_COLORS) {
+            final String id = color[0];
+            TextColor c = menuColor(id);
+            list.add(button(Component.text(color[1], c == null ? NamedTextColor.WHITE : c),
+                    "Gebruik deze kleur.", 150, () -> {
+                        menuBtnSet(sk, bk, "color", id);
+                        back.run();
+                    }));
+        }
+        showEditorDialog(admin, "Kleur kiezen", Component.text("Kies de kleur van de tekst.", NamedTextColor.GRAY),
+                list, backButton("Terug.", back));
+    }
+
+    private void menuMove(Player admin, String screenKey, String bk, int dir) {
+        String lastKey = admin.getUniqueId() + "|" + ykey(screenKey);
+        List<String> seq = menuLastKeys.get(lastKey);
+        if (seq == null) {
+            admin.sendMessage(Component.text("Open het scherm eerst opnieuw in de bewerkmodus.", NamedTextColor.YELLOW));
+            return;
+        }
+        seq = new ArrayList<>(seq);
+        int i = seq.indexOf(bk);
+        int j = i + dir;
+        if (i < 0 || j < 0 || j >= seq.size()) {
+            admin.sendMessage(Component.text("Daar kan de knop niet verder naartoe.", NamedTextColor.GRAY));
+            return;
+        }
+        Collections.swap(seq, i, j);
+        ConfigurationSection sc = menuScreenSection(screenKey, true);
+        sc.set("order", seq);
+        saveMenuEdits();
+        menuLastKeys.put(lastKey, seq);
+    }
+
+    // ---- advanced options of a button
+
+    private void openWidthDialog(Player admin, String sk, String bk, Runnable back) {
+        ConfigurationSection s = menuBtnSection(sk, bk, false);
+        String cur = s == null || s.getInt("width", 0) == 0 ? "" : String.valueOf(s.getInt("width", 0));
+        List<String[]> fields = new ArrayList<>();
+        fields.add(new String[] {"breedte", "Breedte (50 tot 400, leeg = standaard)", cur, "3"});
+        openTextDialog(admin, "Breedte", "In het nieuwe ontwerp zijn de grote knoppen altijd even breed. Dit werkt in "
+                + "het klassieke ontwerp en in schermen met meer kolommen.", fields, values -> {
+                    String raw = menuValue(values.get("breedte"));
+                    if (raw.isEmpty()) {
+                        menuBtnSet(sk, bk, "width", null);
+                    } else {
+                        try {
+                            int w = Integer.parseInt(raw);
+                            if (w < 50 || w > 400) {
+                                admin.sendMessage(Component.text("De breedte moet tussen 50 en 400 liggen.",
+                                        NamedTextColor.RED));
+                            } else {
+                                menuBtnSet(sk, bk, "width", w);
+                            }
+                        } catch (NumberFormatException e) {
+                            admin.sendMessage(Component.text("Geef een getal op.", NamedTextColor.RED));
+                        }
+                    }
+                    back.run();
+                }, back);
+    }
+
+    private void openConditionPicker(Player admin, String sk, String bk, Runnable back) {
+        List<ActionButton> list = new ArrayList<>();
+        list.add(button(Component.text("Altijd tonen"), "Geen voorwaarde.", 190, () -> {
+            menuBtnSet(sk, bk, "show-if", null);
+            back.run();
+        }));
+        for (String[] cond : MENU_CONDITIONS) {
+            final String id = cond[0];
+            list.add(button(Component.text(cond[1]), "Toon de knop alleen als dit klopt.", 190, () -> {
+                menuBtnSet(sk, bk, "show-if", id);
+                back.run();
+            }));
+        }
+        showEditorDialog(admin, "Voorwaarde",
+                Component.text("In de bewerkmodus zie je de knop altijd, ook als de voorwaarde niet klopt.",
+                        NamedTextColor.GRAY), list, backButton("Terug.", back));
+    }
+
+    private void openActionEditor(Player admin, String sk, String bk, boolean custom, String baseText, Runnable back) {
+        final boolean adv = menuAdvanced(admin);
+        ConfigurationSection s = menuBtnSection(sk, bk, false);
+        String command = s == null ? "" : s.getString("command", "");
+        String opens = s == null ? "" : s.getString("opens", "");
+        boolean asConsole = s != null && "console".equals(s.getString("run-as", "player"));
+        boolean confirmFirst = s != null && s.getBoolean("confirm", false);
+        final Runnable again = () -> openActionEditor(admin, sk, bk, custom, baseText, back);
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_WORLD, "Opent een scherm", NamedTextColor.WHITE),
+                "Kies welk scherm de knop opent.", 190, () -> openScreenPicker(admin, sk, bk, again)));
+        buttons.add(button(iconLabel(M_SAY, "Voert een commando uit", NamedTextColor.WHITE),
+                "Typ een commando, bijvoorbeeld /lowkey donate.", 190, () -> {
+                    List<String[]> fields = new ArrayList<>();
+                    fields.add(new String[] {"commando", "Commando (%player% wordt jouw naam)", command, "200"});
+                    openTextDialog(admin, "Commando", "Het commando start met of zonder /.", fields, values -> {
+                        String cmd = menuValue(values.get("commando"));
+                        menuBtnSet(sk, bk, "command", cmd.isEmpty() ? null : cmd);
+                        if (!cmd.isEmpty()) {
+                            menuBtnSet(sk, bk, "opens", null);
+                        }
+                        again.run();
+                    }, again);
+                }));
+        if (adv) {
+            buttons.add(stateButton("Uitvoeren als console", asConsole, "ja", "nee",
+                    "Ja: de console voert het commando uit. Nee: jij.", () -> {
+                        menuBtnSet(sk, bk, "run-as", asConsole ? null : "console");
+                        again.run();
+                    }));
+            buttons.add(stateButton("Eerst bevestigen", confirmFirst, "ja", "nee",
+                    "Vraag eerst of je het zeker weet.", () -> {
+                        menuBtnSet(sk, bk, "confirm", confirmFirst ? null : Boolean.TRUE);
+                        again.run();
+                    }));
+        }
+        if (!custom) {
+            buttons.add(button(iconLabel(M_BACK, "Originele actie terug", NamedTextColor.RED),
+                    "De knop doet weer wat hij oorspronkelijk deed.", 190, () -> {
+                        menuBtnSet(sk, bk, "command", null);
+                        menuBtnSet(sk, bk, "opens", null);
+                        menuBtnSet(sk, bk, "run-as", null);
+                        menuBtnSet(sk, bk, "confirm", null);
+                        again.run();
+                    }));
+        }
+        String now = !opens.isEmpty() ? "opent " + opens : (!command.isEmpty() ? "/" + command.replaceFirst("^/", "")
+                : (custom ? "nog niets" : "de oorspronkelijke actie"));
+        showEditorDialog(admin, "Actie", joinLines(statusLine("Knop", baseText, NamedTextColor.WHITE),
+                statusLine("Nu", now, NamedTextColor.WHITE)), buttons, backButton("Terug.", back));
+    }
+
+    private void openScreenPicker(Player admin, String sk, String bk, Runnable back) {
+        List<ActionButton> list = new ArrayList<>();
+        for (String name : screenOpeners().keySet()) {
+            if (name.equals("LowkeySMP Beheer") || name.equals("Wereld")) {
+                continue;
+            }
+            list.add(button(Component.text(name), "Open dit scherm.", 190, () -> {
+                menuBtnSet(sk, bk, "opens", name);
+                menuBtnSet(sk, bk, "command", null);
+                back.run();
+            }));
+        }
+        ConfigurationSection screens = menuEdits.getConfigurationSection("screens");
+        if (screens != null) {
+            for (String key : screens.getKeys(false)) {
+                ConfigurationSection sc = screens.getConfigurationSection(key);
+                if (sc == null || !sc.getBoolean("custom-screen", false)) {
+                    continue;
+                }
+                final String target = "custom:" + sc.getString("id", "");
+                list.add(button(Component.text(sc.getString("title", "Nieuw scherm"), NamedTextColor.LIGHT_PURPLE),
+                        "Open dit eigen scherm.", 190, () -> {
+                            menuBtnSet(sk, bk, "opens", target);
+                            menuBtnSet(sk, bk, "command", null);
+                            back.run();
+                        }));
+            }
+        }
+        showEditorDialog(admin, "Scherm kiezen", Component.text("Welk scherm moet deze knop openen?",
+                NamedTextColor.GRAY), list, backButton("Terug.", back));
+    }
+
+    // ---- the screen editor
+
+    private void openScreenEditor(Player admin, String sk) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        final boolean adv = menuAdvanced(admin);
+        final boolean customScreen = sk.startsWith("custom:");
+        final Runnable again = () -> openScreenEditor(admin, sk);
+        ConfigurationSection sc = menuScreenSection(sk, false);
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_MESSAGES, "Titel en tekst", NamedTextColor.WHITE),
+                "Pas de titel en de tekst bovenaan aan.", 190, () -> openScreenTextDialog(admin, sk, again)));
+        buttons.add(button(iconLabel(M_LAUNCH, "Knop toevoegen", NamedTextColor.GREEN),
+                "Maak een eigen knop op dit scherm.", 190, () -> {
+                    List<String[]> fields = new ArrayList<>();
+                    fields.add(new String[] {"label", "Naam van de knop", "", "100"});
+                    fields.add(new String[] {"tooltip", "Uitleg", "", "200"});
+                    openTextDialog(admin, "Knop toevoegen", adv ? "MiniMessage mag." : "Gewone tekst.", fields,
+                            values -> {
+                                String label = menuValue(values.get("label"));
+                                if (label.isEmpty()) {
+                                    admin.sendMessage(Component.text("Geef de knop een naam.", NamedTextColor.RED));
+                                    again.run();
+                                    return;
+                                }
+                                String id = Long.toString(System.currentTimeMillis(), 36)
+                                        + Integer.toString(menuRandom.nextInt(1296), 36);
+                                String bk = "@" + id;
+                                menuBtnSet(sk, bk, "label", label);
+                                String tip = menuValue(values.get("tooltip"));
+                                menuBtnSet(sk, bk, "tooltip", tip.isEmpty() ? null : tip);
+                                menuBtnSet(sk, bk, "mm", adv ? Boolean.TRUE : null);
+                                openButtonEditor(admin, sk, bk, true, null, label);
+                            }, again);
+                }));
+        buttons.add(stateButton("Geavanceerde modus", adv, "aan", "uit",
+                "Aan: breedte, voorwaarden, MiniMessage, eigen schermen en meer.", () -> {
+                    setMenuAdvanced(admin, !adv);
+                    again.run();
+                }));
+        if (adv) {
+            buttons.add(button(iconLabel(M_WORLD, "Nieuw scherm", NamedTextColor.GREEN),
+                    "Maak een helemaal eigen scherm. Open het met een knop.", 190, () -> {
+                        List<String[]> fields = new ArrayList<>();
+                        fields.add(new String[] {"title", "Titel van het scherm", "", "60"});
+                        openTextDialog(admin, "Nieuw scherm", "Daarna voeg je er knoppen aan toe.", fields, values -> {
+                            String title = menuValue(values.get("title"));
+                            if (title.isEmpty()) {
+                                admin.sendMessage(Component.text("Geef het scherm een titel.", NamedTextColor.RED));
+                                again.run();
+                                return;
+                            }
+                            String id = Long.toString(System.currentTimeMillis(), 36)
+                                    + Integer.toString(menuRandom.nextInt(1296), 36);
+                            ConfigurationSection created = menuScreenSection("custom:" + id, true);
+                            created.set("custom-screen", true);
+                            created.set("id", id);
+                            created.set("title", title);
+                            saveMenuEdits();
+                            menuEditMode.add(admin.getUniqueId());
+                            openCustomScreen(admin, id);
+                        }, again);
+                    }));
+            buttons.add(button(iconLabel(M_WORLD, "Mijn schermen", NamedTextColor.AQUA),
+                    "Alle schermen die je zelf gemaakt hebt.", 190, () -> openMyScreens(admin, again)));
+            buttons.add(button(iconLabel(M_BACK, "Alles terugzetten", NamedTextColor.RED),
+                    "Wist alle aanpassingen aan alle menu's.", 190, () -> confirm(admin, "Alles terugzetten?",
+                            "Alle aanpassingen en eigen schermen verdwijnen.",
+                            "De menu's zien er weer uit zoals ze in de code staan.",
+                            Component.text("Ja, alles wissen", NamedTextColor.RED), () -> {
+                                menuEdits.set("screens", null);
+                                saveMenuEdits();
+                                admin.sendMessage(Component.text("Alle menu-aanpassingen zijn gewist.",
+                                        NamedTextColor.GREEN));
+                                openMenu(admin);
+                            }, again)));
+        }
+        if (customScreen) {
+            buttons.add(button(iconLabel(M_BACK, "Scherm verwijderen", NamedTextColor.RED),
+                    "Haalt dit eigen scherm helemaal weg.", 190, () -> confirm(admin, "Scherm verwijderen?",
+                            "Dit eigen scherm met al zijn knoppen verdwijnt.",
+                            "Knoppen die dit scherm openen doen daarna niets meer.",
+                            Component.text("Ja, verwijderen", NamedTextColor.RED), () -> {
+                                menuEdits.set("screens." + ykey(sk), null);
+                                saveMenuEdits();
+                                openMenu(admin);
+                            }, again)));
+        } else if (sc != null) {
+            buttons.add(button(iconLabel(M_BACK, "Dit scherm terugzetten", NamedTextColor.RED),
+                    "Wist alle aanpassingen van dit scherm.", 190, () -> confirm(admin, "Scherm terugzetten?",
+                            "Alle aanpassingen aan dit scherm verdwijnen.",
+                            "Het scherm ziet er weer uit zoals in de code.",
+                            Component.text("Ja, terugzetten", NamedTextColor.RED), () -> {
+                                menuEdits.set("screens." + ykey(sk), null);
+                                saveMenuEdits();
+                                reopenScreen(admin, sk);
+                            }, again)));
+        }
+        Component body = joinLines(
+                statusLine("Scherm", sk, NamedTextColor.WHITE),
+                statusLine("Modus", adv ? "geavanceerd" : "simpel", adv ? NamedTextColor.AQUA : NamedTextColor.GREEN));
+        showEditorDialog(admin, "Scherm bewerken", body, buttons,
+                backButton("Terug naar het scherm.", () -> reopenScreen(admin, sk)));
+    }
+
+    private void openScreenTextDialog(Player admin, String sk, Runnable back) {
+        final boolean adv = menuAdvanced(admin);
+        ConfigurationSection sc = menuScreenSection(sk, false);
+        List<String[]> fields = new ArrayList<>();
+        fields.add(new String[] {"title", "Titel (leeg = standaard)", sc == null ? "" : sc.getString("title", ""), "60"});
+        fields.add(new String[] {"extra", "Extra tekst onder de status", sc == null ? "" : sc.getString("body-extra", ""),
+                "300"});
+        if (adv) {
+            fields.add(new String[] {"body", "Statustekst vervangen (leeg = live status)",
+                    sc == null ? "" : sc.getString("body", ""), "300"});
+            fields.add(new String[] {"columns", "Kolommen (1 tot 4, leeg = standaard)",
+                    sc == null || sc.getInt("columns", 0) == 0 ? "" : String.valueOf(sc.getInt("columns", 0)), "1"});
+        }
+        openTextDialog(admin, "Titel en tekst", adv ? "MiniMessage mag in de tekstvelden, <br> is een nieuwe regel."
+                : "Gewone tekst.", fields, values -> {
+                    ConfigurationSection target = menuScreenSection(sk, true);
+                    String title = menuValue(values.get("title"));
+                    String extra = menuValue(values.get("extra"));
+                    target.set("title", title.isEmpty() ? null : title);
+                    target.set("body-extra", extra.isEmpty() ? null : extra);
+                    if (adv) {
+                        String body = menuValue(values.get("body"));
+                        target.set("body", body.isEmpty() ? null : body);
+                        String cols = menuValue(values.get("columns"));
+                        if (cols.isEmpty()) {
+                            target.set("columns", null);
+                        } else {
+                            try {
+                                int c = Integer.parseInt(cols);
+                                target.set("columns", c >= 1 && c <= 4 ? c : null);
+                            } catch (NumberFormatException e) {
+                                admin.sendMessage(Component.text("Kolommen moet een getal van 1 tot 4 zijn.",
+                                        NamedTextColor.RED));
+                            }
+                        }
+                    }
+                    target.set("mm", adv ? Boolean.TRUE : null);
+                    saveMenuEdits();
+                    back.run();
+                }, back);
+    }
+
+    private void openMyScreens(Player admin, Runnable back) {
+        List<ActionButton> list = new ArrayList<>();
+        ConfigurationSection screens = menuEdits.getConfigurationSection("screens");
+        if (screens != null) {
+            for (String key : screens.getKeys(false)) {
+                ConfigurationSection sc = screens.getConfigurationSection(key);
+                if (sc == null || !sc.getBoolean("custom-screen", false)) {
+                    continue;
+                }
+                final String id = sc.getString("id", "");
+                list.add(button(Component.text(sc.getString("title", "Nieuw scherm"), NamedTextColor.LIGHT_PURPLE),
+                        "Open dit scherm.", 190, () -> {
+                            menuEditMode.add(admin.getUniqueId());
+                            openCustomScreen(admin, id);
+                        }));
+            }
+        }
+        showEditorDialog(admin, "Mijn schermen", Component.text(list.isEmpty() ? "Je hebt nog geen eigen schermen."
+                : "Kies een scherm om te openen.", NamedTextColor.GRAY), list, backButton("Terug.", back));
+    }
+
+    /** A screen made in the editor: a title, a text and only the buttons put on it. */
+    private void openCustomScreen(Player admin, String id) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        String key = "custom:" + id;
+        ConfigurationSection sc = menuScreenSection(key, false);
+        if (sc == null || !sc.getBoolean("custom-screen", false)) {
+            admin.sendMessage(Component.text("Dit scherm bestaat niet meer.", NamedTextColor.RED));
+            openMenu(admin);
+            return;
+        }
+        showMenuKeyed(admin, key, sc.getString("title", "Nieuw scherm"), Component.empty(), new ArrayList<>(),
+                backButton("Terug naar Home.", () -> openMenu(admin)));
+    }
+
+    /** Switch edit mode on or off for this admin (command /lowkey menu edit). */
+    private void toggleMenuEditMode(Player admin) {
+        if (menuEditMode.remove(admin.getUniqueId())) {
+            admin.sendMessage(Component.text("Bewerkmodus staat uit.", NamedTextColor.GREEN));
+        } else {
+            menuEditMode.add(admin.getUniqueId());
+            admin.sendMessage(Component.text("Bewerkmodus staat aan. Klik op een knop om hem aan te passen. "
+                    + "Onderaan elk scherm kun je het scherm zelf bewerken.", NamedTextColor.GREEN));
+        }
     }
 
     // ---- testing and repairing
@@ -6553,6 +8729,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return Material.TOTEM_OF_UNDYING;
             case "Titel testen":
                 return Material.OAK_SIGN;
+            case "Finale":
+                return Material.DRAGON_HEAD;
+            case "Gelijkspel":
+                return Material.TOTEM_OF_UNDYING;
             default:
                 return Material.BOOK;
         }
@@ -6582,20 +8762,36 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      */
     private void showThemedMenu(Player admin, String title, Component body, List<ActionButton> buttons,
                                 ActionButton exit, boolean withHome, boolean compact) {
+        showThemedMenuKeyed(admin, title, title, body, buttons, exit, withHome, compact);
+    }
+
+    private void showThemedMenuKeyed(Player admin, String key, String title, Component body,
+                                     List<ActionButton> buttons, ActionButton exit, boolean withHome,
+                                     boolean compact) {
+        EditedScreen es = applyMenuEdits(admin, key, title, body, buttons, compact ? 190 : 150, compact ? 2 : 1);
+        boolean cards = !compact && es.columns == 1;
+        int homeWidth = cards ? 380 : (compact ? 190 : widthForColumns(es.columns));
         List<ActionButton> all = new ArrayList<>();
-        for (ActionButton b : buttons) {
-            all.add(compact ? b : cardButton(b));
+        for (ActionButton b : es.buttons) {
+            if (cards) {
+                all.add(cardButton(b));
+            } else if (!compact) {
+                all.add(withWidth(b, widthForColumns(es.columns)));
+            } else {
+                all.add(b);
+            }
         }
         if (withHome) {
             ActionButton home = button(iconLabel(M_WORLD, "Home", NamedTextColor.LIGHT_PURPLE),
-                    "Terug naar het beginscherm.", compact ? 190 : 380, () -> openMenu(admin));
-            all.add(compact ? home : cardButton(home));
+                    "Terug naar het beginscherm.", homeWidth, () -> openMenu(admin));
+            all.add(cards ? cardButton(home) : home);
         }
         List<DialogBody> bodies = new ArrayList<>();
-        bodies.add(headerCard(screenIcon(title), body));
+        bodies.add(headerCard(screenIcon(key), es.body));
+        final int columns = es.columns;
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(themedTitle(title)).body(bodies).build())
-                .type(DialogType.multiAction(all, exit, compact ? 2 : 1)));
+                .base(DialogBase.builder(themedTitle(es.title)).body(bodies).build())
+                .type(DialogType.multiAction(all, exit, columns)));
         admin.showDialog(dialog);
     }
 
@@ -6693,8 +8889,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "De ene mace: cooldown, houder en reset.", 380, () -> mace.openMenu(admin)));
         raw.add(button(iconLabel(M_BORDERS, "Checklist", NamedTextColor.WHITE),
                 "Alles wat je moet doen voor je de grenzen dropt.", 380, () -> openChecklistMenu(admin)));
+        raw.add(button(iconLabel(M_BORDERS, "Finale", NamedTextColor.LIGHT_PURPLE),
+                "De krimpende border, de winnaarsshow en de instellingen.", 380, () -> openFinaleMenu(admin)));
         raw.add(button(iconLabel(M_REVIVE, "Testen en herstellen", NamedTextColor.AQUA),
                 "Reviven, teams en launch resetten, alles terugzetten.", 380, () -> openRepairMenu(admin)));
+        raw.add(button(iconLabel(M_MESSAGES, "Menu bewerken", NamedTextColor.YELLOW),
+                "Pas alle menu's aan in de game zelf: teksten, iconen, volgorde en eigen knoppen.", 380, () -> {
+                    menuEditMode.add(admin.getUniqueId());
+                    openMenu(admin);
+                }));
         raw.add(button(iconLabel(M_BACK, "Klassiek menu", NamedTextColor.GRAY),
                 "Schakel terug naar het oude menu-ontwerp.", 380, () -> {
                     setMenuDesign(admin, false);
@@ -6704,15 +8907,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             raw.add(button(Component.text("Uitloggen", NamedTextColor.RED),
                     "Log uit en verlies je toegang tot /lowkey en de commands.", 380, () -> logout(admin, true)));
         }
+        EditedScreen es = applyMenuEdits(admin, "Beheer", "Beheer", header, raw, 380, 1);
+        bodies.set(0, headerCard(Material.NETHER_STAR, es.body));
         List<ActionButton> all = new ArrayList<>();
-        for (ActionButton b : raw) {
-            all.add(cardButton(b));
+        for (ActionButton b : es.buttons) {
+            all.add(es.columns == 1 ? cardButton(b) : withWidth(b, widthForColumns(es.columns)));
         }
         ActionButton close = ActionButton.create(Component.text("Sluiten", NamedTextColor.GRAY),
-                Component.text("Sluit dit menu."), 380, null);
+                Component.text("Sluit dit menu."), widthForColumns(es.columns), null);
+        final int homeColumns = es.columns;
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(themedTitle("Beheer")).body(bodies).build())
-                .type(DialogType.multiAction(all, close, 1)));
+                .base(DialogBase.builder(themedTitle(es.title)).body(bodies).build())
+                .type(DialogType.multiAction(all, close, homeColumns)));
         admin.showDialog(dialog);
     }
 
@@ -7086,7 +9292,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return names;
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("menu")) {
-            List<String> menuOptions = new ArrayList<>(Arrays.asList("nieuw", "klassiek"));
+            List<String> menuOptions = new ArrayList<>(Arrays.asList("nieuw", "klassiek", "edit", "geavanceerd", "simpel"));
             menuOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
             return menuOptions;
         }
@@ -7094,6 +9300,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             List<String> eventOptions = new ArrayList<>(Arrays.asList("start", "test", "stop", "camera", "teams", "reset"));
             eventOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
             return eventOptions;
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("finale")) {
+            List<String> finaleOptions = new ArrayList<>(Arrays.asList("menu", "start", "pauze", "hervat", "stop", "status", "test"));
+            finaleOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
+            return finaleOptions;
         }
         List<String> options = new ArrayList<>();
         if (args.length == 1) {
@@ -7123,6 +9334,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("losers");
             options.add("tijdlijn");
             options.add("end");
+            options.add("finale");
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
