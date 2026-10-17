@@ -213,9 +213,26 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private static final String M_SAY = "\uE04F";
     private static final String M_DONATE = "\uE050";
     private static final String M_BACK = "\uE051";
-    private static final String M_COUNTDOWN = "\uE052";
+    static final String M_COUNTDOWN = "\uE052";
     /** the mace icon of the Mace tab: add \uE053 to tags.json with the vanilla mace item texture */
     static final String M_MACE = "\uE053";
+    // more vanilla item icons (menu_*.png in the resource pack)
+    static final String M_FEATHER = "\uE070";
+    static final String M_BARRIER = "\uE071";
+    static final String M_WATER = "\uE072";
+    static final String M_SIGN = "\uE073";
+    static final String M_DIAMOND = "\uE074";
+    static final String M_FIRE = "\uE075";
+    static final String M_COMPASS = "\uE076";
+    static final String M_PICKAXE = "\uE077";
+    static final String M_DOOR = "\uE078";
+    static final String M_HEART = "\uE079";
+    static final String M_LAVA = "\uE07A";
+    static final String M_REDSTONE = "\uE07B";
+    static final String M_STAR = "\uE07C";
+    static final String M_HORN = "\uE07D";
+    static final String M_BONE = "\uE07E";
+    static final String M_ENDCRYSTAL = "\uE07F";
 
     /** -1 px space: pieces of a wide picture are joined with this so there is no seam */
     private static final String SPACER = "\uE010";
@@ -419,10 +436,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(this, this);
         mace = new MaceManager(this);
         mace.start();
-        loadChecklist();
         loadEventCamera();
-        loadMenuDesigns();
-        loadMenuEdits();
         finaleOnEnable();
 
         LocalTime startupTime = LocalTime.now(LOWKEY_ZONE);
@@ -3456,10 +3470,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey mace [status|aan|uit|cooldown <minuten>|cooldownreset|give <speler>|reset|test <noord|zuid|geen>] : de ene mace van de server
      * /lowkey event <start|test [aantal]|stop|camera|teams|reset> : het team verdeling event (camera, shuffle, teams toepassen)
      * /lowkey losers <create [seed]|tp|setspawn|open|close|return <speler>|delete> : het Verliezerseiland (aparte survival wereld, rode ster)
-     * /lowkey menu [nieuw|klassiek] : opent het beheerpaneel in het nieuwe of het klassieke ontwerp (per admin onthouden)
-     * /lowkey tijdlijn : alle dagen van 7 tot 21 nov met wat je moet doen, plus testen en herstellen
+     * /lowkey menu : opent het beheerpaneel
      * /lowkey end <open|close> : opent of sluit het End (bij openen: titel + bericht voor iedereen)
-     * /lowkey checklist : de checklist met alles wat je moet doen voor je de grenzen dropt
      * /lowkey say <bericht> : stuurt een bericht met de LOWKEY badge naar iedereen
      */
     @Override
@@ -3501,21 +3513,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             sender.sendMessage(Component.text("De pincode is aangepast.", NamedTextColor.GREEN));
             return true;
         }
-        if (sender instanceof Player && args.length == 2 && args[0].equalsIgnoreCase("menu")) {
-            String choice = args[1].toLowerCase(Locale.ROOT);
-            if (choice.equals("klassiek") || choice.equals("classic")) {
-                setMenuDesign((Player) sender, false);
-            } else if (choice.equals("nieuw") || choice.equals("new")) {
-                setMenuDesign((Player) sender, true);
-            } else if (choice.equals("edit") || choice.equals("bewerk") || choice.equals("bewerken")) {
-                toggleMenuEditMode((Player) sender);
-            } else if (choice.equals("geavanceerd") || choice.equals("advanced")) {
-                setMenuAdvanced((Player) sender, true);
-                sender.sendMessage(Component.text("Geavanceerde modus staat aan.", NamedTextColor.GREEN));
-            } else if (choice.equals("simpel") || choice.equals("simple")) {
-                setMenuAdvanced((Player) sender, false);
-                sender.sendMessage(Component.text("Simpele modus staat aan.", NamedTextColor.GREEN));
-            }
+        if (sender instanceof Player && args.length >= 1 && args[0].equalsIgnoreCase("menu")) {
             openMenu((Player) sender);
             return true;
         }
@@ -3663,14 +3661,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     NamedTextColor.GRAY));
             return true;
         }
-        if (args.length >= 1 && (args[0].equalsIgnoreCase("tijdlijn") || args[0].equalsIgnoreCase("timeline"))) {
-            if (sender instanceof Player) {
-                openTimelineMenu((Player) sender);
-            } else {
-                sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
-            }
-            return true;
-        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("end")) {
             if (args.length == 2 && args[1].equalsIgnoreCase("open")) {
                 setEnd(true);
@@ -3780,14 +3770,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             handleEventCommand(sender, args);
             return true;
         }
-        if (args.length == 1 && args[0].equalsIgnoreCase("checklist")) {
-            if (sender instanceof Player) {
-                openChecklistMenu((Player) sender);
-            } else {
-                sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
-            }
-            return true;
-        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("mace")) {
             mace.handleCommand(sender, Arrays.copyOfRange(args, 1, args.length));
             return true;
@@ -3855,7 +3837,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return true;
         }
         sender.sendMessage(Component.text(
-                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test>  |  /lowkey checklist  |  /lowkey event <start|test|stop|camera|teams|reset>  |  /lowkey losers <create|tp|setspawn|open|close|return|returnall|delete>  |  /lowkey end <open|close>  |  /lowkey tijdlijn  |  /lowkey say <bericht>",
+                "Gebruik: /lowkey grace <speler> <minuten>  |  /lowkey graceall [minuten]  |  /lowkey team <speler> <noord|zuid|geen>  |  /lowkey crew <speler> <aan|uit>  |  /lowkey nether <open|close>  |  /lowkey server <open|close>  |  /lowkey border <open|close>  |  /lowkey revive <speler>  |  /lowkey donate  |  /lowkey website  |  /lowkey launch [reset]  |  /lowkey lobby <create|tp|setspawn|delete>  |  /lowkey setspawn <noord|zuid>  |  /lowkey main  |  /lowkey mainworld <open|close>  |  /lowkey seed <seed|random|cancel>  |  /lowkey pin <pincode>  |  /lowkey countdown <spawn|remove|set|size>  |  /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test>  |  /lowkey event <start|test|stop|camera|teams|reset>  |  /lowkey losers <create|tp|setspawn|open|close|return|returnall|delete>  |  /lowkey end <open|close>  |  /lowkey say <bericht>",
                 NamedTextColor.GRAY));
         return true;
     }
@@ -3880,7 +3862,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
             getServer().getScheduler().runTask(this, action);
         }, CLICK_OPTIONS);
-        buttonActions.put(dialogAction, action);
         return ActionButton.create(label, Component.text(tooltip), width, dialogAction);
     }
 
@@ -3920,75 +3901,61 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return button(iconLabel(M_BACK, "Terug", NamedTextColor.GRAY), tooltip, 150, back);
     }
 
-    void showMenu(Player admin, String title, Component body, List<ActionButton> buttons, ActionButton exit) {
-        showMenuKeyed(admin, title, title, body, buttons, exit);
-    }
+    // ------------------------------------------------------------------ menus (one design: the classic one)
 
-    /** The key says which screen this is (for the menu editor), the title is what is shown. */
-    void showMenuKeyed(Player admin, String key, String title, Component body, List<ActionButton> buttons,
-                       ActionButton exit) {
-        if (newDesign(admin)) {
-            showThemedMenuKeyed(admin, key, title, body, buttons, exit, true, false);
-            return;
-        }
-        EditedScreen es = applyMenuEdits(admin, key, title, body, buttons, 150, 2);
+    void showMenu(Player admin, String title, Component body, List<ActionButton> buttons, ActionButton exit) {
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, es.title))
-                        .body(List.of(DialogBody.plainMessage(es.body)))
+                .base(DialogBase.builder(menuTitle(title))
+                        .body(List.of(DialogBody.plainMessage(body)))
                         .build())
-                .type(DialogType.multiAction(es.buttons, exit, es.columns)));
+                .type(DialogType.multiAction(buttons, exit, 2)));
         admin.showDialog(dialog);
     }
 
-    /** The main menu: the new Home or the classic menu, whatever this admin chose. */
-    void openMenu(Player admin) {
-        if (newDesign(admin)) {
-            openHome(admin);
-        } else {
-            openClassicMenu(admin);
-        }
+    /** Title for any dialog. */
+    Component dlgTitle(Player admin, String text) {
+        return menuTitle(text);
     }
 
-    /** The classic main menu (the old design). */
-    private void openClassicMenu(Player admin) {
+    private static final PlainTextComponentSerializer PLAIN = PlainTextComponentSerializer.plainText();
+
+    /** A switch that shows its state: [OPEN] Nether. Click to flip it. */
+    private ActionButton stateButton(String name, boolean on, String onText, String offText, String tooltip,
+                                     Runnable action) {
+        Component label = Component.text()
+                .append(Component.text("[" + (on ? onText : offText).toUpperCase(Locale.ROOT) + "] ",
+                        on ? NamedTextColor.GREEN : NamedTextColor.RED, TextDecoration.BOLD))
+                .append(Component.text(name, NamedTextColor.WHITE))
+                .build();
+        return button(label, tooltip, 150, action);
+    }
+
+    /** The main menu. */
+    void openMenu(Player admin) {
         if (!admin.isOnline()) {
             return;
         }
         List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(iconLabel(M_COUNTDOWN, "Tijdlijn", NamedTextColor.GREEN),
-                "Alle dagen van 7 tot 21 nov met wat je moet doen.", 150, () -> openTimelineMenu(admin)));
         buttons.add(button(iconLabel(M_SERVER, "Server", NamedTextColor.WHITE),
-                "Launch en server open of dicht.", 150, () -> openServerMenu(admin)));
-        buttons.add(button(iconLabel(M_WORLD, "Wereld", NamedTextColor.WHITE),
-                "Nether, grenzen, lobby en spawnpunten.", 150, () -> openWorldMenu(admin)));
-        buttons.add(button(iconLabel(M_PLAYERS, "Spelers", NamedTextColor.WHITE),
-                "Team, crew, grace en dood-status.", 150, () -> openPlayersMenu(admin)));
+                "Launch, main wereld en de server open of dicht.", 150, () -> openServerMenu(admin)));
         buttons.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
-                "Eigen bericht, donatiebericht en websitebericht.", 150, () -> openMessagesMenu(admin)));
+                "Countdown, eigen bericht, donatiebericht en websitebericht.", 150, () -> openMessagesMenu(admin)));
         buttons.add(button(iconLabel(M_MACE, "Mace", NamedTextColor.WHITE),
                 "De ene mace: cooldown, houder en reset.", 150, () -> mace.openMenu(admin)));
-        buttons.add(button(iconLabel(M_BORDERS, "Checklist", NamedTextColor.WHITE),
-                "Alles wat je moet doen voor je de grenzen dropt.", 150, () -> openChecklistMenu(admin)));
-        buttons.add(button(iconLabel(M_TEAM, "Team event", NamedTextColor.WHITE),
-                "Verdeel iedereen over Noord en Zuid met een show.", 150, () -> openEventMenu(admin)));
-        buttons.add(button(iconLabel(M_REVIVE, "Verliezerseiland", NamedTextColor.WHITE),
-                "De aparte wereld voor iedereen die dood is.", 150, () -> openLosersMenu(admin)));
+        buttons.add(button(iconLabel(M_TEAM, "Teams", NamedTextColor.WHITE),
+                "Noord en Zuid, grace, crew en elke speler apart.", 150, () -> openTeamsMenu(admin)));
+        buttons.add(button(iconLabel(M_WORLD, "Wereld", NamedTextColor.WHITE),
+                "Lobby, spawns, Nether, End en de grenzen.", 150, () -> openWorldMenu(admin)));
+        buttons.add(button(iconLabel(M_STAR, "Finale", NamedTextColor.LIGHT_PURPLE),
+                "De krimpende border en de winnaarsshow.", 150, () -> openFinaleMenu(admin)));
+        buttons.add(button(iconLabel(M_HORN, "Event", NamedTextColor.WHITE),
+                "Het team event en het Verliezerseiland.", 150, () -> openEventHub(admin)));
+        buttons.add(button(iconLabel(M_REVIVE, "Testen en herstellen", NamedTextColor.WHITE),
+                "Reviven, resetten en alles terugzetten.", 150, () -> openRepairMenu(admin)));
         if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
             buttons.add(button(Component.text("Uitloggen", NamedTextColor.RED),
                     "Log uit en verlies je toegang tot /lowkey en de commands.", 150, () -> logout(admin, true)));
         }
-        buttons.add(button(iconLabel(M_BORDERS, "Finale", NamedTextColor.LIGHT_PURPLE),
-                "De krimpende border, de winnaarsshow en de instellingen.", 150, () -> openFinaleMenu(admin)));
-        buttons.add(button(iconLabel(M_MESSAGES, "Menu bewerken", NamedTextColor.YELLOW),
-                "Pas alle menu's aan in de game zelf.", 150, () -> {
-                    menuEditMode.add(admin.getUniqueId());
-                    openMenu(admin);
-                }));
-        buttons.add(button(iconLabel(M_BACK, "Nieuw menu", NamedTextColor.GREEN),
-                "Schakel naar het nieuwe menu-ontwerp.", 150, () -> {
-                    setMenuDesign(admin, true);
-                    openMenu(admin);
-                }));
         ActionButton close = ActionButton.create(Component.text("Sluiten", NamedTextColor.GRAY),
                 Component.text("Sluit dit menu."), 150, null);
 
@@ -4003,27 +3970,24 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Grenzen", bordersDropped ? "open" : "dicht",
                         bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Finale", finaleStateText(),
+                        finaleState == FinaleState.RUNNING ? NamedTextColor.GREEN : NamedTextColor.GRAY),
                 statusLine("Online", String.valueOf(getServer().getOnlinePlayers().size()), NamedTextColor.WHITE));
         showMenu(admin, "LowkeySMP Beheer", status, buttons, close);
     }
 
-    // ---- section: Server
+    // ---- Server
 
     private void openServerMenu(Player admin) {
         if (!admin.isOnline()) {
             return;
         }
-        if (newDesign(admin)) {
-            openNewWorldMenu(admin);
-            return;
-        }
-        Runnable back = () -> openMenu(admin);
+        Runnable again = () -> openServerMenu(admin);
         List<ActionButton> buttons = new ArrayList<>();
 
         if (!launched) {
             buttons.add(button(iconLabel(M_LAUNCH, "Server launchen", NamedTextColor.GREEN),
-                    "Stuurt iedereen met een team naar zijn team spawn.", 150,
-                    () -> openLaunchConfirm(admin, () -> openServerMenu(admin))));
+                    "Stuurt iedereen met een team naar zijn team spawn.", 150, () -> openLaunchConfirm(admin, again)));
         } else {
             buttons.add(button(iconLabel(M_LAUNCH, "Launch resetten", NamedTextColor.RED),
                     "Zet de launch terug (voor testen). Niemand wordt verplaatst.", 150, () -> confirm(admin,
@@ -4033,9 +3997,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             Component.text("Ja, resetten", NamedTextColor.RED),
                             () -> {
                                 resetLaunch(admin);
-                                openServerMenu(admin);
+                                again.run();
                             },
-                            () -> openServerMenu(admin))));
+                            again)));
         }
 
         if (mainOpen) {
@@ -4047,26 +4011,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             Component.text("Ja, sluiten", NamedTextColor.RED),
                             () -> {
                                 closeMainWorld(admin);
-                                openServerMenu(admin);
+                                again.run();
                             },
-                            () -> openServerMenu(admin))));
+                            again)));
         } else {
             buttons.add(button(iconLabel(M_MAIN, "Main wereld openen", NamedTextColor.GREEN),
                     "Spelers in de lobby kunnen er weer in met hun item. Niemand wordt verplaatst.", 150, () -> {
                         openMainWorld(admin);
-                        openServerMenu(admin);
+                        again.run();
                     }));
         }
-
-        buttons.add(button(iconLabel(M_COUNTDOWN, "Countdown", NamedTextColor.WHITE),
-                "Hologram met de aftelling naar de start.", 150, () -> openCountdownMenu(admin)));
 
         if (serverClosed) {
             buttons.add(button(iconLabel(M_SERVER, "Server openen", NamedTextColor.GREEN),
                     "Maak de server weer open voor iedereen.", 150, () -> {
                         setServerClosed(false);
                         admin.sendMessage(Component.text("De server is weer open voor iedereen.", NamedTextColor.GREEN));
-                        openServerMenu(admin);
+                        again.run();
                     }));
         } else {
             buttons.add(button(iconLabel(M_SERVER, "Server sluiten", NamedTextColor.RED),
@@ -4084,9 +4045,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                                     setServerClosed(true);
                                     admin.sendMessage(Component.text("De server is nu gesloten.", NamedTextColor.GREEN));
                                 }
-                                openServerMenu(admin);
+                                again.run();
                             },
-                            () -> openServerMenu(admin))));
+                            again)));
         }
 
         Component body = joinLines(
@@ -4096,7 +4057,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         launched ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
                 statusLine("Main wereld", mainOpen ? "open" : "gesloten",
                         mainOpen ? NamedTextColor.GREEN : NamedTextColor.RED));
-        showMenu(admin, "Server", body, buttons, backButton("Terug naar het hoofdmenu.", back));
+        showMenu(admin, "Server", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
     }
 
     private void openLaunchConfirm(Player admin, Runnable back) {
@@ -4109,211 +4070,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 back);
     }
 
-    // ---- section: Wereld (an overview with three small screens: Nether en grenzen, Lobby, Spawnpunten)
-
-    private void openWorldMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        if (newDesign(admin)) {
-            openNewWorldMenu(admin);
-            return;
-        }
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(iconLabel(M_BORDERS, "Nether en grenzen", NamedTextColor.WHITE),
-                "Nether openen of sluiten en de grenzen droppen.", 150, () -> openAccessMenu(admin)));
-        buttons.add(button(iconLabel(M_LOBBY, "Lobby", NamedTextColor.WHITE),
-                "Lobby aanmaken, spawn, bescherming en verwijderen.", 150, () -> openLobbyMenu(admin)));
-        buttons.add(button(iconLabel(M_SPAWN_N, "Spawnpunten", NamedTextColor.WHITE),
-                "Spawn van Noord en Zuid en naar het main eiland.", 150, () -> openSpawnMenu(admin)));
-
-        Component body = joinLines(
-                statusLine("Nether", netherOpen ? "open" : "dicht",
-                        netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
-                statusLine("Grenzen", bordersDropped ? "open" : "dicht",
-                        bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
-                statusLine("Lobby", lobbyCreated ? "aangemaakt" : (lobbyExists() ? "oude rest" : "nog niet"),
-                        lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
-                        spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                statusLine("Spawn Zuid", spawnZuid != null ? "ingesteld" : "niet ingesteld",
-                        spawnZuid != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
-        showMenu(admin, "Wereld", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
-    }
-
-    /** Wereld > Nether en grenzen */
-    private void openAccessMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        List<ActionButton> buttons = new ArrayList<>();
-        if (netherOpen) {
-            buttons.add(button(iconLabel(M_NETHER, "Nether sluiten", NamedTextColor.RED),
-                    "Sluit de Nether weer. Wie erin zit kan er nog uit.", 150, () -> {
-                        setNether(false);
-                        openAccessMenu(admin);
-                    }));
-        } else {
-            buttons.add(button(iconLabel(M_NETHER, "Nether openen", NamedTextColor.GREEN),
-                    "Opent de Nether voor iedereen, met titel en bericht.", 150, () -> confirm(admin,
-                            "Nether openen?",
-                            "Iedereen krijgt de titel en het bericht dat de Nether open is.",
-                            "Je kunt hem later weer sluiten.",
-                            Component.text("Ja, openen", NamedTextColor.GREEN),
-                            () -> {
-                                setNether(true);
-                                openAccessMenu(admin);
-                            },
-                            () -> openAccessMenu(admin))));
-        }
-        buttons.add(endToggle(admin, () -> openAccessMenu(admin)));
-        if (bordersDropped) {
-            buttons.add(button(iconLabel(M_BORDERS, "Grenzen dicht", NamedTextColor.RED),
-                    "Noord en Zuid zien daarna weer alleen hun eigen chat.", 150, () -> {
-                        setBordersDropped(false);
-                        openAccessMenu(admin);
-                    }));
-        } else {
-            buttons.add(button(iconLabel(M_BORDERS, "Grenzen droppen", NamedTextColor.GREEN),
-                    "Opent eerst de checklist, zodat je niks vergeet.", 150, () -> openChecklistMenu(admin)));
-        }
-        Component body = joinLines(
-                statusLine("Nether", netherOpen ? "open" : "dicht",
-                        netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
-                statusLine("End", endOpen ? "open" : "dicht",
-                        endOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
-                statusLine("Grenzen", bordersDropped ? "open" : "dicht",
-                        bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
-                statusLine("Checklist", (BORDER_STEPS.size() - missingChecklistSteps().size()) + " van " + BORDER_STEPS.size(),
-                        missingChecklistSteps().isEmpty() ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
-        showMenu(admin, "Nether en grenzen", body, buttons, backButton("Terug naar wereld.", () -> openWorldMenu(admin)));
-    }
-
-    /** Wereld > Lobby */
-    private void openLobbyMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        List<ActionButton> buttons = new ArrayList<>();
-        if (lobbyCreated && lobbyWorld() != null) {
-            buttons.add(button(iconLabel(M_LOBBY, "Naar de lobby", NamedTextColor.WHITE),
-                    "Teleporteert jou naar de lobby.", 150, () -> teleportAdminToLobby(admin)));
-            buttons.add(button(iconLabel(M_LOBBY, "Lobby spawn zetten", NamedTextColor.WHITE),
-                    "Zet het lobby spawnpunt op jouw plek. Je moet in de lobby staan.", 150, () -> {
-                        setLobbySpawn(admin);
-                        openLobbyMenu(admin);
-                    }));
-        } else {
-            buttons.add(button(iconLabel(M_LOBBY, "Lobby aanmaken", NamedTextColor.GREEN),
-                    "Maakt de lege lobby wereld met een klein platform.", 150, () -> {
-                        createLobby(admin);
-                        openLobbyMenu(admin);
-                    }));
-        }
-        if (lobbyProtect) {
-            buttons.add(button(iconLabel(M_LOBBY, "Bescherming uit", NamedTextColor.RED),
-                    "Zet sneeuw, vuur, water, explosies en groei in de lobby weer aan, bijvoorbeeld om te bouwen.", 150, () -> {
-                        setLobbyProtect(false);
-                        openLobbyMenu(admin);
-                    }));
-        } else {
-            buttons.add(button(iconLabel(M_LOBBY, "Bescherming aan", NamedTextColor.GREEN),
-                    "Zet sneeuw, vuur, water, explosies en groei in de lobby uit.", 150, () -> {
-                        setLobbyProtect(true);
-                        openLobbyMenu(admin);
-                    }));
-        }
-        if (lobbyExists()) {
-            buttons.add(button(iconLabel(M_LOBBY, "Lobby verwijderen", NamedTextColor.RED),
-                    "Wist de hele lobby wereld, ook oude resten.", 150,
-                    () -> openLobbyDeleteConfirm(admin, () -> openLobbyMenu(admin))));
-        }
-        Component body = joinLines(
-                statusLine("Lobby", lobbyCreated ? "aangemaakt" : (lobbyExists() ? "oude rest" : "nog niet"),
-                        lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                statusLine("Bescherming", lobbyProtect ? "aan" : "uit",
-                        lobbyProtect ? NamedTextColor.GREEN : NamedTextColor.RED));
-        showMenu(admin, "Lobby", body, buttons, backButton("Terug naar wereld.", () -> openWorldMenu(admin)));
-    }
-
-    /** Wereld > Spawnpunten */
-    private void openSpawnMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(iconLabel(M_SPAWN_N, "Spawn Noord zetten", NamedTextColor.RED),
-                "Zet het spawnpunt van Noord op jouw plek.", 150, () -> {
-                    setTeamSpawn(admin, Side.NOORD);
-                    openSpawnMenu(admin);
-                }));
-        buttons.add(button(iconLabel(M_SPAWN_Z, "Spawn Zuid zetten", NamedTextColor.BLUE),
-                "Zet het spawnpunt van Zuid op jouw plek.", 150, () -> {
-                    setTeamSpawn(admin, Side.ZUID);
-                    openSpawnMenu(admin);
-                }));
-        buttons.add(button(iconLabel(M_MAIN, "Naar main eiland", NamedTextColor.WHITE),
-                "Teleporteert jou naar de gamewereld (laatste plek of team spawn).", 150,
-                () -> enterGame(admin, false, true)));
-        Component body = joinLines(
-                statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
-                        spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                statusLine("Spawn Zuid", spawnZuid != null ? "ingesteld" : "niet ingesteld",
-                        spawnZuid != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
-        showMenu(admin, "Spawnpunten", body, buttons, backButton("Terug naar wereld.", () -> openWorldMenu(admin)));
-    }
-
-    // ---- section: Spelers
-
-    private void openPlayersMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        if (newDesign(admin)) {
-            openNewPlayersMenu(admin);
-            return;
-        }
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(iconLabel(M_TEAM, "Team instellen", NamedTextColor.WHITE),
-                "Zet een speler in Noord, Zuid of geen team.", 150,
-                () -> pickPlayer(admin, "Team instellen", target -> pickTeam(admin, target))));
-        buttons.add(button(iconLabel(M_CREW, "Crew badge", NamedTextColor.WHITE),
-                "Geef of verwijder de crew-badge van een speler.", 150,
-                () -> pickPlayer(admin, "Crew badge", target -> pickCrew(admin, target))));
-        buttons.add(button(iconLabel(M_GRACE, "Grace instellen", NamedTextColor.WHITE),
-                "Zet de grace tijd van een speler.", 150,
-                () -> pickPlayer(admin, "Grace instellen", target -> pickGrace(admin, target))));
-        buttons.add(button(iconLabel(M_GRACE, "Grace voor iedereen", NamedTextColor.WHITE),
-                "Zet de grace van alle spelers weer op de standaard tijd, ook van spelers die nu offline zijn.", 150,
-                () -> {
-                    resetGraceForEveryone(admin, graceMillis / 60_000L);
-                    openPlayersMenu(admin);
-                }));
-        buttons.add(button(iconLabel(M_REVIVE, "Dood-status weg", NamedTextColor.WHITE),
-                "Verwijdert de uitgeschakeld-status van een speler (vooral voor testen).", 150,
-                () -> pickPlayer(admin, "Dood-status verwijderen", target -> {
-                    clearEliminated(target);
-                    admin.sendMessage(Component.text(
-                            "Dood-status van " + target.getName() + " is verwijderd.", NamedTextColor.GREEN));
-                    openPlayersMenu(admin);
-                })));
-        buttons.add(button(iconLabel(M_LOBBY, "LowkeySMP ster geven", NamedTextColor.WHITE),
-                "Geeft een speler in de lobby de LowkeySMP nether star (hotbar slot 5).", 150,
-                () -> pickPlayer(admin, "LowkeySMP ster geven", target -> {
-                    giveLobbyItemTo(admin, target);
-                    openPlayersMenu(admin);
-                })));
-        Component body = Component.text("Kies wat je wilt aanpassen. Daarna kies je de speler.", NamedTextColor.GRAY);
-        showMenu(admin, "Spelers", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
-    }
-
-    // ---- section: Berichten
+    // ---- Berichten
 
     private void openMessagesMenu(Player admin) {
         if (!admin.isOnline()) {
             return;
         }
         List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_COUNTDOWN, "Countdown", NamedTextColor.WHITE),
+                "Hologram met de aftelling naar de start.", 150, () -> openCountdownMenu(admin)));
         buttons.add(button(iconLabel(M_SAY, "Eigen bericht", NamedTextColor.WHITE),
                 "Stuur een bericht met de LOWKEY badge naar iedereen.", 150, () -> openSayDialog(admin)));
         buttons.add(button(iconLabel(M_DONATE, "Donatiebericht", NamedTextColor.WHITE),
@@ -4369,24 +4134,449 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         admin.showDialog(dialog);
     }
 
+    // ---- Wereld
+
+    private void openWorldMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        Runnable again = () -> openWorldMenu(admin);
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_LOBBY, "Naar de lobby", NamedTextColor.WHITE),
+                "Teleporteert jou naar de lobby.", 150, () -> teleportAdminToLobby(admin)));
+        buttons.add(button(iconLabel(M_MAIN, "Naar main eiland", NamedTextColor.WHITE),
+                "Teleporteert jou naar de gamewereld (laatste plek of team spawn).", 150,
+                () -> enterGame(admin, false, true)));
+        buttons.add(button(iconLabel(M_SPAWN_N, "Spawn Noord zetten", NamedTextColor.RED),
+                "Zet het spawnpunt van Noord op jouw plek.", 150, () -> {
+                    setTeamSpawn(admin, Side.NOORD);
+                    again.run();
+                }));
+        buttons.add(button(iconLabel(M_SPAWN_Z, "Spawn Zuid zetten", NamedTextColor.BLUE),
+                "Zet het spawnpunt van Zuid op jouw plek.", 150, () -> {
+                    setTeamSpawn(admin, Side.ZUID);
+                    again.run();
+                }));
+        buttons.add(netherToggle(admin, again));
+        buttons.add(endToggle(admin, again));
+        if (bordersDropped) {
+            buttons.add(button(iconLabel(M_BORDERS, "Grenzen dicht", NamedTextColor.RED),
+                    "Noord en Zuid zien daarna weer alleen hun eigen chat. De WorldGuard flags zet je zelf terug.", 150,
+                    () -> {
+                        setBordersDropped(false);
+                        admin.sendMessage(Component.text("De grenzen zijn dicht. Zet de WorldGuard flags van "
+                                + BORDER_REGION + " zelf weer terug.", NamedTextColor.YELLOW));
+                        again.run();
+                    }));
+        } else {
+            buttons.add(button(iconLabel(M_BORDERS, "Grenzen droppen", NamedTextColor.GREEN),
+                    "Haalt de WorldGuard flags van de ijsmuur weg en opent de gedeelde chat.", 150,
+                    () -> confirmDropBorders(admin)));
+        }
+        Component body = joinLines(
+                statusLine("Nether", netherOpen ? "open" : "dicht", netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("End", endOpen ? "open" : "dicht", endOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Grenzen", bordersDropped ? "open" : "dicht",
+                        bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
+                statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
+                        spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
+                statusLine("Spawn Zuid", spawnZuid != null ? "ingesteld" : "niet ingesteld",
+                        spawnZuid != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
+        showMenu(admin, "Wereld", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+    }
+
+    /** The WorldGuard region around the ice wall and the flags that keep it closed. */
+    private static final String BORDER_REGION = "teamgrens";
+    private static final String[] BORDER_FLAGS = {"block-break", "block-place", "entry", "enderpearl",
+            "chorus-fruit-teleport"};
+
+    private void confirmDropBorders(Player admin) {
+        Runnable again = () -> openWorldMenu(admin);
+        confirm(admin,
+                "Grenzen droppen?",
+                "Dit haalt de WorldGuard flags van " + BORDER_REGION + " weg (" + String.join(", ", BORDER_FLAGS)
+                        + ") en Noord en Zuid krijgen weer een gedeelde chat.",
+                "Je kunt de grenzen later weer dichtzetten, de flags zet je dan zelf terug.",
+                Component.text("Ja, droppen", NamedTextColor.GREEN),
+                () -> {
+                    dropBorders(admin);
+                    again.run();
+                },
+                again);
+    }
+
+    /** Removes the WorldGuard flags (a flag command without a value removes the flag) and opens the shared chat. */
+    private void dropBorders(Player admin) {
+        String world = gameWorld().getName();
+        if (getServer().getPluginManager().getPlugin("WorldGuard") != null) {
+            for (String flag : BORDER_FLAGS) {
+                admin.performCommand("region flag -w " + world + " " + BORDER_REGION + " " + flag);
+            }
+            admin.performCommand("region info -w " + world + " " + BORDER_REGION);
+            admin.sendMessage(Component.text("De flags van " + BORDER_REGION + " zijn weggehaald. Controleer hierboven of "
+                    + "er geen flags meer staan.", NamedTextColor.GREEN));
+        } else {
+            admin.sendMessage(Component.text("WorldGuard is niet gevonden. Doe deze commands zelf (klik om ze in je "
+                    + "chatbalk te zetten):", NamedTextColor.YELLOW));
+            for (String flag : BORDER_FLAGS) {
+                String cmd = "/region flag -w " + world + " " + BORDER_REGION + " " + flag;
+                admin.sendMessage(Component.text(cmd, NamedTextColor.AQUA)
+                        .clickEvent(ClickEvent.suggestCommand(cmd))
+                        .hoverEvent(HoverEvent.showText(Component.text("Klik om in je chatbalk te zetten",
+                                NamedTextColor.GRAY))));
+            }
+        }
+        setBordersDropped(true);
+    }
+
+    // ---- Teams
+
+    /** One person in the Teams screen, online or not. */
+    private static final class TeamEntry {
+        final UUID id;
+        final String name;
+        final boolean online;
+        final boolean dead;
+        final Side side;
+
+        TeamEntry(UUID id, String name, boolean online, boolean dead, Side side) {
+            this.id = id;
+            this.name = name;
+            this.online = online;
+            this.dead = dead;
+            this.side = side;
+        }
+    }
+
+    private static String sideName(Side side) {
+        return side == Side.NOORD ? "Noord" : (side == Side.ZUID ? "Zuid" : "geen team");
+    }
+
+    /** Everybody who ever joined, online and offline, sorted by name. */
+    private List<TeamEntry> collectTeamEntries() {
+        List<TeamEntry> all = new ArrayList<>();
+        Set<UUID> seen = new HashSet<>();
+        for (Player p : getServer().getOnlinePlayers()) {
+            seen.add(p.getUniqueId());
+            all.add(new TeamEntry(p.getUniqueId(), p.getName(), true, isEliminated(p) || isLosersOut(p), getSide(p)));
+        }
+        File[] files = new File(getDataFolder(), "players").listFiles((d, n) -> n.endsWith(".yml"));
+        if (files != null) {
+            for (File f : files) {
+                UUID id;
+                try {
+                    id = UUID.fromString(f.getName().substring(0, f.getName().length() - 4));
+                } catch (IllegalArgumentException e) {
+                    continue;
+                }
+                if (seen.contains(id)) {
+                    continue;
+                }
+                YamlConfiguration y = YamlConfiguration.loadConfiguration(f);
+                Side side = Side.fromId(y.getString("identity.side"));
+                boolean dead = y.getBoolean("identity.eliminated", false) || y.getBoolean("identity.losers-out", false);
+                String name = getServer().getOfflinePlayer(id).getName();
+                if (name == null) {
+                    name = id.toString().substring(0, 8);
+                }
+                all.add(new TeamEntry(id, name, false, dead, side));
+            }
+        }
+        all.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
+        return all;
+    }
+
+    /** The name on a button: white, or grey and italic when the player is dead. */
+    private Component teamName(TeamEntry e) {
+        Component name = e.dead
+                ? Component.text(e.name, NamedTextColor.GRAY, TextDecoration.ITALIC)
+                : Component.text(e.name, NamedTextColor.WHITE);
+        if (!e.online) {
+            name = Component.text()
+                    .append(name)
+                    .append(Component.text(" (offline)", NamedTextColor.DARK_GRAY).decoration(TextDecoration.ITALIC, false))
+                    .build();
+        }
+        return name;
+    }
+
+    private ActionButton teamSpacer() {
+        return ActionButton.create(Component.empty(), null, 1, null);
+    }
+
+    private ActionButton teamPencilButton(Player admin, TeamEntry e) {
+        return button(glyph(M_FEATHER), "Beheer " + e.name + ": grace, crew en meer.", 28,
+                () -> openPlayerActions(admin, e.id));
+    }
+
+    private ActionButton teamNameButton(Player admin, TeamEntry e) {
+        return button(teamName(e), "Beheer " + e.name + ".", 130, () -> openPlayerActions(admin, e.id));
+    }
+
+    private ActionButton teamMoveButton(Player admin, TeamEntry e, Side to) {
+        return button(Component.text(to == Side.ZUID ? ">" : "<", NamedTextColor.WHITE, TextDecoration.BOLD),
+                "Zet " + e.name + " in " + sideName(to) + ".", 28, () -> confirmTeamMove(admin, e, to));
+    }
+
+    private void confirmTeamMove(Player admin, TeamEntry e, Side to) {
+        String target = sideName(to);
+        confirm(admin,
+                "Naar " + target + " verplaatsen?",
+                e.name + " zit nu in " + sideName(e.side) + ".",
+                e.name + " komt in " + target + (e.online ? "." : " (offline, het geldt vanaf zijn volgende join)."),
+                Component.text("Ja, verplaatsen", to == Side.ZUID ? NamedTextColor.BLUE : NamedTextColor.RED),
+                () -> {
+                    setSideByUuid(e.id, to);
+                    admin.sendMessage(Component.text(e.name + " zit nu in " + target + ".", NamedTextColor.GREEN));
+                    openTeamsMenu(admin);
+                },
+                () -> openTeamsMenu(admin));
+    }
+
+    /** Noord on the left, Zuid on the right: [pencil] [name] [>]   [<] [name] [pencil]. */
+    private void openTeamsMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<TeamEntry> noord = new ArrayList<>();
+        List<TeamEntry> zuid = new ArrayList<>();
+        List<TeamEntry> geen = new ArrayList<>();
+        for (TeamEntry e : collectTeamEntries()) {
+            if (e.side == Side.NOORD) {
+                noord.add(e);
+            } else if (e.side == Side.ZUID) {
+                zuid.add(e);
+            } else {
+                geen.add(e);
+            }
+        }
+
+        List<ActionButton> buttons = new ArrayList<>();
+        int rows = Math.max(noord.size(), zuid.size());
+        for (int i = 0; i < rows; i++) {
+            if (i < noord.size()) {
+                TeamEntry e = noord.get(i);
+                buttons.add(teamPencilButton(admin, e));
+                buttons.add(teamNameButton(admin, e));
+                buttons.add(teamMoveButton(admin, e, Side.ZUID));
+            } else {
+                buttons.add(teamSpacer());
+                buttons.add(teamSpacer());
+                buttons.add(teamSpacer());
+            }
+            if (i < zuid.size()) {
+                TeamEntry e = zuid.get(i);
+                buttons.add(teamMoveButton(admin, e, Side.NOORD));
+                buttons.add(teamNameButton(admin, e));
+                buttons.add(teamPencilButton(admin, e));
+            } else {
+                buttons.add(teamSpacer());
+                buttons.add(teamSpacer());
+                buttons.add(teamSpacer());
+            }
+        }
+        // bottom row: players without a team under Noord, grace for everybody under Zuid
+        buttons.add(teamSpacer());
+        buttons.add(button(iconLabel(M_PLAYERS, "Zonder team (" + geen.size() + ")", NamedTextColor.WHITE),
+                "Spelers zonder team in Noord of Zuid zetten.", 130, () -> openNoTeamList(admin)));
+        buttons.add(teamSpacer());
+        buttons.add(teamSpacer());
+        buttons.add(button(iconLabel(M_GRACE, "Grace voor iedereen", NamedTextColor.WHITE),
+                "Zet de grace van alle spelers weer op de standaard tijd.", 130, () -> confirm(admin,
+                        "Grace voor iedereen?",
+                        "De grace van alle spelers gaat terug naar " + (graceMillis / 60_000L) + " minuten, ook van "
+                                + "spelers die offline zijn.",
+                        "Dit geldt voor iedereen.",
+                        Component.text("Ja, voor iedereen", NamedTextColor.GREEN),
+                        () -> {
+                            resetGraceForEveryone(admin, graceMillis / 60_000L);
+                            openTeamsMenu(admin);
+                        },
+                        () -> openTeamsMenu(admin))));
+        buttons.add(teamSpacer());
+
+        Component logos = Component.text()
+                .append(glyph(NOORD_BIG))
+                .append(glyph(EVENT_GAP))
+                .append(glyph(EVENT_GAP))
+                .append(glyph(EVENT_GAP))
+                .append(glyph(ZUID_BIG))
+                .build();
+        Component counts = joinLines(
+                Component.text()
+                        .append(Component.text("Noord " + noord.size(), TextColor.color(Side.NOORD.rgb), TextDecoration.BOLD))
+                        .append(Component.text("    "))
+                        .append(Component.text("Zuid " + zuid.size(), TextColor.color(Side.ZUID.rgb), TextDecoration.BOLD))
+                        .append(Component.text("    Zonder team " + geen.size(), NamedTextColor.GRAY))
+                        .build(),
+                Component.text("Pijl: naar het andere team. Veer: de speler zelf beheren.", NamedTextColor.DARK_GRAY));
+        List<DialogBody> bodies = new ArrayList<>();
+        bodies.add(DialogBody.plainMessage(logos, 400));
+        bodies.add(DialogBody.plainMessage(counts, 400));
+        ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(menuTitle("Teams")).body(bodies).build())
+                .type(DialogType.multiAction(buttons, back, 6)));
+        admin.showDialog(dialog);
+    }
+
+    /** Players without a team: pick Noord or Zuid for each of them. */
+    private void openNoTeamList(Player admin) {
+        List<ActionButton> buttons = new ArrayList<>();
+        int count = 0;
+        for (TeamEntry e : collectTeamEntries()) {
+            if (e.side != Side.NONE) {
+                continue;
+            }
+            count++;
+            buttons.add(teamNameButton(admin, e));
+            buttons.add(button(Component.text("Noord", NamedTextColor.RED), "Zet " + e.name + " in Noord.", 60, () -> {
+                setSideByUuid(e.id, Side.NOORD);
+                openNoTeamList(admin);
+            }));
+            buttons.add(button(Component.text("Zuid", NamedTextColor.BLUE), "Zet " + e.name + " in Zuid.", 60, () -> {
+                setSideByUuid(e.id, Side.ZUID);
+                openNoTeamList(admin);
+            }));
+        }
+        ActionButton back = backButton("Terug naar teams.", () -> openTeamsMenu(admin));
+        Component body = Component.text(count == 0 ? "Iedereen zit in een team." : count + " spelers zonder team.",
+                NamedTextColor.GRAY);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(menuTitle("Zonder team")).body(List.of(DialogBody.plainMessage(body))).build())
+                .type(DialogType.multiAction(buttons, back, 3)));
+        admin.showDialog(dialog);
+    }
+
+    /** Everything for one player: team, grace, crew, dead status. */
+    private void openPlayerActions(Player admin, UUID id) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        Player target = getServer().getPlayer(id);
+        if (target == null) {
+            String name = getServer().getOfflinePlayer(id).getName();
+            admin.sendMessage(Component.text((name == null ? "Deze speler" : name) + " is offline. Grace, crew en "
+                    + "dood-status kun je alleen aanpassen als hij online is. Het team kan wel met de pijltjes.",
+                    NamedTextColor.YELLOW));
+            openTeamsMenu(admin);
+            return;
+        }
+        Runnable again = () -> openPlayerActions(admin, id);
+        boolean dead = isEliminated(target) || isLosersOut(target);
+        boolean crew = isCrew(target);
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_TEAM, "Team wijzigen", NamedTextColor.WHITE),
+                "Zet " + target.getName() + " in Noord, Zuid of geen team.", 150, () -> openTeamPick(admin, id)));
+        buttons.add(button(iconLabel(M_GRACE, "Grace instellen", NamedTextColor.WHITE),
+                "Zet de grace tijd van " + target.getName() + ".", 150, () -> openGracePick(admin, id)));
+        buttons.add(button(iconLabel(M_CREW, crew ? "Crew verwijderen" : "Crew geven", NamedTextColor.WHITE),
+                crew ? target.getName() + " geen crew meer maken." : target.getName() + " crew maken.", 150, () -> {
+                    setCrew(admin, target, !crew);
+                    again.run();
+                }));
+        buttons.add(button(iconLabel(M_LOBBY, "LowkeySMP ster geven", NamedTextColor.WHITE),
+                "Geeft " + target.getName() + " in de lobby de LowkeySMP nether star (hotbar slot 5).", 150, () -> {
+                    giveLobbyItemTo(admin, target);
+                    again.run();
+                }));
+        if (dead) {
+            buttons.add(button(iconLabel(M_REVIVE, "Reviven", NamedTextColor.GREEN),
+                    "Zet " + target.getName() + " weer levend, waar hij ook is.", 150, () -> {
+                        revivePlayer(admin, target);
+                        again.run();
+                    }));
+            buttons.add(button(iconLabel(M_BARRIER, "Dood-status weg", NamedTextColor.WHITE),
+                    "Verwijdert alleen de uitgeschakeld-status (vooral voor testen).", 150, () -> {
+                        clearEliminated(target);
+                        admin.sendMessage(Component.text("Dood-status van " + target.getName() + " is verwijderd.",
+                                NamedTextColor.GREEN));
+                        again.run();
+                    }));
+        }
+        long graceMinutes = (graceRemaining(target) + 59_999L) / 60_000L;
+        Side side = getSide(target);
+        Component body = joinLines(
+                statusLine("Speler", target.getName(), NamedTextColor.WHITE),
+                statusLine("Team", sideName(side), side == Side.NOORD ? NamedTextColor.RED
+                        : (side == Side.ZUID ? NamedTextColor.BLUE : NamedTextColor.GRAY)),
+                statusLine("Grace", graceMinutes + " minuten", graceMinutes > 0 ? NamedTextColor.YELLOW : NamedTextColor.GRAY),
+                statusLine("Crew", crew ? "ja" : "nee", crew ? NamedTextColor.GOLD : NamedTextColor.GRAY),
+                statusLine("Status", dead ? "dood" : "levend", dead ? NamedTextColor.RED : NamedTextColor.GREEN));
+        showMenu(admin, "Speler", body, buttons, backButton("Terug naar teams.", () -> openTeamsMenu(admin)));
+    }
+
+    private void openTeamPick(Player admin, UUID id) {
+        Player target = getServer().getPlayer(id);
+        if (target == null) {
+            openTeamsMenu(admin);
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        Side[] sides = {Side.NOORD, Side.ZUID, Side.NONE};
+        NamedTextColor[] colors = {NamedTextColor.RED, NamedTextColor.BLUE, NamedTextColor.GRAY};
+        for (int i = 0; i < sides.length; i++) {
+            final Side side = sides[i];
+            String label = side == Side.NONE ? "Geen team" : sideName(side);
+            buttons.add(button(Component.text(label, colors[i]), target.getName() + " in " + sideName(side) + " zetten.",
+                    150, () -> {
+                        setSide(target, side);
+                        admin.sendMessage(Component.text(target.getName() + " zit nu in " + sideName(side) + ".",
+                                NamedTextColor.GREEN));
+                        openPlayerActions(admin, id);
+                    }));
+        }
+        showMenu(admin, "Team voor " + target.getName(), Component.text("Nu: " + sideName(getSide(target)),
+                NamedTextColor.GRAY), buttons, backButton("Terug naar de speler.", () -> openPlayerActions(admin, id)));
+    }
+
+    private void openGracePick(Player admin, UUID id) {
+        Player target = getServer().getPlayer(id);
+        if (target == null) {
+            openTeamsMenu(admin);
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        int[] minutes = {0, 10, 30, 60};
+        for (int m : minutes) {
+            String label = m == 0 ? "Beeindigen" : m + " minuten";
+            buttons.add(button(Component.text(label), "Zet de grace van " + target.getName() + " op " + m + " minuten.",
+                    150, () -> {
+                        setGrace(target, m * 60_000L);
+                        admin.sendMessage(Component.text("Grace van " + target.getName() + " staat nu op " + m
+                                + " minuten.", NamedTextColor.GREEN));
+                        openPlayerActions(admin, id);
+                    }));
+        }
+        long left = (graceRemaining(target) + 59_999L) / 60_000L;
+        showMenu(admin, "Grace voor " + target.getName(), Component.text("Nu nog: " + left + " minuten",
+                NamedTextColor.GRAY), buttons, backButton("Terug naar de speler.", () -> openPlayerActions(admin, id)));
+    }
+
+    // ---- Event (team event and Verliezerseiland)
+
+    private void openEventHub(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_HORN, "Team event", NamedTextColor.WHITE),
+                "Verdeel iedereen over Noord en Zuid met een show.", 150, () -> openEventMenu(admin)));
+        buttons.add(button(iconLabel(M_BONE, "Verliezerseiland", NamedTextColor.WHITE),
+                "De aparte wereld voor iedereen die dood is.", 150, () -> openLosersMenu(admin)));
+        Component body = joinLines(
+                statusLine("Team event", eventRunning ? "bezig" : "niet bezig",
+                        eventRunning ? NamedTextColor.YELLOW : NamedTextColor.GRAY),
+                statusLine("Verliezerseiland", losersEnded ? "afgelopen" : (losersOpen ? "open" : "dicht"),
+                        losersOpen ? NamedTextColor.GREEN : NamedTextColor.RED));
+        showMenu(admin, "Event", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+    }
+
     // ---- shared screens
 
     /** A yes / no screen. "Annuleren" runs `back`. */
     void confirm(Player admin, String title, String line1, String line2, Component yesLabel,
                  Runnable yes, Runnable back) {
-        if (newDesign(admin)) {
-            Component text = joinLines(Component.text(line1, NamedTextColor.WHITE),
-                    Component.text(line2, NamedTextColor.GRAY));
-            Dialog themed = Dialog.create(builder -> builder.empty()
-                    .base(DialogBase.builder(themedTitle(title))
-                            .body(List.of(headerCard(Material.BARRIER, text)))
-                            .build())
-                    .type(DialogType.confirmation(
-                            button(yesLabel, "Bevestigen", 190, yes),
-                            button(Component.text("Annuleren", NamedTextColor.GRAY), "Terug.", 190, back))));
-            admin.showDialog(themed);
-            return;
-        }
         Dialog dialog = Dialog.create(builder -> builder.empty()
                 .base(DialogBase.builder(Component.text(title, NamedTextColor.RED, TextDecoration.BOLD))
                         .body(List.of(
@@ -4401,7 +4591,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** A list with one button per online player; clicking one continues with `next`. */
     private void pickPlayer(Player admin, String title, Consumer<Player> next) {
-        pickPlayer(admin, title, next, () -> openPlayersMenu(admin));
+        pickPlayer(admin, title, next, () -> openMenu(admin));
     }
 
     /** Same, but "Terug" goes to wherever `backTo` says. */
@@ -4425,236 +4615,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         .build())
                 .type(DialogType.multiAction(buttons, back, 3)));
         admin.showDialog(dialog);
-    }
-
-    private void pickTeam(Player admin, Player target) {
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(teamButton(admin, target, Side.NOORD, "Noord", NamedTextColor.RED));
-        buttons.add(teamButton(admin, target, Side.ZUID, "Zuid", NamedTextColor.BLUE));
-        buttons.add(teamButton(admin, target, Side.NONE, "Geen team", NamedTextColor.GRAY));
-        ActionButton back = backButton("Terug naar spelers.", () -> openPlayersMenu(admin));
-
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, "Team voor " + target.getName()))
-                        .body(List.of(DialogBody.plainMessage(
-                                Component.text("Nu: " + getSide(target).id, NamedTextColor.GRAY))))
-                        .build())
-                .type(DialogType.multiAction(buttons, back, 3)));
-        admin.showDialog(dialog);
-    }
-
-    private ActionButton teamButton(Player admin, Player target, Side side, String label, NamedTextColor color) {
-        return button(Component.text(label, color), target.getName() + " in " + label + " zetten.", 100, () -> {
-            setSide(target, side);
-            admin.sendMessage(Component.text(target.getName() + " zit nu in team " + side.id + ".", NamedTextColor.GREEN));
-            openPlayersMenu(admin);
-        });
-    }
-
-    private void pickCrew(Player admin, Player target) {
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(Component.text("Crew geven", NamedTextColor.GOLD), target.getName() + " crew maken.", 100,
-                () -> {
-                    setCrew(admin, target, true);
-                    openPlayersMenu(admin);
-                }));
-        buttons.add(button(Component.text("Crew verwijderen", NamedTextColor.GRAY),
-                target.getName() + " geen crew meer maken.", 100, () -> {
-                    setCrew(admin, target, false);
-                    openPlayersMenu(admin);
-                }));
-        ActionButton back = backButton("Terug naar spelers.", () -> openPlayersMenu(admin));
-
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, "Crew badge voor " + target.getName()))
-                        .body(List.of(DialogBody.plainMessage(Component.text(
-                                "Nu: " + (isCrew(target) ? "crew" : "geen crew"), NamedTextColor.GRAY))))
-                        .build())
-                .type(DialogType.multiAction(buttons, back, 2)));
-        admin.showDialog(dialog);
-    }
-
-    private void pickGrace(Player admin, Player target) {
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(graceButton(admin, target, 0, "Beeindigen"));
-        buttons.add(graceButton(admin, target, 10, "10 minuten"));
-        buttons.add(graceButton(admin, target, 30, "30 minuten"));
-        buttons.add(graceButton(admin, target, 60, "60 minuten"));
-        ActionButton back = backButton("Terug naar spelers.", () -> openPlayersMenu(admin));
-
-        long leftMinutes = (graceRemaining(target) + 59_999L) / 60_000L;
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, "Grace voor " + target.getName()))
-                        .body(List.of(DialogBody.plainMessage(
-                                Component.text("Nu nog: " + leftMinutes + " minuten", NamedTextColor.GRAY))))
-                        .build())
-                .type(DialogType.multiAction(buttons, back, 2)));
-        admin.showDialog(dialog);
-    }
-
-    private ActionButton graceButton(Player admin, Player target, int minutes, String label) {
-        return button(Component.text(label), "Zet de grace van " + target.getName() + " op " + minutes + " minuten.", 100, () -> {
-            setGrace(target, minutes * 60_000L);
-            admin.sendMessage(Component.text(
-                    "Grace van " + target.getName() + " staat nu op " + minutes + " minuten.", NamedTextColor.GREEN));
-            openPlayersMenu(admin);
-        });
-    }
-
-    // ------------------------------------------------------------------ border checklist
-
-    /** One step of the checklist: what it is called, and the command to run for it. */
-    private static final class CheckStep {
-        final String id;
-        final String title;
-        final String command;
-
-        CheckStep(String id, String title, String command) {
-            this.id = id;
-            this.title = title;
-            this.command = command;
-        }
-    }
-
-    /**
-     * Everything that has to be done before the borders drop. A WorldGuard flag is removed by running the flag command
-     * WITHOUT a value behind it. Add or change steps here.
-     */
-    private static final List<CheckStep> BORDER_STEPS = List.of(
-            new CheckStep("block-break", "block-break flag weg", "/rg flag teamgrens block-break"),
-            new CheckStep("block-place", "block-place flag weg", "/rg flag teamgrens block-place"),
-            new CheckStep("entry", "entry flag weg", "/rg flag teamgrens entry"),
-            new CheckStep("enderpearl", "enderpearl flag weg", "/rg flag teamgrens enderpearl"),
-            new CheckStep("chorus", "chorus-fruit-teleport flag weg", "/rg flag teamgrens chorus-fruit-teleport"),
-            new CheckStep("controle", "Controleren dat er niks meer staat", "/rg info teamgrens"));
-
-    private final Set<String> checklistDone = new HashSet<>();
-
-    private File checklistFile() {
-        return new File(getDataFolder(), "checklist.yml");
-    }
-
-    private void loadChecklist() {
-        checklistDone.clear();
-        YamlConfiguration y = YamlConfiguration.loadConfiguration(checklistFile());
-        for (CheckStep step : BORDER_STEPS) {
-            if (y.getBoolean("done." + step.id, false)) {
-                checklistDone.add(step.id);
-            }
-        }
-    }
-
-    private void saveChecklist() {
-        YamlConfiguration y = new YamlConfiguration();
-        for (CheckStep step : BORDER_STEPS) {
-            y.set("done." + step.id, checklistDone.contains(step.id));
-        }
-        try {
-            getDataFolder().mkdirs();
-            y.save(checklistFile());
-        } catch (IOException e) {
-            getLogger().warning("Kon checklist.yml niet opslaan: " + e.getMessage());
-        }
-    }
-
-    private void toggleChecklistStep(String id) {
-        if (!checklistDone.remove(id)) {
-            checklistDone.add(id);
-        }
-        saveChecklist();
-    }
-
-    private List<String> missingChecklistSteps() {
-        List<String> missing = new ArrayList<>();
-        for (CheckStep step : BORDER_STEPS) {
-            if (!checklistDone.contains(step.id)) {
-                missing.add(step.title);
-            }
-        }
-        return missing;
-    }
-
-    /** The checklist: tick every step, then press "Grenzen droppen" at the bottom. */
-    private void openChecklistMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        List<ActionButton> buttons = new ArrayList<>();
-        for (CheckStep step : BORDER_STEPS) {
-            boolean done = checklistDone.contains(step.id);
-            Component label = Component.text()
-                    .append(Component.text(done ? "[x] " : "[ ] ", done ? NamedTextColor.GREEN : NamedTextColor.GRAY))
-                    .append(Component.text(step.title, done ? NamedTextColor.GREEN : NamedTextColor.WHITE))
-                    .build();
-            String tooltip = "Doe: " + step.command + (step.command.startsWith("/rg flag") ? " (zonder waarde)" : "")
-                    + ". Klik om af te vinken.";
-            buttons.add(button(label, tooltip, 300, () -> {
-                toggleChecklistStep(step.id);
-                openChecklistMenu(admin);
-            }));
-        }
-        buttons.add(button(iconLabel(M_MESSAGES, "Commands in chat", NamedTextColor.AQUA),
-                "Zet alle commands klikbaar in de chat. Daarna sluit dit scherm.", 300, () -> sendChecklistCommands(admin)));
-        buttons.add(button(iconLabel(M_BORDERS, "Grenzen droppen", NamedTextColor.GREEN),
-                "Kan pas als alle stappen afgevinkt zijn.", 300, () -> tryDropBorders(admin)));
-        buttons.add(button(Component.text("Checklist leegmaken", NamedTextColor.RED),
-                "Haalt alle vinkjes weg.", 300, () -> {
-                    checklistDone.clear();
-                    saveChecklist();
-                    openChecklistMenu(admin);
-                }));
-
-        int done = BORDER_STEPS.size() - missingChecklistSteps().size();
-        Component body = joinLines(
-                statusLine("Voortgang", done + " van " + BORDER_STEPS.size(),
-                        done == BORDER_STEPS.size() ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                statusLine("Grenzen", bordersDropped ? "open" : "dicht",
-                        bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
-                Component.text("Klik een stap aan als je hem gedaan hebt.", NamedTextColor.GRAY));
-        ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
-        EditedScreen es = applyMenuEdits(admin, "Border checklist", "Border checklist", body, buttons, 300, 1);
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, es.title))
-                        .body(List.of(DialogBody.plainMessage(es.body)))
-                        .build())
-                .type(DialogType.multiAction(es.buttons, back, es.columns)));
-        admin.showDialog(dialog);
-    }
-
-    /** Every command of the checklist as a clickable line in the chat. */
-    private void sendChecklistCommands(Player admin) {
-        admin.sendMessage(Component.text("Klik een command om hem in je chatbalk te zetten. Bij de flags laat je de "
-                + "waarde weg, dan wordt de flag verwijderd.", NamedTextColor.GRAY));
-        for (CheckStep step : BORDER_STEPS) {
-            admin.sendMessage(Component.text(step.command, NamedTextColor.AQUA)
-                    .clickEvent(ClickEvent.suggestCommand(step.command))
-                    .hoverEvent(HoverEvent.showText(Component.text("Klik om in je chatbalk te zetten", NamedTextColor.GRAY))));
-        }
-        admin.sendMessage(Component.text("Open de checklist weer met /lowkey checklist.", NamedTextColor.GRAY));
-    }
-
-    private void tryDropBorders(Player admin) {
-        if (bordersDropped) {
-            admin.sendMessage(Component.text("De grenzen zijn al open.", NamedTextColor.YELLOW));
-            openChecklistMenu(admin);
-            return;
-        }
-        List<String> missing = missingChecklistSteps();
-        if (!missing.isEmpty()) {
-            admin.sendMessage(Component.text("Nog niet klaar: " + String.join(", ", missing) + ".", NamedTextColor.RED));
-            openChecklistMenu(admin);
-            return;
-        }
-        confirm(admin,
-                "Grenzen droppen?",
-                "Alle stappen staan op klaar. Noord en Zuid krijgen weer een gedeelde chat.",
-                "Je kunt de grenzen later weer dichtzetten.",
-                Component.text("Ja, droppen", NamedTextColor.GREEN),
-                () -> {
-                    setBordersDropped(true);
-                    openChecklistMenu(admin);
-                },
-                () -> openChecklistMenu(admin));
     }
 
     // ------------------------------------------------------------------ the End (open / closed, like the Nether)
@@ -4707,223 +4667,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    // ------------------------------------------------------------------ the season timeline (7 to 21 nov)
-
-    private static final int SEASON_FIRST_DAY = 7;
-    private static final int SEASON_LAST_DAY = 21;
-
-    /** What happens on a day of the season, or null when there is nothing to do. */
-    private String seasonEvent(int day) {
-        switch (day) {
-            case 7:
-                return "Server open: launch en team verdeling";
-            case 11:
-                return "Verliezerseiland start";
-            case 13:
-                return "IJsmuur smelt";
-            case 14:
-                return "Nether open";
-            case 15:
-                return "End open";
-            case 18:
-                return "Finale Verliezerseiland";
-            case 21:
-                return "Hoofdfinale";
-            default:
-                return null;
-        }
-    }
-
-    private boolean seasonDone(int day) {
-        switch (day) {
-            case 7:
-                return launched;
-            case 11:
-                return losersOpen || losersEnded;
-            case 13:
-                return bordersDropped;
-            case 14:
-                return netherOpen;
-            case 15:
-                return endOpen;
-            case 18:
-                return losersEnded;
-            case 21:
-                return finaleState == FinaleState.ENDED;
-            default:
-                return false;
-        }
-    }
-
-    /** One vertical list, the dates on the left. Click a day for the things to do on that day. */
-    private void openTimelineMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        LocalDate today = LocalDate.now(LOWKEY_ZONE);
-        List<ActionButton> buttons = new ArrayList<>();
-        for (int day = SEASON_FIRST_DAY; day <= SEASON_LAST_DAY; day++) {
-            final int d = day;
-            LocalDate date = LocalDate.of(2026, 11, day);
-            String event = seasonEvent(day);
-            NamedTextColor dateColor = today.equals(date) ? NamedTextColor.GREEN
-                    : (today.isAfter(date) ? NamedTextColor.DARK_GRAY : NamedTextColor.WHITE);
-            TextComponent.Builder label = Component.text();
-            label.append(Component.text((day < 10 ? " " : "") + day + " nov", dateColor, TextDecoration.BOLD));
-            label.append(Component.text("   "));
-            if (event == null) {
-                label.append(Component.text("niets te doen", NamedTextColor.DARK_GRAY));
-            } else {
-                boolean done = seasonDone(day);
-                label.append(Component.text(done ? "[x] " : "[ ] ", done ? NamedTextColor.GREEN : NamedTextColor.GRAY));
-                label.append(Component.text(event, done ? NamedTextColor.GREEN : NamedTextColor.WHITE));
-            }
-            buttons.add(button(label.build(), event == null ? "Niets te doen op deze dag."
-                    : "Open de acties voor deze dag.", 300, () -> openDayMenu(admin, d)));
-        }
-        buttons.add(button(iconLabel(M_REVIVE, "Testen en herstellen", NamedTextColor.AQUA),
-                "Reviven, teams en launch resetten, main wereld sluiten.", 300, () -> openRepairMenu(admin)));
-
-        Component body = joinLines(
-                Component.text("Seizoen 1, 7 tot 21 november", NamedTextColor.GRAY),
-                statusLine("Vandaag", today.format(DateTimeFormatter.ofPattern("d MMMM", Locale.forLanguageTag("nl-BE"))),
-                        NamedTextColor.WHITE));
-        ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
-        EditedScreen es = applyMenuEdits(admin, "Tijdlijn", "Tijdlijn", body, buttons, 300, 1);
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, es.title))
-                        .body(List.of(DialogBody.plainMessage(es.body)))
-                        .build())
-                .type(DialogType.multiAction(es.buttons, back, es.columns)));
-        admin.showDialog(dialog);
-    }
-
-    /** The things you can do on one day of the timeline. */
-    private void openDayMenu(Player admin, int day) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        Runnable again = () -> openDayMenu(admin, day);
-        List<ActionButton> buttons = new ArrayList<>();
-        Component body;
-        String event = seasonEvent(day);
-
-        if (day == 7) {
-            if (!launched) {
-                buttons.add(button(iconLabel(M_LAUNCH, "Server launchen", NamedTextColor.GREEN),
-                        "Noord gaat naar de spawn van Noord, Zuid naar die van Zuid.", 150,
-                        () -> openLaunchConfirm(admin, again)));
-            } else {
-                buttons.add(button(iconLabel(M_LAUNCH, "Launch resetten", NamedTextColor.RED),
-                        "Zet de launch terug (voor testen). Niemand wordt verplaatst.", 150, () -> confirm(admin,
-                                "Launch resetten?",
-                                "Het lobby-item zegt daarna weer dat de server nog niet open is.",
-                                "Spelers in de gamewereld blijven daar.",
-                                Component.text("Ja, resetten", NamedTextColor.RED),
-                                () -> {
-                                    resetLaunch(admin);
-                                    again.run();
-                                },
-                                again)));
-            }
-            buttons.add(button(iconLabel(M_COUNTDOWN, "Countdown", NamedTextColor.WHITE),
-                    "Hologram met de aftelling naar de start.", 150, () -> openCountdownMenu(admin)));
-            buttons.add(button(iconLabel(M_TEAM, "Team event", NamedTextColor.WHITE),
-                    "Verdeel iedereen over Noord en Zuid met een show.", 150, () -> openEventMenu(admin)));
-            buttons.add(button(iconLabel(M_PLAYERS, "Teamverdeling", NamedTextColor.WHITE),
-                    "Alle spelers met hun team.", 150, () -> openTeamListMenu(admin)));
-            int withTeam = 0;
-            for (Player p : getServer().getOnlinePlayers()) {
-                if (getSide(p) != Side.NONE) {
-                    withTeam++;
-                }
-            }
-            body = joinLines(
-                    statusLine("Launch", launched ? "gelanceerd" : "nog niet",
-                            launched ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                    statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
-                            spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.RED),
-                    statusLine("Spawn Zuid", spawnZuid != null ? "ingesteld" : "niet ingesteld",
-                            spawnZuid != null ? NamedTextColor.GREEN : NamedTextColor.RED),
-                    statusLine("Online met een team", withTeam + " van " + getServer().getOnlinePlayers().size(),
-                            NamedTextColor.WHITE),
-                    Component.text("Spelers zonder team blijven in de lobby.", NamedTextColor.GRAY));
-        } else if (day == 11) {
-            if (!losersOpen) {
-                buttons.add(button(iconLabel(M_REVIVE, "Eiland openen", NamedTextColor.GREEN),
-                        "Uitgeschakelde spelers kunnen de rode ster gebruiken.", 150, () -> confirm(admin,
-                                "Verliezerseiland openen?",
-                                "Alle uitgeschakelde spelers krijgen een melding en kunnen de rode ster gebruiken.",
-                                "Je kunt het later weer sluiten.",
-                                Component.text("Ja, openen", NamedTextColor.GREEN),
-                                () -> {
-                                    openLosers(admin);
-                                    again.run();
-                                },
-                                again)));
-            } else {
-                buttons.add(button(iconLabel(M_REVIVE, "Eiland sluiten", NamedTextColor.RED),
-                        "Nieuwe spelers kunnen er niet meer heen.", 150, () -> {
-                            closeLosers(admin);
-                            again.run();
-                        }));
-            }
-            buttons.add(button(iconLabel(M_REVIVE, "Verliezerseiland menu", NamedTextColor.WHITE),
-                    "Alles over het eiland.", 150, () -> openLosersMenu(admin)));
-            body = joinLines(
-                    statusLine("Eiland", losersCreated ? "aangemaakt" : "nog niet",
-                            losersCreated ? NamedTextColor.GREEN : NamedTextColor.RED),
-                    statusLine("Status", losersEnded ? "afgelopen" : (losersOpen ? "open" : "dicht"),
-                            losersOpen ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
-        } else if (day == 13) {
-            buttons.add(button(iconLabel(M_BORDERS, "Checklist", NamedTextColor.GREEN),
-                    "Alles wat je moet doen voor je de grenzen dropt.", 150, () -> openChecklistMenu(admin)));
-            if (bordersDropped) {
-                buttons.add(button(iconLabel(M_BORDERS, "Grenzen dicht", NamedTextColor.RED),
-                        "Noord en Zuid zien daarna weer alleen hun eigen chat.", 150, () -> {
-                            setBordersDropped(false);
-                            again.run();
-                        }));
-            }
-            body = joinLines(
-                    statusLine("Grenzen", bordersDropped ? "open" : "dicht",
-                            bordersDropped ? NamedTextColor.GREEN : NamedTextColor.RED),
-                    statusLine("Checklist", (BORDER_STEPS.size() - missingChecklistSteps().size()) + " van "
-                            + BORDER_STEPS.size(), missingChecklistSteps().isEmpty() ? NamedTextColor.GREEN
-                            : NamedTextColor.YELLOW));
-        } else if (day == 14) {
-            buttons.add(netherToggle(admin, again));
-            body = statusLine("Nether", netherOpen ? "open" : "dicht",
-                    netherOpen ? NamedTextColor.GREEN : NamedTextColor.RED);
-        } else if (day == 15) {
-            buttons.add(endToggle(admin, again));
-            body = statusLine("End", endOpen ? "open" : "dicht", endOpen ? NamedTextColor.GREEN : NamedTextColor.RED);
-        } else if (day == 18) {
-            buttons.add(button(iconLabel(M_REVIVE, "Iedereen die leeft terug", NamedTextColor.GREEN),
-                    "Iedereen die nog leeft op het eiland gaat terug. Daarna sluit het eiland en verdwijnt de rode ster.",
-                    150, () -> openLosersFinishConfirm(admin)));
-            buttons.add(button(iconLabel(M_REVIVE, "Speler terugsturen", NamedTextColor.WHITE),
-                    "Kies zelf wie weer levend terug in de main wereld gaat.", 150, () -> openLosersPick(admin)));
-            buttons.add(button(iconLabel(M_REVIVE, "Verliezerseiland menu", NamedTextColor.WHITE),
-                    "Alles over het eiland.", 150, () -> openLosersMenu(admin)));
-            body = joinLines(
-                    statusLine("Status", losersEnded ? "afgelopen" : (losersOpen ? "open" : "dicht"),
-                            losersEnded ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                    statusLine("Nog levend op het eiland", String.valueOf(aliveOnIsland().size()), NamedTextColor.WHITE));
-        } else if (day == 21) {
-            buttons.add(button(iconLabel(M_BORDERS, "Finale", NamedTextColor.LIGHT_PURPLE),
-                    "Start, pauzeer en stel de krimpende border in.", 150, () -> openFinaleMenu(admin)));
-            buttons.add(button(iconLabel(M_REVIVE, "Winnaarsshow testen", NamedTextColor.AQUA),
-                    "Title en vuurwerk rond jou, zonder iets van de finale te raken.", 150,
-                    () -> winnerShow(admin, true)));
-            body = finaleStatusBody();
-        } else {
-            body = Component.text("Niets te doen.", NamedTextColor.GRAY);
-        }
-        String title = (day) + " nov" + (event == null ? "" : ": " + event);
-        showMenu(admin, title, body, buttons, backButton("Terug naar de tijdlijn.", () -> openTimelineMenu(admin)));
-    }
-
     private ActionButton netherToggle(Player admin, Runnable again) {
         if (netherOpen) {
             return button(iconLabel(M_NETHER, "Nether sluiten", NamedTextColor.RED),
@@ -4947,13 +4690,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private ActionButton endToggle(Player admin, Runnable again) {
         if (endOpen) {
-            return button(iconLabel(M_NETHER, "End sluiten", NamedTextColor.RED),
+            return button(iconLabel(M_ENDCRYSTAL, "End sluiten", NamedTextColor.RED),
                     "Sluit het End weer. Wie erin zit kan er nog uit.", 150, () -> {
                         setEnd(false);
                         again.run();
                     });
         }
-        return button(iconLabel(M_NETHER, "End openen", NamedTextColor.GREEN),
+        return button(iconLabel(M_ENDCRYSTAL, "End openen", NamedTextColor.GREEN),
                 "Opent het End voor iedereen, met titel en bericht.", 150, () -> confirm(admin,
                         "End openen?",
                         "Iedereen krijgt de titel en het bericht dat het End open is.",
@@ -5035,8 +4778,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finalePauseSec = s.getInt("finale.pause-sec", 30);
         finaleDamage = s.getDouble("finale.damage", 1.0);
         finaleBuffer = s.getDouble("finale.buffer", 2.0);
-        finaleCloseDims = s.getBoolean("finale.close-dimensions", true);
-        finaleAutoTie = s.getBoolean("finale.auto-tie", true);
+        finaleCloseDims = true;
+        finaleAutoTie = true;
         try {
             finaleState = FinaleState.valueOf(s.getString("finale.state", "IDLE"));
         } catch (IllegalArgumentException e) {
@@ -5735,8 +5478,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     "Titel, bericht en de border begint te krimpen.", 150, () -> confirm(admin,
                             "Finale starten?",
                             "De border begint direct te krimpen naar het doel en iedereen krijgt de titel.",
-                            finaleCloseDims ? "De Nether en het End gaan automatisch dicht."
-                                    : "De Nether en het End blijven zoals ze zijn.",
+                            "De Nether en het End gaan automatisch dicht.",
                             Component.text("Ja, starten", NamedTextColor.GREEN),
                             () -> {
                                 finaleStart(admin);
@@ -5744,7 +5486,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             },
                             again)));
         } else if (finaleState == FinaleState.RUNNING) {
-            buttons.add(button(iconLabel(M_BORDERS, "Pauzeren", NamedTextColor.YELLOW),
+            buttons.add(button(iconLabel(M_REDSTONE, "Pauzeren", NamedTextColor.YELLOW),
                     "Zet de border stil en stopt de tijd.", 150, () -> {
                         finalePause(admin);
                         again.run();
@@ -5757,7 +5499,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     }));
         }
         if (finaleState != FinaleState.IDLE) {
-            buttons.add(button(iconLabel(M_BACK, "Stoppen en border terugzetten", NamedTextColor.RED),
+            buttons.add(button(iconLabel(M_BARRIER, "Stoppen en terugzetten", NamedTextColor.RED),
                     "Stopt de finale en zet de border terug zoals bij de start.", 150, () -> confirm(admin,
                             "Finale stoppen?",
                             "De border gaat meteen terug naar zijn grootte en plek van voor de finale.",
@@ -5769,39 +5511,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             },
                             again)));
         }
-        buttons.add(button(iconLabel(M_BORDERS, "Doel en grootte", NamedTextColor.WHITE),
-                "Het midden en de eindgrootte van de border.", 150, () -> openFinaleTargetDialog(admin)));
-        buttons.add(button(iconLabel(M_BORDERS, "Doel is mijn positie", NamedTextColor.WHITE),
-                "Zet het midden van de eindborder op waar jij staat.", 150, () -> {
-                    finaleTargetSet = true;
-                    finaleTargetX = admin.getLocation().getBlockX() + 0.5;
-                    finaleTargetZ = admin.getLocation().getBlockZ() + 0.5;
-                    saveState();
-                    admin.sendMessage(Component.text("Het doel staat op x " + finaleNum(finaleTargetX) + ", z "
-                            + finaleNum(finaleTargetZ) + ".", NamedTextColor.GREEN));
-                    again.run();
-                }));
+        buttons.add(button(iconLabel(M_COMPASS, "Doel en grootte", NamedTextColor.WHITE),
+                "Midden, eindgrootte en je eigen positie als doel.", 150, () -> openFinaleTargetDialog(admin)));
         buttons.add(button(iconLabel(M_COUNTDOWN, "Tijden en schade", NamedTextColor.WHITE),
                 "Duur, rondes, pauzes en de schade buiten de border.", 150, () -> openFinaleTimeDialog(admin)));
-        buttons.add(stateButton("Nether en End sluiten bij start", finaleCloseDims, "aan", "uit",
-                "Sluit de Nether en het End automatisch als de finale start.", () -> {
-                    finaleCloseDims = !finaleCloseDims;
-                    saveState();
-                    again.run();
-                }));
-        buttons.add(stateButton("Gelijkspel automatisch oplossen", finaleAutoTie, "aan", "uit",
-                "Aan: de laatste die doodging wint. Uit: jij kiest de winnaar in een menu.", () -> {
-                    finaleAutoTie = !finaleAutoTie;
-                    saveState();
-                    again.run();
-                }));
-        buttons.add(button(iconLabel(M_REVIVE, "Winnaarsshow testen", NamedTextColor.AQUA),
-                "Title en vuurwerk rond jou. Raakt niemand anders en niets van de finale.", 150, () -> {
-                    winnerShow(admin, true);
-                }));
+        buttons.add(button(iconLabel(M_STAR, "Winnaarsshow testen", NamedTextColor.AQUA),
+                "Title en vuurwerk rond jou. Raakt niemand anders en niets van de finale.", 150,
+                () -> winnerShow(admin, true)));
 
         showMenu(admin, "Finale", finaleStatusBody(), buttons,
-                backButton("Terug naar de tijdlijn.", () -> openTimelineMenu(admin)));
+                backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
     }
 
     private void openFinaleTargetDialog(Player admin) {
@@ -5830,16 +5549,39 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 openFinaleMenu(clicker);
             });
         }, CLICK_OPTIONS);
+        DialogAction here = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String sg = view.getText("grootte");
+            getServer().getScheduler().runTask(this, () -> {
+                if (!inMainGroup(clicker.getWorld())) {
+                    clicker.sendMessage(Component.text("Ga in de main wereld staan om je positie te gebruiken.",
+                            NamedTextColor.RED));
+                } else {
+                    applyFinaleTarget(clicker, String.valueOf(clicker.getLocation().getBlockX() + 0.5),
+                            String.valueOf(clicker.getLocation().getBlockZ() + 0.5), sg);
+                }
+                openFinaleTargetDialog(clicker);
+            });
+        }, CLICK_OPTIONS);
+        List<ActionButton> actions = new ArrayList<>();
+        actions.add(ActionButton.create(iconLabel(M_LAUNCH, "Opslaan", NamedTextColor.GREEN),
+                Component.text("Sla het doel op."), 300, save));
+        actions.add(ActionButton.create(iconLabel(M_COMPASS, "Mijn positie gebruiken", NamedTextColor.AQUA),
+                Component.text("Zet het midden op waar jij staat en slaat de eindgrootte ook op."), 300, here));
         Dialog dialog = Dialog.create(builder -> builder.empty()
                 .base(DialogBase.builder(dlgTitle(admin, "Finale doel"))
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 "Waar de border naartoe krimpt. Geldt voor de volgende start.", NamedTextColor.GRAY))))
                         .inputs(List.of(x, z, size))
                         .build())
-                .type(DialogType.confirmation(
-                        ActionButton.create(iconLabel(M_BORDERS, "Opslaan", NamedTextColor.GREEN),
-                                Component.text("Sla het doel op."), 150, save),
-                        backButton("Terug naar de finale.", () -> openFinaleMenu(admin)))));
+                .type(DialogType.multiAction(actions, backButton("Terug naar de finale.",
+                        () -> openFinaleMenu(admin)), 1)));
         admin.showDialog(dialog);
     }
 
@@ -5952,1092 +5694,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    // ------------------------------------------------------------------ menu editor (change the menus in the game)
-
-    /** Everything an admin changed in the menus, saved in menu-edits.yml. */
-    private YamlConfiguration menuEdits = new YamlConfiguration();
-    /** Admins who are in edit mode right now (not saved, so it is never left on after a restart). */
-    private final Set<UUID> menuEditMode = new HashSet<>();
-    /** What every menu button does, so edit mode can run the original action. */
-    private final Map<DialogAction, Runnable> buttonActions = Collections.synchronizedMap(new WeakHashMap<>());
-    /** The order the buttons of a screen were last shown in (for moving them up and down). */
-    private final Map<String, List<String>> menuLastKeys = new HashMap<>();
-    private final Random menuRandom = new Random();
-
-    /** The icons the resource pack has: {id, character, name}. New pictures need a new resource pack. */
-    private static final String[][] MENU_ICONS = {
-            {"LAUNCH", M_LAUNCH, "Launch"}, {"SERVER", M_SERVER, "Server"}, {"WORLD", M_WORLD, "Wereld"},
-            {"PLAYERS", M_PLAYERS, "Spelers"}, {"MESSAGES", M_MESSAGES, "Berichten"}, {"NETHER", M_NETHER, "Nether"},
-            {"BORDERS", M_BORDERS, "Grenzen"}, {"LOBBY", M_LOBBY, "Lobby"}, {"SPAWN_N", M_SPAWN_N, "Spawn noord"},
-            {"SPAWN_Z", M_SPAWN_Z, "Spawn zuid"}, {"MAIN", M_MAIN, "Main"}, {"TEAM", M_TEAM, "Team"},
-            {"CREW", M_CREW, "Crew"}, {"GRACE", M_GRACE, "Grace"}, {"REVIVE", M_REVIVE, "Revive"},
-            {"SAY", M_SAY, "Say"}, {"DONATE", M_DONATE, "Donatie"}, {"BACK", M_BACK, "Terug"},
-            {"COUNTDOWN", M_COUNTDOWN, "Klok"}, {"MACE", M_MACE, "Mace"}
-    };
-
-    private static final String[][] MENU_COLORS = {
-            {"white", "Wit"}, {"gray", "Grijs"}, {"dark_gray", "Donkergrijs"}, {"red", "Rood"}, {"dark_red", "Donkerrood"},
-            {"gold", "Goud"}, {"yellow", "Geel"}, {"green", "Groen"}, {"dark_green", "Donkergroen"}, {"aqua", "Aqua"},
-            {"dark_aqua", "Donker aqua"}, {"blue", "Blauw"}, {"light_purple", "Roze"}, {"dark_purple", "Paars"}
-    };
-
-    private static final String[][] MENU_CONDITIONS = {
-            {"server-open", "Server is open"}, {"server-closed", "Server is dicht"},
-            {"main-open", "Main wereld is open"}, {"main-closed", "Main wereld is dicht"},
-            {"nether-open", "Nether is open"}, {"nether-closed", "Nether is dicht"},
-            {"end-open", "End is open"}, {"end-closed", "End is dicht"},
-            {"launched", "Gelanceerd"}, {"not-launched", "Nog niet gelanceerd"},
-            {"borders-dropped", "Grenzen zijn open"}, {"borders-closed", "Grenzen zijn dicht"},
-            {"finale-running", "Finale is bezig"}, {"finale-idle", "Finale is niet bezig"},
-            {"owner", "Alleen de owner"}
-    };
-
-    /** One button of a screen while the screen is being put together. */
-    private static final class MenuEntry {
-        String key;
-        ActionButton button;
-        Runnable run;
-        boolean custom;
-        boolean hidden;
-        boolean conditionMet = true;
-        String baseText = "";
-        ConfigurationSection sec;
-    }
-
-    /** A screen after the edits: what to show. */
-    private static final class EditedScreen {
-        String title;
-        Component body;
-        final List<ActionButton> buttons = new ArrayList<>();
-        int columns;
-    }
-
-    private File menuEditsFile() {
-        return new File(getDataFolder(), "menu-edits.yml");
-    }
-
-    private void loadMenuEdits() {
-        menuEdits = YamlConfiguration.loadConfiguration(menuEditsFile());
-    }
-
-    private void saveMenuEdits() {
-        try {
-            getDataFolder().mkdirs();
-            menuEdits.save(menuEditsFile());
-        } catch (IOException e) {
-            getLogger().warning("Kon menu-edits.yml niet opslaan: " + e.getMessage());
-        }
-    }
-
-    private boolean menuAdvanced(Player p) {
-        return menuEdits.getBoolean("advanced." + p.getUniqueId(), false);
-    }
-
-    private void setMenuAdvanced(Player p, boolean on) {
-        menuEdits.set("advanced." + p.getUniqueId(), on ? Boolean.TRUE : null);
-        saveMenuEdits();
-    }
-
-    private static String ykey(String s) {
-        return s.replace('.', '_').trim();
-    }
-
-    private static boolean isGlyph(char ch) {
-        return ch >= '\uE000' && ch <= '\uF8FF';
-    }
-
-    private static String stripGlyphs(String s) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < s.length(); i++) {
-            char ch = s.charAt(i);
-            if (!isGlyph(ch)) {
-                sb.append(ch);
-            }
-        }
-        return sb.toString().replaceAll("\\s+", " ").trim();
-    }
-
-    /** A stable name for a button: its text without icon, [state] marks and capitals. */
-    private static String buttonKey(ActionButton b) {
-        String t = stripGlyphs(PLAIN.serialize(b.label()));
-        t = t.replaceAll("\\[[^\\]]*\\]", "").replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT);
-        return t.isEmpty() ? "knop" : t;
-    }
-
-    private Component menuText(String raw, boolean miniMessage) {
-        if (raw == null) {
-            return Component.empty();
-        }
-        if (miniMessage) {
-            return MiniMessage.miniMessage().deserialize(raw);
-        }
-        return Component.text(raw);
-    }
-
-    private static String iconChar(String id) {
-        if (id == null || id.isEmpty() || id.equals("NONE")) {
-            return null;
-        }
-        for (String[] icon : MENU_ICONS) {
-            if (icon[0].equals(id)) {
-                return icon[1];
-            }
-        }
-        return null;
-    }
-
-    private static TextColor menuColor(String id) {
-        switch (id == null ? "" : id) {
-            case "white":
-                return NamedTextColor.WHITE;
-            case "gray":
-                return NamedTextColor.GRAY;
-            case "dark_gray":
-                return NamedTextColor.DARK_GRAY;
-            case "red":
-                return NamedTextColor.RED;
-            case "dark_red":
-                return NamedTextColor.DARK_RED;
-            case "gold":
-                return NamedTextColor.GOLD;
-            case "yellow":
-                return NamedTextColor.YELLOW;
-            case "green":
-                return NamedTextColor.GREEN;
-            case "dark_green":
-                return NamedTextColor.DARK_GREEN;
-            case "aqua":
-                return NamedTextColor.AQUA;
-            case "dark_aqua":
-                return NamedTextColor.DARK_AQUA;
-            case "blue":
-                return NamedTextColor.BLUE;
-            case "light_purple":
-                return NamedTextColor.LIGHT_PURPLE;
-            case "dark_purple":
-                return NamedTextColor.DARK_PURPLE;
-            default:
-                return null;
-        }
-    }
-
-    private boolean menuCondition(Player admin, String cond) {
-        switch (cond) {
-            case "server-open":
-                return !serverClosed;
-            case "server-closed":
-                return serverClosed;
-            case "main-open":
-                return mainOpen;
-            case "main-closed":
-                return !mainOpen;
-            case "nether-open":
-                return netherOpen;
-            case "nether-closed":
-                return !netherOpen;
-            case "end-open":
-                return endOpen;
-            case "end-closed":
-                return !endOpen;
-            case "launched":
-                return launched;
-            case "not-launched":
-                return !launched;
-            case "borders-dropped":
-                return bordersDropped;
-            case "borders-closed":
-                return !bordersDropped;
-            case "finale-running":
-                return finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED;
-            case "finale-idle":
-                return finaleState == FinaleState.IDLE;
-            case "owner":
-                return isOwner(admin);
-            default:
-                return true;
-        }
-    }
-
-    // ---- where screens can be opened from
-
-    private Map<String, Consumer<Player>> screenOpeners() {
-        Map<String, Consumer<Player>> m = new LinkedHashMap<>();
-        m.put("Beheer", this::openMenu);
-        m.put("LowkeySMP Beheer", this::openMenu);
-        m.put("Snelle acties", this::openQuickMenu);
-        m.put("Tijdlijn", this::openTimelineMenu);
-        m.put("Spelers", this::openPlayersMenu);
-        m.put("Wereld en server", this::openWorldMenu);
-        m.put("Wereld", this::openWorldMenu);
-        m.put("Server", this::openServerMenu);
-        m.put("Berichten", this::openMessagesMenu);
-        m.put("Team event", this::openEventMenu);
-        m.put("Verliezerseiland", this::openLosersMenu);
-        m.put("Mace", p -> mace.openMenu(p));
-        m.put("Border checklist", this::openChecklistMenu);
-        m.put("Finale", this::openFinaleMenu);
-        m.put("Testen en herstellen", this::openRepairMenu);
-        m.put("Nether en grenzen", this::openAccessMenu);
-        m.put("Lobby", this::openLobbyMenu);
-        m.put("Spawnpunten", this::openSpawnMenu);
-        m.put("Countdown", this::openCountdownMenu);
-        return m;
-    }
-
-    /** Opens a built-in screen by its name, or a screen made in the editor ("custom:id"). */
-    private void openScreenByKey(Player admin, String key) {
-        if (key.startsWith("custom:")) {
-            openCustomScreen(admin, key.substring("custom:".length()));
-            return;
-        }
-        Consumer<Player> opener = screenOpeners().get(key);
-        if (opener == null) {
-            openMenu(admin);
-        } else {
-            opener.accept(admin);
-        }
-    }
-
-    private void reopenScreen(Player admin, String screenKey) {
-        openScreenByKey(admin, screenKey);
-    }
-
-    // ---- putting a screen together with all the edits
-
-    private Runnable customActionRunnable(Player admin, String screenKey, ConfigurationSection c, String label) {
-        final String command = c.getString("command", "");
-        final String opens = c.getString("opens", "");
-        final boolean asConsole = "console".equals(c.getString("run-as", "player"));
-        final boolean confirmFirst = c.getBoolean("confirm", false);
-        Runnable core = () -> {
-            if (!opens.isEmpty()) {
-                openScreenByKey(admin, opens);
-                return;
-            }
-            if (command.isEmpty()) {
-                admin.sendMessage(Component.text("Deze knop doet nog niets. Geef hem een actie in de menu-editor.",
-                        NamedTextColor.YELLOW));
-                return;
-            }
-            String cmd = command.startsWith("/") ? command.substring(1) : command;
-            cmd = cmd.replace("%player%", admin.getName());
-            if (asConsole) {
-                getServer().dispatchCommand(getServer().getConsoleSender(), cmd);
-            } else {
-                admin.performCommand(cmd);
-            }
-        };
-        if (!confirmFirst) {
-            return core;
-        }
-        return () -> confirm(admin, "Zeker weten?", label,
-                opens.isEmpty() ? "Voert uit: /" + (command.startsWith("/") ? command.substring(1) : command)
-                        : "Opent: " + opens,
-                Component.text("Ja, uitvoeren", NamedTextColor.GREEN), core, () -> reopenScreen(admin, screenKey));
-    }
-
-    /** Applies label, icon, colour and tooltip edits to the label of a button. */
-    private Component styledLabel(Component orig, ConfigurationSection s) {
-        if (s == null) {
-            return orig;
-        }
-        String labelRaw = s.getString("label", "");
-        String icon = s.getString("icon", "");
-        TextColor color = menuColor(s.getString("color", ""));
-        if (labelRaw.isEmpty() && icon.isEmpty() && color == null) {
-            return orig;
-        }
-        boolean mm = s.getBoolean("mm", false);
-        List<Component> kids = orig.children();
-        boolean structured = kids.size() == 3 && !PLAIN.serialize(kids.get(0)).isEmpty()
-                && isGlyph(PLAIN.serialize(kids.get(0)).charAt(0));
-        Component glyphPart = null;
-        Component textPart;
-        if (structured) {
-            glyphPart = kids.get(0);
-            textPart = kids.get(2);
-        } else {
-            textPart = orig;
-        }
-        if (!labelRaw.isEmpty()) {
-            Component t = menuText(labelRaw, mm);
-            TextColor base = color != null ? color : textPart.color();
-            textPart = base == null ? t : Component.text().color(base).append(t).build();
-        } else if (color != null) {
-            textPart = textPart.color(color);
-        }
-        if (!icon.isEmpty()) {
-            String ch = iconChar(icon);
-            glyphPart = ch == null ? null : glyph(ch);
-        }
-        if (glyphPart == null) {
-            return textPart;
-        }
-        return Component.text().append(glyphPart).append(Component.space()).append(textPart).build();
-    }
-
-    private ActionButton withWidth(ActionButton b, int width) {
-        return ActionButton.create(b.label(), b.tooltip(), width, b.action());
-    }
-
-    private static int widthForColumns(int columns) {
-        if (columns <= 1) {
-            return 380;
-        }
-        if (columns == 2) {
-            return 190;
-        }
-        return columns == 3 ? 125 : 95;
-    }
-
-    /**
-     * Takes the buttons a screen was built with and returns what to show: the edits applied (hidden buttons gone,
-     * texts, icons and order changed, own buttons added). In edit mode every button opens its editor instead.
-     */
-    private EditedScreen applyMenuEdits(Player admin, String screenKey, String title, Component body,
-                                        List<ActionButton> original, int defaultWidth, int defaultColumns) {
-        final boolean editing = menuEditMode.contains(admin.getUniqueId());
-        final String sk = ykey(screenKey);
-        ConfigurationSection screen = menuEdits.getConfigurationSection("screens." + sk);
-        EditedScreen result = new EditedScreen();
-        result.title = title;
-        result.body = body;
-        result.columns = defaultColumns;
-        if (screen == null && !editing) {
-            result.buttons.addAll(original);
-            return result;
-        }
-        if (screen != null) {
-            boolean smm = screen.getBoolean("mm", false);
-            String t = screen.getString("title", "");
-            if (!t.isEmpty()) {
-                result.title = t;
-            }
-            String replace = screen.getString("body", "");
-            if (!replace.isEmpty()) {
-                result.body = menuText(replace, smm);
-            }
-            String extra = screen.getString("body-extra", "");
-            if (!extra.isEmpty()) {
-                result.body = Component.text().append(result.body).append(Component.newline())
-                        .append(menuText(extra, smm)).build();
-            }
-            int cols = screen.getInt("columns", 0);
-            if (cols >= 1 && cols <= 4) {
-                result.columns = cols;
-            }
-        }
-        ConfigurationSection btnSec = screen == null ? null : screen.getConfigurationSection("buttons");
-        ConfigurationSection customSec = screen == null ? null : screen.getConfigurationSection("custom");
-
-        Map<String, MenuEntry> entries = new LinkedHashMap<>();
-        for (ActionButton b : original) {
-            String base = buttonKey(b);
-            String key = base;
-            int n = 2;
-            while (entries.containsKey(key)) {
-                key = base + " #" + n;
-                n++;
-            }
-            MenuEntry e = new MenuEntry();
-            e.key = key;
-            e.baseText = stripGlyphs(PLAIN.serialize(b.label()));
-            e.run = b.action() == null ? null : buttonActions.get(b.action());
-            ConfigurationSection s = btnSec == null ? null : btnSec.getConfigurationSection(ykey(key));
-            e.sec = s;
-            Component label = styledLabel(b.label(), s);
-            Component tip = b.tooltip();
-            int width = b.width();
-            e.button = b;
-            if (s != null) {
-                boolean mm = s.getBoolean("mm", false);
-                String tipRaw = s.getString("tooltip", "");
-                if (!tipRaw.isEmpty()) {
-                    tip = menuText(tipRaw, mm);
-                }
-                int w = s.getInt("width", 0);
-                if (w >= 50 && w <= 400) {
-                    width = w;
-                }
-                if (!s.getString("command", "").isEmpty() || !s.getString("opens", "").isEmpty()) {
-                    e.run = customActionRunnable(admin, screenKey, s, e.baseText);
-                    ActionButton tmp = button(label, "", width, e.run);
-                    e.button = ActionButton.create(tmp.label(), tip, tmp.width(), tmp.action());
-                } else {
-                    e.button = ActionButton.create(label, tip, width, b.action());
-                }
-                e.hidden = s.getBoolean("hidden", false);
-                String cond = s.getString("show-if", "");
-                e.conditionMet = cond.isEmpty() || menuCondition(admin, cond);
-            }
-            entries.put(key, e);
-        }
-        if (customSec != null) {
-            for (String id : customSec.getKeys(false)) {
-                ConfigurationSection c = customSec.getConfigurationSection(id);
-                if (c == null) {
-                    continue;
-                }
-                MenuEntry e = new MenuEntry();
-                e.key = "@" + id;
-                e.custom = true;
-                e.sec = c;
-                e.baseText = c.getString("label", "Knop");
-                e.run = customActionRunnable(admin, screenKey, c, e.baseText);
-                boolean mm = c.getBoolean("mm", false);
-                Component text = menuText(e.baseText, mm);
-                TextColor color = menuColor(c.getString("color", ""));
-                text = Component.text().color(color == null ? NamedTextColor.WHITE : color).append(text).build();
-                String ch = iconChar(c.getString("icon", ""));
-                Component label = ch == null ? text
-                        : Component.text().append(glyph(ch)).append(Component.space()).append(text).build();
-                int width = c.getInt("width", defaultWidth);
-                if (width < 50 || width > 400) {
-                    width = defaultWidth;
-                }
-                ActionButton tmp = button(label, "", width, e.run);
-                e.button = ActionButton.create(tmp.label(), menuText(c.getString("tooltip", ""), mm), tmp.width(),
-                        tmp.action());
-                e.hidden = c.getBoolean("hidden", false);
-                String cond = c.getString("show-if", "");
-                e.conditionMet = cond.isEmpty() || menuCondition(admin, cond);
-                entries.put(e.key, e);
-            }
-        }
-
-        List<String> keys = new ArrayList<>(entries.keySet());
-        List<String> order = screen == null ? new ArrayList<>() : screen.getStringList("order");
-        if (!order.isEmpty()) {
-            List<String> sorted = new ArrayList<>();
-            for (String k : order) {
-                if (entries.containsKey(k) && !sorted.contains(k)) {
-                    sorted.add(k);
-                }
-            }
-            for (String k : keys) {
-                if (!sorted.contains(k)) {
-                    sorted.add(k);
-                }
-            }
-            keys = sorted;
-        }
-        List<String> shown = new ArrayList<>();
-        for (String k : keys) {
-            MenuEntry e = entries.get(k);
-            boolean visible = !e.hidden && e.conditionMet;
-            if (!editing) {
-                if (visible) {
-                    result.buttons.add(e.button);
-                }
-                continue;
-            }
-            shown.add(k);
-            result.buttons.add(editEntryButton(admin, screenKey, e));
-        }
-        if (editing) {
-            menuLastKeys.put(admin.getUniqueId() + "|" + sk, shown);
-            result.title = "Bewerken: " + result.title;
-            result.buttons.add(button(iconLabel(M_MESSAGES, "Dit scherm bewerken", NamedTextColor.YELLOW),
-                    "Titel, tekst en nieuwe knoppen.", defaultWidth, () -> openScreenEditor(admin, screenKey)));
-            result.buttons.add(button(iconLabel(M_BACK, "Bewerkmodus uitzetten", NamedTextColor.RED),
-                    "Klik weer normaal op de knoppen.", defaultWidth, () -> {
-                        menuEditMode.remove(admin.getUniqueId());
-                        reopenScreen(admin, screenKey);
-                    }));
-        }
-        return result;
-    }
-
-    /** In edit mode a button opens its editor. The description of the original stays visible. */
-    private ActionButton editEntryButton(Player admin, String screenKey, MenuEntry e) {
-        String note = e.hidden ? "(verborgen) " : (!e.conditionMet ? "(voorwaarde) " : "");
-        Component marker = Component.text("\u00BB " + note, note.isEmpty() ? NamedTextColor.YELLOW : NamedTextColor.DARK_GRAY);
-        Component label = Component.text().append(marker).append(e.button.label()).build();
-        final String key = e.key;
-        final boolean custom = e.custom;
-        final Runnable run = e.run;
-        final String baseText = e.baseText;
-        ActionButton tmp = button(label, "", e.button.width(),
-                () -> openButtonEditor(admin, screenKey, key, custom, run, baseText));
-        return ActionButton.create(tmp.label(), e.button.tooltip(), tmp.width(), tmp.action());
-    }
-
-    // ---- helpers for the editor dialogs
-
-    private ConfigurationSection menuScreenSection(String screenKey, boolean create) {
-        String path = "screens." + ykey(screenKey);
-        ConfigurationSection s = menuEdits.getConfigurationSection(path);
-        if (s == null && create) {
-            s = menuEdits.createSection(path);
-        }
-        return s;
-    }
-
-    private String menuBtnPath(String screenKey, String bk) {
-        return bk.startsWith("@")
-                ? "screens." + ykey(screenKey) + ".custom." + ykey(bk.substring(1))
-                : "screens." + ykey(screenKey) + ".buttons." + ykey(bk);
-    }
-
-    private ConfigurationSection menuBtnSection(String screenKey, String bk, boolean create) {
-        String path = menuBtnPath(screenKey, bk);
-        ConfigurationSection s = menuEdits.getConfigurationSection(path);
-        if (s == null && create) {
-            s = menuEdits.createSection(path);
-        }
-        return s;
-    }
-
-    private void menuBtnSet(String screenKey, String bk, String field, Object value) {
-        ConfigurationSection s = menuBtnSection(screenKey, bk, value != null);
-        if (s == null) {
-            return;
-        }
-        s.set(field, value);
-        saveMenuEdits();
-    }
-
-    private static String menuValue(String raw) {
-        return raw == null ? "" : raw.trim();
-    }
-
-    private void showEditorDialog(Player admin, String title, Component body, List<ActionButton> buttons,
-                                  ActionButton exit) {
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, title))
-                        .body(List.of(DialogBody.plainMessage(body)))
-                        .build())
-                .type(DialogType.multiAction(buttons, exit, 2)));
-        admin.showDialog(dialog);
-    }
-
-    /** One dialog with text fields. fields: {key, label, initial, maxLength}. */
-    private void openTextDialog(Player admin, String title, String hint, List<String[]> fields,
-                                Consumer<Map<String, String>> onSave, Runnable back) {
-        List<DialogInput> inputs = new ArrayList<>();
-        for (String[] f : fields) {
-            inputs.add(DialogInput.text(f[0], Component.text(f[1]))
-                    .width(300)
-                    .initial(f[2] == null ? "" : f[2])
-                    .maxLength(Integer.parseInt(f[3]))
-                    .build());
-        }
-        DialogAction save = DialogAction.customClick((view, audience) -> {
-            if (!(audience instanceof Player)) {
-                return;
-            }
-            Player clicker = (Player) audience;
-            if (!isAdmin(clicker)) {
-                return;
-            }
-            final Map<String, String> values = new HashMap<>();
-            for (String[] f : fields) {
-                String v = view.getText(f[0]);
-                values.put(f[0], v == null ? "" : v);
-            }
-            getServer().getScheduler().runTask(this, () -> onSave.accept(values));
-        }, CLICK_OPTIONS);
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, title))
-                        .body(List.of(DialogBody.plainMessage(Component.text(hint, NamedTextColor.GRAY))))
-                        .inputs(inputs)
-                        .build())
-                .type(DialogType.confirmation(
-                        ActionButton.create(iconLabel(M_BORDERS, "Opslaan", NamedTextColor.GREEN),
-                                Component.text("Sla dit op."), 150, save),
-                        backButton("Terug zonder opslaan.", back))));
-        admin.showDialog(dialog);
-    }
-
-    // ---- the button editor
-
-    private void openButtonEditor(Player admin, String sk, String bk, boolean custom, Runnable run, String baseText) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        final boolean adv = menuAdvanced(admin);
-        ConfigurationSection s = menuBtnSection(sk, bk, false);
-        final boolean hidden = s != null && s.getBoolean("hidden", false);
-        final Runnable again = () -> openButtonEditor(admin, sk, bk, custom, run, baseText);
-        List<ActionButton> buttons = new ArrayList<>();
-        if (run != null) {
-            buttons.add(button(iconLabel(M_LAUNCH, "Uitvoeren", NamedTextColor.GREEN),
-                    "Doe wat deze knop normaal doet.", 190, run));
-        }
-        buttons.add(button(iconLabel(M_MESSAGES, "Tekst aanpassen", NamedTextColor.WHITE),
-                "De naam en de uitleg van deze knop.", 190, () -> openButtonTextDialog(admin, sk, bk, baseText, again)));
-        buttons.add(button(iconLabel(M_MAIN, "Icoon kiezen", NamedTextColor.WHITE),
-                "Kies een icoon uit de resourcepack.", 190, () -> openIconPicker(admin, sk, bk, again)));
-        buttons.add(button(iconLabel(M_TEAM, "Kleur kiezen", NamedTextColor.WHITE),
-                "De kleur van de tekst.", 190, () -> openColorPicker(admin, sk, bk, again)));
-        buttons.add(button(iconLabel(M_BACK, "Omhoog", NamedTextColor.WHITE),
-                "Zet de knop een plek hoger.", 190, () -> {
-                    menuMove(admin, sk, bk, -1);
-                    again.run();
-                }));
-        buttons.add(button(iconLabel(M_BACK, "Omlaag", NamedTextColor.WHITE),
-                "Zet de knop een plek lager.", 190, () -> {
-                    menuMove(admin, sk, bk, 1);
-                    again.run();
-                }));
-        buttons.add(stateButton("Verborgen", hidden, "ja", "nee",
-                "Een verborgen knop is alleen in de bewerkmodus te zien.", () -> {
-                    menuBtnSet(sk, bk, "hidden", hidden ? null : Boolean.TRUE);
-                    again.run();
-                }));
-        if (custom || adv) {
-            buttons.add(button(iconLabel(M_LAUNCH, "Actie", NamedTextColor.AQUA),
-                    "Wat de knop doet: een scherm openen of een commando uitvoeren.", 190,
-                    () -> openActionEditor(admin, sk, bk, custom, baseText, again)));
-        }
-        if (adv) {
-            buttons.add(button(iconLabel(M_SERVER, "Breedte", NamedTextColor.AQUA),
-                    "De breedte van de knop (50 tot 400).", 190, () -> openWidthDialog(admin, sk, bk, again)));
-            buttons.add(button(iconLabel(M_SERVER, "Voorwaarde", NamedTextColor.AQUA),
-                    "Toon de knop alleen als dit klopt, bijvoorbeeld als de server open is.", 190,
-                    () -> openConditionPicker(admin, sk, bk, again)));
-        }
-        if (custom) {
-            buttons.add(button(iconLabel(M_BACK, "Knop verwijderen", NamedTextColor.RED),
-                    "Haalt deze eigen knop weg.", 190, () -> confirm(admin, "Knop verwijderen?",
-                            baseText, "Deze eigen knop verdwijnt helemaal.",
-                            Component.text("Ja, verwijderen", NamedTextColor.RED), () -> {
-                                menuEdits.set(menuBtnPath(sk, bk), null);
-                                ConfigurationSection sc = menuScreenSection(sk, false);
-                                if (sc != null) {
-                                    List<String> order = new ArrayList<>(sc.getStringList("order"));
-                                    order.remove(bk);
-                                    sc.set("order", order);
-                                }
-                                saveMenuEdits();
-                                reopenScreen(admin, sk);
-                            }, again)));
-        } else if (s != null) {
-            buttons.add(button(iconLabel(M_BACK, "Terugzetten", NamedTextColor.RED),
-                    "Haalt alle aanpassingen van deze knop weg.", 190, () -> {
-                        menuEdits.set(menuBtnPath(sk, bk), null);
-                        saveMenuEdits();
-                        again.run();
-                    }));
-        }
-        Component body = joinLines(
-                statusLine("Knop", baseText, NamedTextColor.WHITE),
-                statusLine("Soort", custom ? "eigen knop" : "ingebouwde knop", NamedTextColor.GRAY),
-                statusLine("Modus", adv ? "geavanceerd" : "simpel", adv ? NamedTextColor.AQUA : NamedTextColor.GREEN));
-        showEditorDialog(admin, "Knop bewerken", body, buttons,
-                backButton("Terug naar het scherm.", () -> reopenScreen(admin, sk)));
-    }
-
-    private void openButtonTextDialog(Player admin, String sk, String bk, String baseText, Runnable back) {
-        boolean adv = menuAdvanced(admin);
-        ConfigurationSection s = menuBtnSection(sk, bk, false);
-        String curLabel = s != null && !s.getString("label", "").isEmpty() ? s.getString("label", "") : baseText;
-        String curTip = s == null ? "" : s.getString("tooltip", "");
-        List<String[]> fields = new ArrayList<>();
-        fields.add(new String[] {"label", "Naam van de knop", curLabel, "100"});
-        fields.add(new String[] {"tooltip", "Uitleg", curTip, "200"});
-        String hint = adv ? "Je mag MiniMessage gebruiken: <red>, <bold>, <gradient:#c084fc:#f472b6>, <br>."
-                : "Gewone tekst. Laat een veld leeg om het origineel terug te zetten.";
-        openTextDialog(admin, "Tekst aanpassen", hint, fields, values -> {
-            String label = menuValue(values.get("label"));
-            String tip = menuValue(values.get("tooltip"));
-            menuBtnSet(sk, bk, "label", label.isEmpty() || label.equals(baseText) ? null : label);
-            menuBtnSet(sk, bk, "tooltip", tip.isEmpty() ? null : tip);
-            menuBtnSet(sk, bk, "mm", adv ? Boolean.TRUE : null);
-            back.run();
-        }, back);
-    }
-
-    private void openIconPicker(Player admin, String sk, String bk, Runnable back) {
-        List<ActionButton> list = new ArrayList<>();
-        list.add(button(Component.text("Standaard"), "Het oorspronkelijke icoon.", 150, () -> {
-            menuBtnSet(sk, bk, "icon", null);
-            back.run();
-        }));
-        list.add(button(Component.text("Geen icoon"), "Alleen tekst.", 150, () -> {
-            menuBtnSet(sk, bk, "icon", "NONE");
-            back.run();
-        }));
-        for (String[] icon : MENU_ICONS) {
-            final String id = icon[0];
-            list.add(button(iconLabel(icon[1], icon[2], NamedTextColor.WHITE), "Gebruik dit icoon.", 150, () -> {
-                menuBtnSet(sk, bk, "icon", id);
-                back.run();
-            }));
-        }
-        showEditorDialog(admin, "Icoon kiezen",
-                Component.text("Dit zijn de iconen in de resourcepack. Nieuwe plaatjes vragen een nieuwe resourcepack.",
-                        NamedTextColor.GRAY),
-                list, backButton("Terug.", back));
-    }
-
-    private void openColorPicker(Player admin, String sk, String bk, Runnable back) {
-        List<ActionButton> list = new ArrayList<>();
-        list.add(button(Component.text("Standaard"), "De oorspronkelijke kleur.", 150, () -> {
-            menuBtnSet(sk, bk, "color", null);
-            back.run();
-        }));
-        for (String[] color : MENU_COLORS) {
-            final String id = color[0];
-            TextColor c = menuColor(id);
-            list.add(button(Component.text(color[1], c == null ? NamedTextColor.WHITE : c),
-                    "Gebruik deze kleur.", 150, () -> {
-                        menuBtnSet(sk, bk, "color", id);
-                        back.run();
-                    }));
-        }
-        showEditorDialog(admin, "Kleur kiezen", Component.text("Kies de kleur van de tekst.", NamedTextColor.GRAY),
-                list, backButton("Terug.", back));
-    }
-
-    private void menuMove(Player admin, String screenKey, String bk, int dir) {
-        String lastKey = admin.getUniqueId() + "|" + ykey(screenKey);
-        List<String> seq = menuLastKeys.get(lastKey);
-        if (seq == null) {
-            admin.sendMessage(Component.text("Open het scherm eerst opnieuw in de bewerkmodus.", NamedTextColor.YELLOW));
-            return;
-        }
-        seq = new ArrayList<>(seq);
-        int i = seq.indexOf(bk);
-        int j = i + dir;
-        if (i < 0 || j < 0 || j >= seq.size()) {
-            admin.sendMessage(Component.text("Daar kan de knop niet verder naartoe.", NamedTextColor.GRAY));
-            return;
-        }
-        Collections.swap(seq, i, j);
-        ConfigurationSection sc = menuScreenSection(screenKey, true);
-        sc.set("order", seq);
-        saveMenuEdits();
-        menuLastKeys.put(lastKey, seq);
-    }
-
-    // ---- advanced options of a button
-
-    private void openWidthDialog(Player admin, String sk, String bk, Runnable back) {
-        ConfigurationSection s = menuBtnSection(sk, bk, false);
-        String cur = s == null || s.getInt("width", 0) == 0 ? "" : String.valueOf(s.getInt("width", 0));
-        List<String[]> fields = new ArrayList<>();
-        fields.add(new String[] {"breedte", "Breedte (50 tot 400, leeg = standaard)", cur, "3"});
-        openTextDialog(admin, "Breedte", "In het nieuwe ontwerp zijn de grote knoppen altijd even breed. Dit werkt in "
-                + "het klassieke ontwerp en in schermen met meer kolommen.", fields, values -> {
-                    String raw = menuValue(values.get("breedte"));
-                    if (raw.isEmpty()) {
-                        menuBtnSet(sk, bk, "width", null);
-                    } else {
-                        try {
-                            int w = Integer.parseInt(raw);
-                            if (w < 50 || w > 400) {
-                                admin.sendMessage(Component.text("De breedte moet tussen 50 en 400 liggen.",
-                                        NamedTextColor.RED));
-                            } else {
-                                menuBtnSet(sk, bk, "width", w);
-                            }
-                        } catch (NumberFormatException e) {
-                            admin.sendMessage(Component.text("Geef een getal op.", NamedTextColor.RED));
-                        }
-                    }
-                    back.run();
-                }, back);
-    }
-
-    private void openConditionPicker(Player admin, String sk, String bk, Runnable back) {
-        List<ActionButton> list = new ArrayList<>();
-        list.add(button(Component.text("Altijd tonen"), "Geen voorwaarde.", 190, () -> {
-            menuBtnSet(sk, bk, "show-if", null);
-            back.run();
-        }));
-        for (String[] cond : MENU_CONDITIONS) {
-            final String id = cond[0];
-            list.add(button(Component.text(cond[1]), "Toon de knop alleen als dit klopt.", 190, () -> {
-                menuBtnSet(sk, bk, "show-if", id);
-                back.run();
-            }));
-        }
-        showEditorDialog(admin, "Voorwaarde",
-                Component.text("In de bewerkmodus zie je de knop altijd, ook als de voorwaarde niet klopt.",
-                        NamedTextColor.GRAY), list, backButton("Terug.", back));
-    }
-
-    private void openActionEditor(Player admin, String sk, String bk, boolean custom, String baseText, Runnable back) {
-        final boolean adv = menuAdvanced(admin);
-        ConfigurationSection s = menuBtnSection(sk, bk, false);
-        String command = s == null ? "" : s.getString("command", "");
-        String opens = s == null ? "" : s.getString("opens", "");
-        boolean asConsole = s != null && "console".equals(s.getString("run-as", "player"));
-        boolean confirmFirst = s != null && s.getBoolean("confirm", false);
-        final Runnable again = () -> openActionEditor(admin, sk, bk, custom, baseText, back);
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(iconLabel(M_WORLD, "Opent een scherm", NamedTextColor.WHITE),
-                "Kies welk scherm de knop opent.", 190, () -> openScreenPicker(admin, sk, bk, again)));
-        buttons.add(button(iconLabel(M_SAY, "Voert een commando uit", NamedTextColor.WHITE),
-                "Typ een commando, bijvoorbeeld /lowkey donate.", 190, () -> {
-                    List<String[]> fields = new ArrayList<>();
-                    fields.add(new String[] {"commando", "Commando (%player% wordt jouw naam)", command, "200"});
-                    openTextDialog(admin, "Commando", "Het commando start met of zonder /.", fields, values -> {
-                        String cmd = menuValue(values.get("commando"));
-                        menuBtnSet(sk, bk, "command", cmd.isEmpty() ? null : cmd);
-                        if (!cmd.isEmpty()) {
-                            menuBtnSet(sk, bk, "opens", null);
-                        }
-                        again.run();
-                    }, again);
-                }));
-        if (adv) {
-            buttons.add(stateButton("Uitvoeren als console", asConsole, "ja", "nee",
-                    "Ja: de console voert het commando uit. Nee: jij.", () -> {
-                        menuBtnSet(sk, bk, "run-as", asConsole ? null : "console");
-                        again.run();
-                    }));
-            buttons.add(stateButton("Eerst bevestigen", confirmFirst, "ja", "nee",
-                    "Vraag eerst of je het zeker weet.", () -> {
-                        menuBtnSet(sk, bk, "confirm", confirmFirst ? null : Boolean.TRUE);
-                        again.run();
-                    }));
-        }
-        if (!custom) {
-            buttons.add(button(iconLabel(M_BACK, "Originele actie terug", NamedTextColor.RED),
-                    "De knop doet weer wat hij oorspronkelijk deed.", 190, () -> {
-                        menuBtnSet(sk, bk, "command", null);
-                        menuBtnSet(sk, bk, "opens", null);
-                        menuBtnSet(sk, bk, "run-as", null);
-                        menuBtnSet(sk, bk, "confirm", null);
-                        again.run();
-                    }));
-        }
-        String now = !opens.isEmpty() ? "opent " + opens : (!command.isEmpty() ? "/" + command.replaceFirst("^/", "")
-                : (custom ? "nog niets" : "de oorspronkelijke actie"));
-        showEditorDialog(admin, "Actie", joinLines(statusLine("Knop", baseText, NamedTextColor.WHITE),
-                statusLine("Nu", now, NamedTextColor.WHITE)), buttons, backButton("Terug.", back));
-    }
-
-    private void openScreenPicker(Player admin, String sk, String bk, Runnable back) {
-        List<ActionButton> list = new ArrayList<>();
-        for (String name : screenOpeners().keySet()) {
-            if (name.equals("LowkeySMP Beheer") || name.equals("Wereld")) {
-                continue;
-            }
-            list.add(button(Component.text(name), "Open dit scherm.", 190, () -> {
-                menuBtnSet(sk, bk, "opens", name);
-                menuBtnSet(sk, bk, "command", null);
-                back.run();
-            }));
-        }
-        ConfigurationSection screens = menuEdits.getConfigurationSection("screens");
-        if (screens != null) {
-            for (String key : screens.getKeys(false)) {
-                ConfigurationSection sc = screens.getConfigurationSection(key);
-                if (sc == null || !sc.getBoolean("custom-screen", false)) {
-                    continue;
-                }
-                final String target = "custom:" + sc.getString("id", "");
-                list.add(button(Component.text(sc.getString("title", "Nieuw scherm"), NamedTextColor.LIGHT_PURPLE),
-                        "Open dit eigen scherm.", 190, () -> {
-                            menuBtnSet(sk, bk, "opens", target);
-                            menuBtnSet(sk, bk, "command", null);
-                            back.run();
-                        }));
-            }
-        }
-        showEditorDialog(admin, "Scherm kiezen", Component.text("Welk scherm moet deze knop openen?",
-                NamedTextColor.GRAY), list, backButton("Terug.", back));
-    }
-
-    // ---- the screen editor
-
-    private void openScreenEditor(Player admin, String sk) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        final boolean adv = menuAdvanced(admin);
-        final boolean customScreen = sk.startsWith("custom:");
-        final Runnable again = () -> openScreenEditor(admin, sk);
-        ConfigurationSection sc = menuScreenSection(sk, false);
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(iconLabel(M_MESSAGES, "Titel en tekst", NamedTextColor.WHITE),
-                "Pas de titel en de tekst bovenaan aan.", 190, () -> openScreenTextDialog(admin, sk, again)));
-        buttons.add(button(iconLabel(M_LAUNCH, "Knop toevoegen", NamedTextColor.GREEN),
-                "Maak een eigen knop op dit scherm.", 190, () -> {
-                    List<String[]> fields = new ArrayList<>();
-                    fields.add(new String[] {"label", "Naam van de knop", "", "100"});
-                    fields.add(new String[] {"tooltip", "Uitleg", "", "200"});
-                    openTextDialog(admin, "Knop toevoegen", adv ? "MiniMessage mag." : "Gewone tekst.", fields,
-                            values -> {
-                                String label = menuValue(values.get("label"));
-                                if (label.isEmpty()) {
-                                    admin.sendMessage(Component.text("Geef de knop een naam.", NamedTextColor.RED));
-                                    again.run();
-                                    return;
-                                }
-                                String id = Long.toString(System.currentTimeMillis(), 36)
-                                        + Integer.toString(menuRandom.nextInt(1296), 36);
-                                String bk = "@" + id;
-                                menuBtnSet(sk, bk, "label", label);
-                                String tip = menuValue(values.get("tooltip"));
-                                menuBtnSet(sk, bk, "tooltip", tip.isEmpty() ? null : tip);
-                                menuBtnSet(sk, bk, "mm", adv ? Boolean.TRUE : null);
-                                openButtonEditor(admin, sk, bk, true, null, label);
-                            }, again);
-                }));
-        buttons.add(stateButton("Geavanceerde modus", adv, "aan", "uit",
-                "Aan: breedte, voorwaarden, MiniMessage, eigen schermen en meer.", () -> {
-                    setMenuAdvanced(admin, !adv);
-                    again.run();
-                }));
-        if (adv) {
-            buttons.add(button(iconLabel(M_WORLD, "Nieuw scherm", NamedTextColor.GREEN),
-                    "Maak een helemaal eigen scherm. Open het met een knop.", 190, () -> {
-                        List<String[]> fields = new ArrayList<>();
-                        fields.add(new String[] {"title", "Titel van het scherm", "", "60"});
-                        openTextDialog(admin, "Nieuw scherm", "Daarna voeg je er knoppen aan toe.", fields, values -> {
-                            String title = menuValue(values.get("title"));
-                            if (title.isEmpty()) {
-                                admin.sendMessage(Component.text("Geef het scherm een titel.", NamedTextColor.RED));
-                                again.run();
-                                return;
-                            }
-                            String id = Long.toString(System.currentTimeMillis(), 36)
-                                    + Integer.toString(menuRandom.nextInt(1296), 36);
-                            ConfigurationSection created = menuScreenSection("custom:" + id, true);
-                            created.set("custom-screen", true);
-                            created.set("id", id);
-                            created.set("title", title);
-                            saveMenuEdits();
-                            menuEditMode.add(admin.getUniqueId());
-                            openCustomScreen(admin, id);
-                        }, again);
-                    }));
-            buttons.add(button(iconLabel(M_WORLD, "Mijn schermen", NamedTextColor.AQUA),
-                    "Alle schermen die je zelf gemaakt hebt.", 190, () -> openMyScreens(admin, again)));
-            buttons.add(button(iconLabel(M_BACK, "Alles terugzetten", NamedTextColor.RED),
-                    "Wist alle aanpassingen aan alle menu's.", 190, () -> confirm(admin, "Alles terugzetten?",
-                            "Alle aanpassingen en eigen schermen verdwijnen.",
-                            "De menu's zien er weer uit zoals ze in de code staan.",
-                            Component.text("Ja, alles wissen", NamedTextColor.RED), () -> {
-                                menuEdits.set("screens", null);
-                                saveMenuEdits();
-                                admin.sendMessage(Component.text("Alle menu-aanpassingen zijn gewist.",
-                                        NamedTextColor.GREEN));
-                                openMenu(admin);
-                            }, again)));
-        }
-        if (customScreen) {
-            buttons.add(button(iconLabel(M_BACK, "Scherm verwijderen", NamedTextColor.RED),
-                    "Haalt dit eigen scherm helemaal weg.", 190, () -> confirm(admin, "Scherm verwijderen?",
-                            "Dit eigen scherm met al zijn knoppen verdwijnt.",
-                            "Knoppen die dit scherm openen doen daarna niets meer.",
-                            Component.text("Ja, verwijderen", NamedTextColor.RED), () -> {
-                                menuEdits.set("screens." + ykey(sk), null);
-                                saveMenuEdits();
-                                openMenu(admin);
-                            }, again)));
-        } else if (sc != null) {
-            buttons.add(button(iconLabel(M_BACK, "Dit scherm terugzetten", NamedTextColor.RED),
-                    "Wist alle aanpassingen van dit scherm.", 190, () -> confirm(admin, "Scherm terugzetten?",
-                            "Alle aanpassingen aan dit scherm verdwijnen.",
-                            "Het scherm ziet er weer uit zoals in de code.",
-                            Component.text("Ja, terugzetten", NamedTextColor.RED), () -> {
-                                menuEdits.set("screens." + ykey(sk), null);
-                                saveMenuEdits();
-                                reopenScreen(admin, sk);
-                            }, again)));
-        }
-        Component body = joinLines(
-                statusLine("Scherm", sk, NamedTextColor.WHITE),
-                statusLine("Modus", adv ? "geavanceerd" : "simpel", adv ? NamedTextColor.AQUA : NamedTextColor.GREEN));
-        showEditorDialog(admin, "Scherm bewerken", body, buttons,
-                backButton("Terug naar het scherm.", () -> reopenScreen(admin, sk)));
-    }
-
-    private void openScreenTextDialog(Player admin, String sk, Runnable back) {
-        final boolean adv = menuAdvanced(admin);
-        ConfigurationSection sc = menuScreenSection(sk, false);
-        List<String[]> fields = new ArrayList<>();
-        fields.add(new String[] {"title", "Titel (leeg = standaard)", sc == null ? "" : sc.getString("title", ""), "60"});
-        fields.add(new String[] {"extra", "Extra tekst onder de status", sc == null ? "" : sc.getString("body-extra", ""),
-                "300"});
-        if (adv) {
-            fields.add(new String[] {"body", "Statustekst vervangen (leeg = live status)",
-                    sc == null ? "" : sc.getString("body", ""), "300"});
-            fields.add(new String[] {"columns", "Kolommen (1 tot 4, leeg = standaard)",
-                    sc == null || sc.getInt("columns", 0) == 0 ? "" : String.valueOf(sc.getInt("columns", 0)), "1"});
-        }
-        openTextDialog(admin, "Titel en tekst", adv ? "MiniMessage mag in de tekstvelden, <br> is een nieuwe regel."
-                : "Gewone tekst.", fields, values -> {
-                    ConfigurationSection target = menuScreenSection(sk, true);
-                    String title = menuValue(values.get("title"));
-                    String extra = menuValue(values.get("extra"));
-                    target.set("title", title.isEmpty() ? null : title);
-                    target.set("body-extra", extra.isEmpty() ? null : extra);
-                    if (adv) {
-                        String body = menuValue(values.get("body"));
-                        target.set("body", body.isEmpty() ? null : body);
-                        String cols = menuValue(values.get("columns"));
-                        if (cols.isEmpty()) {
-                            target.set("columns", null);
-                        } else {
-                            try {
-                                int c = Integer.parseInt(cols);
-                                target.set("columns", c >= 1 && c <= 4 ? c : null);
-                            } catch (NumberFormatException e) {
-                                admin.sendMessage(Component.text("Kolommen moet een getal van 1 tot 4 zijn.",
-                                        NamedTextColor.RED));
-                            }
-                        }
-                    }
-                    target.set("mm", adv ? Boolean.TRUE : null);
-                    saveMenuEdits();
-                    back.run();
-                }, back);
-    }
-
-    private void openMyScreens(Player admin, Runnable back) {
-        List<ActionButton> list = new ArrayList<>();
-        ConfigurationSection screens = menuEdits.getConfigurationSection("screens");
-        if (screens != null) {
-            for (String key : screens.getKeys(false)) {
-                ConfigurationSection sc = screens.getConfigurationSection(key);
-                if (sc == null || !sc.getBoolean("custom-screen", false)) {
-                    continue;
-                }
-                final String id = sc.getString("id", "");
-                list.add(button(Component.text(sc.getString("title", "Nieuw scherm"), NamedTextColor.LIGHT_PURPLE),
-                        "Open dit scherm.", 190, () -> {
-                            menuEditMode.add(admin.getUniqueId());
-                            openCustomScreen(admin, id);
-                        }));
-            }
-        }
-        showEditorDialog(admin, "Mijn schermen", Component.text(list.isEmpty() ? "Je hebt nog geen eigen schermen."
-                : "Kies een scherm om te openen.", NamedTextColor.GRAY), list, backButton("Terug.", back));
-    }
-
-    /** A screen made in the editor: a title, a text and only the buttons put on it. */
-    private void openCustomScreen(Player admin, String id) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        String key = "custom:" + id;
-        ConfigurationSection sc = menuScreenSection(key, false);
-        if (sc == null || !sc.getBoolean("custom-screen", false)) {
-            admin.sendMessage(Component.text("Dit scherm bestaat niet meer.", NamedTextColor.RED));
-            openMenu(admin);
-            return;
-        }
-        showMenuKeyed(admin, key, sc.getString("title", "Nieuw scherm"), Component.empty(), new ArrayList<>(),
-                backButton("Terug naar Home.", () -> openMenu(admin)));
-    }
-
-    /** Switch edit mode on or off for this admin (command /lowkey menu edit). */
-    private void toggleMenuEditMode(Player admin) {
-        if (menuEditMode.remove(admin.getUniqueId())) {
-            admin.sendMessage(Component.text("Bewerkmodus staat uit.", NamedTextColor.GREEN));
-        } else {
-            menuEditMode.add(admin.getUniqueId());
-            admin.sendMessage(Component.text("Bewerkmodus staat aan. Klik op een knop om hem aan te passen. "
-                    + "Onderaan elk scherm kun je het scherm zelf bewerken.", NamedTextColor.GREEN));
-        }
-    }
-
     // ---- testing and repairing
 
     /** A real revive: alive again, in the lobby with the star or at the team spawn, wherever he was. */
@@ -7063,11 +5719,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         bordersDropped = false;
         losersOpen = false;
         losersEnded = false;
-        checklistDone.clear();
-        saveChecklist();
         saveState();
         sender.sendMessage(Component.text("Alle schakelaars staan weer als aan het begin: niet gelanceerd, main wereld "
-                + "open, Nether, End en grenzen dicht, Verliezerseiland dicht, checklist leeg. Niemand is verplaatst en "
+                + "open, Nether, End en grenzen dicht, Verliezerseiland dicht. Niemand is verplaatst en "
                 + "geen team is veranderd.", NamedTextColor.GREEN));
     }
 
@@ -7083,9 +5737,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     revivePlayer(admin, target);
                     again.run();
                 }, again)));
-        buttons.add(button(iconLabel(M_REVIVE, "Terug uit Verliezerseiland", NamedTextColor.WHITE),
+        buttons.add(button(iconLabel(M_HEART, "Terug uit Verliezerseiland", NamedTextColor.WHITE),
                 "Kies een speler die uit is en zet hem terug in de main wereld.", 150, () -> openLosersPick(admin)));
-        buttons.add(button(iconLabel(M_REVIVE, "Alle teams resetten", NamedTextColor.RED),
+        buttons.add(button(iconLabel(M_LAVA, "Alle teams resetten", NamedTextColor.RED),
                 "Haalt van iedereen het team weg.", 150, () -> confirm(admin,
                         "Alle teams resetten?",
                         "Iedereen, ook wie offline is, heeft daarna geen team meer.",
@@ -7126,16 +5780,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     "Noord gaat naar de spawn van Noord, Zuid naar die van Zuid.", 150,
                     () -> openLaunchConfirm(admin, again)));
         }
-        buttons.add(button(iconLabel(M_MACE, "Mace cooldown wissen", NamedTextColor.WHITE),
+        buttons.add(button(iconLabel(M_WATER, "Mace cooldown wissen", NamedTextColor.WHITE),
                 "Haalt de lopende cooldown van de mace weg, handig na een test op een bot.", 150, () -> {
                     mace.resetCooldown(admin);
                     again.run();
                 }));
-        buttons.add(button(iconLabel(M_BACK, "Alles terugzetten", NamedTextColor.RED),
-                "Zet launch, Nether, End, grenzen, Verliezerseiland en checklist terug naar het begin.", 150,
+        buttons.add(button(iconLabel(M_FIRE, "Alles terugzetten", NamedTextColor.RED),
+                "Zet launch, Nether, End, grenzen en Verliezerseiland terug naar het begin.", 150,
                 () -> confirm(admin,
                         "Alle schakelaars terugzetten?",
-                        "Launch, Nether, End, grenzen, Verliezerseiland en de checklist gaan terug naar het begin.",
+                        "Launch, Nether, End, grenzen en Verliezerseiland gaan terug naar het begin.",
                         "Niemand wordt verplaatst en geen team verandert.",
                         Component.text("Ja, terugzetten", NamedTextColor.RED),
                         () -> {
@@ -7150,8 +5804,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         mainOpen ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Launch", launched ? "gelanceerd" : "nog niet",
                         launched ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
-        showMenu(admin, "Testen en herstellen", body, buttons, backButton("Terug naar de tijdlijn.",
-                () -> openTimelineMenu(admin)));
+        showMenu(admin, "Testen en herstellen", body, buttons, backButton("Terug naar het hoofdmenu.",
+                () -> openMenu(admin)));
     }
 
     // ------------------------------------------------------------------ Verliezerseiland (own world for everybody who died)
@@ -7607,28 +6261,28 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         List<ActionButton> buttons = new ArrayList<>();
         if (losersCreated && losersWorld() != null) {
-            buttons.add(button(iconLabel(M_REVIVE, "Naar het eiland", NamedTextColor.WHITE),
+            buttons.add(button(iconLabel(M_COMPASS, "Naar het eiland", NamedTextColor.WHITE),
                     "Teleporteert jou naar het Verliezerseiland.", 150, () -> teleportAdminToLosers(admin)));
-            buttons.add(button(iconLabel(M_REVIVE, "Spawn zetten", NamedTextColor.WHITE),
+            buttons.add(button(iconLabel(M_SIGN, "Spawn zetten", NamedTextColor.WHITE),
                     "Zet het spawnpunt op jouw plek. Je moet op het eiland staan.", 150, () -> {
                         setLosersSpawn(admin);
                         openLosersMenu(admin);
                     }));
         } else {
-            buttons.add(button(iconLabel(M_REVIVE, "Eiland aanmaken", NamedTextColor.GREEN),
+            buttons.add(button(iconLabel(M_PICKAXE, "Eiland aanmaken", NamedTextColor.GREEN),
                     "Maakt een normale survival wereld met altijd onweer en nacht.", 150, () -> {
                         createLosers(admin, null);
                         openLosersMenu(admin);
                     }));
         }
         if (losersOpen) {
-            buttons.add(button(iconLabel(M_REVIVE, "Eiland sluiten", NamedTextColor.RED),
+            buttons.add(button(iconLabel(M_BARRIER, "Eiland sluiten", NamedTextColor.RED),
                     "Nieuwe spelers kunnen er niet meer heen. Wie er is blijft er.", 150, () -> {
                         closeLosers(admin);
                         openLosersMenu(admin);
                     }));
         } else {
-            buttons.add(button(iconLabel(M_REVIVE, "Eiland openen", NamedTextColor.GREEN),
+            buttons.add(button(iconLabel(M_DOOR, "Eiland openen", NamedTextColor.GREEN),
                     "Uitgeschakelde spelers kunnen de rode ster gebruiken.", 150, () -> confirm(admin,
                             "Verliezerseiland openen?",
                             "Alle uitgeschakelde spelers krijgen een melding en kunnen de rode ster gebruiken.",
@@ -7642,11 +6296,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         buttons.add(button(iconLabel(M_REVIVE, "Speler terugsturen", NamedTextColor.WHITE),
                 "Kies zelf wie weer levend terug in de main wereld gaat.", 150, () -> openLosersPick(admin)));
-        buttons.add(button(iconLabel(M_REVIVE, "Iedereen die leeft terug", NamedTextColor.GREEN),
+        buttons.add(button(iconLabel(M_HEART, "Iedereen die leeft terug", NamedTextColor.GREEN),
                 "Iedereen die nog leeft op het eiland gaat terug. Daarna sluit het eiland en verdwijnt de rode ster.", 150,
                 () -> openLosersFinishConfirm(admin)));
         if (losersCreated || losersWorld() != null) {
-            buttons.add(button(iconLabel(M_REVIVE, "Eiland verwijderen", NamedTextColor.RED),
+            buttons.add(button(iconLabel(M_LAVA, "Eiland verwijderen", NamedTextColor.RED),
                     "Wist de hele wereld.", 150, () -> confirm(admin,
                             "Verliezerseiland verwijderen?",
                             "De hele wereld wordt gewist, met alles wat erin staat.",
@@ -7675,7 +6329,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 statusLine("Nog levend op het eiland", String.valueOf(aliveOnIsland().size()), NamedTextColor.WHITE),
                 statusLine("Wachten in de lobby", String.valueOf(waiting), NamedTextColor.WHITE),
                 statusLine("Definitief uit", String.valueOf(out), NamedTextColor.WHITE));
-        showMenu(admin, "Verliezerseiland", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+        showMenu(admin, "Verliezerseiland", body, buttons, backButton("Terug naar event.", () -> openEventHub(admin)));
     }
 
     private void handleLosersCommand(CommandSender sender, String[] args) {
@@ -7748,11 +6402,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // Layout of the stage in blocks, relative to the camera. Tune these numbers if it does not look right on screen.
     private static final double EV_DIST = 8.0;            // how far in front of the camera everything hangs
-    private static final double EV_COL_X = 3.9;           // distance of each team column from the middle
-    private static final double EV_TOP_Y = -0.2;          // height of the first row (0 = camera height)
-    private static final double EV_CELL_W = 1.6;          // width of one head + name cell
-    private static final double EV_ROW_MAX = 1.05;        // biggest distance between two rows
-    private static final double EV_ROWS_H = 3.9;          // all rows together stay inside this height
+    private static final double EV_COL_X = 4.6;           // distance of each team column from the middle
+    private static final double EV_TOP_Y = 0.4;           // height of the first row (0 = camera height)
+    private static final double EV_CELL_W = 1.5;          // width of one head + name cell
+    private static final double EV_ROW_MAX = 1.0;         // biggest distance between two rows
+    private static final double EV_ROWS_H = 3.6;          // all rows together stay inside this height
+    private static final double EV_LOGO_Y = 2.7;          // height of the two team logos
+    private static final float EV_LOGO_SCALE = 4.0f;
     private static final float EV_HEAD_SCALE = 1.3f;
     private static final float EV_NAME_SCALE = 0.5f;
     private static final double EV_CENTER_Y = 0.7;        // height of the big shuffle head
@@ -7838,7 +6494,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** The big logos on the left and right as the title, with the given line under it. */
     private void eventTitle(Component subtitle, int stayTicks) {
-        Title title = Title.title(eventLogos(), subtitle,
+        Title title = Title.title(Component.empty(), subtitle,
                 Title.Times.times(Duration.ZERO, Duration.ofMillis(stayTicks * 50L), Duration.ZERO));
         for (UUID id : eventLocked) {
             Player p = getServer().getPlayer(id);
@@ -8033,6 +6689,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Location at = eye.clone().subtract(0, eventStand.getEyeHeight(), 0);
         eventStand.teleport(at);
 
+        // the team logos hang in the world, so they always sit right above their own column
+        spawnEventText(eventPoint(-EV_COL_X, EV_LOGO_Y), glyph(NOORD_BIG), EV_LOGO_SCALE);
+        spawnEventText(eventPoint(EV_COL_X, EV_LOGO_Y), glyph(ZUID_BIG), EV_LOGO_SCALE);
         eventCenterHead = spawnEventHead(eventPoint(0, EV_CENTER_Y), new ItemStack(Material.PLAYER_HEAD),
                 EV_CENTER_HEAD_SCALE);
 
@@ -8380,13 +7039,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         List<ActionButton> buttons = new ArrayList<>();
         if (eventRunning) {
-            buttons.add(button(iconLabel(M_TEAM, "Event afbreken", NamedTextColor.RED),
+            buttons.add(button(iconLabel(M_BARRIER, "Event afbreken", NamedTextColor.RED),
                     "Stopt het event meteen en zet iedereen weer vrij.", 150, () -> {
                         stopEvent(admin);
                         openEventMenu(admin);
                     }));
         } else {
-            buttons.add(button(iconLabel(M_TEAM, "Event starten", NamedTextColor.GREEN),
+            buttons.add(button(iconLabel(M_HORN, "Event starten", NamedTextColor.GREEN),
                     "Verdeelt iedereen die online is over Noord en Zuid.", 150, () -> confirm(admin,
                             "Team event starten?",
                             "Iedereen die online is (ook in de main wereld) gaat naar de lobby en kijkt mee. "
@@ -8397,17 +7056,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                                 startEvent(admin, false, 0);
                             },
                             () -> openEventMenu(admin))));
-            buttons.add(button(iconLabel(M_TEAM, "Testen", NamedTextColor.WHITE),
+            buttons.add(button(iconLabel(M_STAR, "Testen", NamedTextColor.WHITE),
                     "Oefenen met nep-spelers. Er verandert geen enkel team.", 150, () -> openEventTestDialog(admin)));
         }
-        buttons.add(button(iconLabel(M_SPAWN_N, "Camera zetten", NamedTextColor.WHITE),
+        buttons.add(button(iconLabel(M_COMPASS, "Camera zetten", NamedTextColor.WHITE),
                 "Zet de camera op jouw ogen en kijkrichting. Je moet in de lobby staan.", 150, () -> {
                     setEventCameraHere(admin);
                     openEventMenu(admin);
                 }));
         buttons.add(button(iconLabel(M_PLAYERS, "Teamverdeling", NamedTextColor.WHITE),
                 "Alle spelers met hun team.", 150, () -> openTeamListMenu(admin)));
-        buttons.add(button(iconLabel(M_REVIVE, "Alle teams resetten", NamedTextColor.RED),
+        buttons.add(button(iconLabel(M_LAVA, "Alle teams resetten", NamedTextColor.RED),
                 "Haalt van iedereen het team weg (voor testen).", 150, () -> confirm(admin,
                         "Alle teams resetten?",
                         "Iedereen, ook wie offline is, heeft daarna geen team meer.",
@@ -8433,7 +7092,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 statusLine("Lobby", lobbyCreated ? "aangemaakt" : "nog niet",
                         lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.RED),
                 statusLine("Spelers die meedoen", String.valueOf(eligible), NamedTextColor.WHITE));
-        showMenu(admin, "Team event", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+        showMenu(admin, "Team event", body, buttons, backButton("Terug naar event.", () -> openEventHub(admin)));
     }
 
     private void openEventTestDialog(Player admin) {
@@ -8585,664 +7244,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    // ------------------------------------------------------------------ menu designs (new / classic)
-
-    /** per admin: "new" (default) or "classic", saved in menu.yml */
-    private final Map<UUID, String> menuDesigns = new HashMap<>();
-
-    private File menuFile() {
-        return new File(getDataFolder(), "menu.yml");
-    }
-
-    private void loadMenuDesigns() {
-        menuDesigns.clear();
-        YamlConfiguration y = YamlConfiguration.loadConfiguration(menuFile());
-        ConfigurationSection section = y.getConfigurationSection("design");
-        if (section == null) {
-            return;
-        }
-        for (String key : section.getKeys(false)) {
-            try {
-                menuDesigns.put(UUID.fromString(key), section.getString(key, "new"));
-            } catch (IllegalArgumentException ignored) {
-                // not a uuid, skip it
-            }
-        }
-    }
-
-    private void saveMenuDesigns() {
-        YamlConfiguration y = new YamlConfiguration();
-        for (Map.Entry<UUID, String> entry : menuDesigns.entrySet()) {
-            y.set("design." + entry.getKey(), entry.getValue());
-        }
-        try {
-            getDataFolder().mkdirs();
-            y.save(menuFile());
-        } catch (IOException e) {
-            getLogger().warning("Kon menu.yml niet opslaan: " + e.getMessage());
-        }
-    }
-
-    /** True when this admin uses the new menu design (the default). */
-    boolean newDesign(Player player) {
-        return !"classic".equals(menuDesigns.get(player.getUniqueId()));
-    }
-
-    private void setMenuDesign(Player player, boolean useNew) {
-        menuDesigns.put(player.getUniqueId(), useNew ? "new" : "classic");
-        saveMenuDesigns();
-    }
-
-    /** "LOWKEY » Title" with a gradient on the name. */
-    private static Component themedTitle(String title) {
-        MiniMessage mm = MiniMessage.miniMessage();
-        return mm.deserialize("<gradient:#c084fc:#f472b6><bold>LOWKEY</bold></gradient> <dark_gray>\u00BB</dark_gray> <white>"
-                + mm.escapeTags(title) + "</white>");
-    }
-
-    private static final PlainTextComponentSerializer PLAIN = PlainTextComponentSerializer.plainText();
-
-    /** Title for any dialog: the new gradient breadcrumb in the new design, the old purple title in the classic one. */
-    Component dlgTitle(Player admin, String text) {
-        return newDesign(admin) ? themedTitle(text) : menuTitle(text);
-    }
-
-    /** A big icon on the left with text beside it (the header of every screen). */
-    private DialogBody headerCard(Material icon, Component text) {
-        return DialogBody.item(new ItemStack(icon))
-                .description(DialogBody.plainMessage(text, 300))
-                .showDecorations(false)
-                .showTooltip(false)
-                .width(48)
-                .height(48)
-                .build();
-    }
-
-    /** A small icon with one line of text beside it (a status row). */
-    private DialogBody miniCard(Material icon, Component text) {
-        return DialogBody.item(new ItemStack(icon))
-                .description(DialogBody.plainMessage(text, 320))
-                .showDecorations(false)
-                .showTooltip(false)
-                .width(20)
-                .height(20)
-                .build();
-    }
-
-    private DialogBody statusCard(Material icon, String name, boolean on, String onText, String offText) {
-        return miniCard(icon, Component.text()
-                .append(Component.text(name, NamedTextColor.WHITE, TextDecoration.BOLD))
-                .append(Component.text("   "))
-                .append(Component.text((on ? onText : offText).toUpperCase(Locale.ROOT),
-                        on ? NamedTextColor.GREEN : NamedTextColor.RED, TextDecoration.BOLD))
-                .build());
-    }
-
-    /** The icon of a screen, shown big at the top of it. */
-    private static Material screenIcon(String title) {
-        switch (title) {
-            case "Spelers":
-                return Material.PLAYER_HEAD;
-            case "Wereld en server":
-                return Material.GRASS_BLOCK;
-            case "Snelle acties":
-                return Material.LEVER;
-            case "Mace":
-                return Material.MACE;
-            case "Berichten":
-                return Material.WRITABLE_BOOK;
-            case "Team event":
-                return Material.FIREWORK_ROCKET;
-            case "Verliezerseiland":
-                return Material.WITHER_SKELETON_SKULL;
-            case "Nether en grenzen":
-                return Material.NETHERRACK;
-            case "Lobby":
-                return Material.NETHER_STAR;
-            case "Spawnpunten":
-                return Material.COMPASS;
-            case "Countdown":
-                return Material.CLOCK;
-            case "Testen en herstellen":
-                return Material.TOTEM_OF_UNDYING;
-            case "Titel testen":
-                return Material.OAK_SIGN;
-            case "Finale":
-                return Material.DRAGON_HEAD;
-            case "Gelijkspel":
-                return Material.TOTEM_OF_UNDYING;
-            default:
-                return Material.BOOK;
-        }
-    }
-
-    /** A wide button: the title, and the explanation in grey right behind it. */
-    private ActionButton cardButton(ActionButton b) {
-        Component tip = b.tooltip();
-        String label = PLAIN.serialize(b.label());
-        String desc = tip == null ? "" : PLAIN.serialize(tip);
-        int room = 56 - label.length();
-        if (room < 12) {
-            desc = "";
-        } else if (desc.length() > room) {
-            desc = desc.substring(0, room - 3).trim() + "...";
-        }
-        Component label2 = Component.text()
-                .append(b.label())
-                .append(desc.isEmpty() ? Component.empty() : Component.text("   " + desc, NamedTextColor.GRAY))
-                .build();
-        return ActionButton.create(label2, b.tooltip(), 380, b.action());
-    }
-
-    /**
-     * New design for every screen: a big icon with the status text beside it, then wide buttons with the explanation
-     * on each button, and a Home button at the end. Compact screens use a grid of switches instead.
-     */
-    private void showThemedMenu(Player admin, String title, Component body, List<ActionButton> buttons,
-                                ActionButton exit, boolean withHome, boolean compact) {
-        showThemedMenuKeyed(admin, title, title, body, buttons, exit, withHome, compact);
-    }
-
-    private void showThemedMenuKeyed(Player admin, String key, String title, Component body,
-                                     List<ActionButton> buttons, ActionButton exit, boolean withHome,
-                                     boolean compact) {
-        EditedScreen es = applyMenuEdits(admin, key, title, body, buttons, compact ? 190 : 150, compact ? 2 : 1);
-        boolean cards = !compact && es.columns == 1;
-        int homeWidth = cards ? 380 : (compact ? 190 : widthForColumns(es.columns));
-        List<ActionButton> all = new ArrayList<>();
-        for (ActionButton b : es.buttons) {
-            if (cards) {
-                all.add(cardButton(b));
-            } else if (!compact) {
-                all.add(withWidth(b, widthForColumns(es.columns)));
-            } else {
-                all.add(b);
-            }
-        }
-        if (withHome) {
-            ActionButton home = button(iconLabel(M_WORLD, "Home", NamedTextColor.LIGHT_PURPLE),
-                    "Terug naar het beginscherm.", homeWidth, () -> openMenu(admin));
-            all.add(cards ? cardButton(home) : home);
-        }
-        List<DialogBody> bodies = new ArrayList<>();
-        bodies.add(headerCard(screenIcon(key), es.body));
-        final int columns = es.columns;
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(themedTitle(es.title)).body(bodies).build())
-                .type(DialogType.multiAction(all, exit, columns)));
-        admin.showDialog(dialog);
-    }
-
-    /** A switch that shows its state: [OPEN] Nether. Click to flip it. */
-    private ActionButton stateButton(String name, boolean on, String onText, String offText, String tooltip,
-                                     Runnable action) {
-        Component label = Component.text()
-                .append(Component.text("[" + (on ? onText : offText).toUpperCase(Locale.ROOT) + "] ",
-                        on ? NamedTextColor.GREEN : NamedTextColor.RED, TextDecoration.BOLD))
-                .append(Component.text(name, NamedTextColor.WHITE))
-                .build();
-        return button(label, tooltip, 190, action);
-    }
-
-    private static Component stateWord(String name, boolean on) {
-        return Component.text(name, on ? NamedTextColor.GREEN : NamedTextColor.RED);
-    }
-
-    // ---- new design: Home
-
-    private void openHome(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        LocalDate today = LocalDate.now(LOWKEY_ZONE);
-        LocalDate first = LocalDate.of(2026, 11, SEASON_FIRST_DAY);
-        LocalDate last = LocalDate.of(2026, 11, SEASON_LAST_DAY);
-        String todayLine;
-        if (today.isBefore(first)) {
-            long days = java.time.temporal.ChronoUnit.DAYS.between(today, first);
-            todayLine = "Nog " + days + (days == 1 ? " dag" : " dagen") + " tot Server Open";
-        } else if (!today.isAfter(last)) {
-            String event = seasonEvent(today.getDayOfMonth());
-            todayLine = "Vandaag: " + (event == null ? "niets te doen" : event);
-        } else {
-            todayLine = "Seizoen 1 is afgelopen";
-        }
-        int noord = 0;
-        int zuid = 0;
-        int geen = 0;
-        for (Player p : getServer().getOnlinePlayers()) {
-            Side side = getSide(p);
-            if (side == Side.NOORD) {
-                noord++;
-            } else if (side == Side.ZUID) {
-                zuid++;
-            } else {
-                geen++;
-            }
-        }
-        Component people = Component.text()
-                .append(Component.text("Online ", NamedTextColor.GRAY))
-                .append(Component.text(String.valueOf(getServer().getOnlinePlayers().size()), NamedTextColor.WHITE))
-                .append(Component.text("   Noord ", TextColor.color(Side.NOORD.rgb)))
-                .append(Component.text(String.valueOf(noord), NamedTextColor.WHITE))
-                .append(Component.text("   Zuid ", TextColor.color(Side.ZUID.rgb)))
-                .append(Component.text(String.valueOf(zuid), NamedTextColor.WHITE))
-                .append(Component.text("   Geen ", NamedTextColor.GRAY))
-                .append(Component.text(String.valueOf(geen), NamedTextColor.WHITE))
-                .build();
-        Component headline = MiniMessage.miniMessage()
-                .deserialize("<gradient:#c084fc:#f472b6><bold>LOWKEY BEHEER</bold></gradient>");
-        Component header = joinLines(
-                headline,
-                Component.text(todayLine, NamedTextColor.WHITE, TextDecoration.BOLD),
-                people,
-                eventRunning ? Component.text("Team event is bezig", NamedTextColor.YELLOW) : Component.empty());
-
-        List<DialogBody> bodies = new ArrayList<>();
-        bodies.add(headerCard(Material.NETHER_STAR, header));
-        bodies.add(statusCard(Material.BEACON, "Server", !serverClosed, "open", "dicht"));
-        bodies.add(statusCard(Material.FIREWORK_ROCKET, "Launch", launched, "gelanceerd", "nog niet"));
-        bodies.add(statusCard(Material.GRASS_BLOCK, "Main wereld", mainOpen, "open", "dicht"));
-        bodies.add(statusCard(Material.NETHERRACK, "Nether", netherOpen, "open", "dicht"));
-        bodies.add(statusCard(Material.END_STONE, "End", endOpen, "open", "dicht"));
-        bodies.add(statusCard(Material.BLUE_ICE, "Grenzen (ijsmuur)", bordersDropped, "open", "dicht"));
-        bodies.add(statusCard(Material.WITHER_SKELETON_SKULL, "Verliezerseiland", losersOpen, "open", "dicht"));
-
-        List<ActionButton> raw = new ArrayList<>();
-        raw.add(button(iconLabel(M_LAUNCH, "Snelle acties", NamedTextColor.GREEN),
-                "Alle schakelaars op een plek: launch, Nether, End, grenzen en meer.", 380, () -> openQuickMenu(admin)));
-        raw.add(button(iconLabel(M_COUNTDOWN, "Seizoen", NamedTextColor.WHITE),
-                "Alle dagen van 7 tot 21 nov met wat je op elke dag moet doen.", 380, () -> openTimelineMenu(admin)));
-        raw.add(button(iconLabel(M_PLAYERS, "Spelers", NamedTextColor.WHITE),
-                "Teams, crew, grace, reviven en de teamverdeling.", 380, () -> openPlayersMenu(admin)));
-        raw.add(button(iconLabel(M_WORLD, "Wereld en server", NamedTextColor.WHITE),
-                "Launch, main wereld, Nether, End, grenzen, lobby en spawnpunten.", 380, () -> openWorldMenu(admin)));
-        raw.add(button(iconLabel(M_TEAM, "Team event", NamedTextColor.WHITE),
-                "Verdeel iedereen over Noord en Zuid met een show.", 380, () -> openEventMenu(admin)));
-        raw.add(button(iconLabel(M_REVIVE, "Verliezerseiland", NamedTextColor.WHITE),
-                "De aparte wereld voor iedereen die dood is.", 380, () -> openLosersMenu(admin)));
-        raw.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
-                "Eigen bericht, donatiebericht en websitebericht.", 380, () -> openMessagesMenu(admin)));
-        raw.add(button(iconLabel(M_MACE, "Mace", NamedTextColor.WHITE),
-                "De ene mace: cooldown, houder en reset.", 380, () -> mace.openMenu(admin)));
-        raw.add(button(iconLabel(M_BORDERS, "Checklist", NamedTextColor.WHITE),
-                "Alles wat je moet doen voor je de grenzen dropt.", 380, () -> openChecklistMenu(admin)));
-        raw.add(button(iconLabel(M_BORDERS, "Finale", NamedTextColor.LIGHT_PURPLE),
-                "De krimpende border, de winnaarsshow en de instellingen.", 380, () -> openFinaleMenu(admin)));
-        raw.add(button(iconLabel(M_REVIVE, "Testen en herstellen", NamedTextColor.AQUA),
-                "Reviven, teams en launch resetten, alles terugzetten.", 380, () -> openRepairMenu(admin)));
-        raw.add(button(iconLabel(M_MESSAGES, "Menu bewerken", NamedTextColor.YELLOW),
-                "Pas alle menu's aan in de game zelf: teksten, iconen, volgorde en eigen knoppen.", 380, () -> {
-                    menuEditMode.add(admin.getUniqueId());
-                    openMenu(admin);
-                }));
-        raw.add(button(iconLabel(M_BACK, "Klassiek menu", NamedTextColor.GRAY),
-                "Schakel terug naar het oude menu-ontwerp.", 380, () -> {
-                    setMenuDesign(admin, false);
-                    openMenu(admin);
-                }));
-        if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
-            raw.add(button(Component.text("Uitloggen", NamedTextColor.RED),
-                    "Log uit en verlies je toegang tot /lowkey en de commands.", 380, () -> logout(admin, true)));
-        }
-        EditedScreen es = applyMenuEdits(admin, "Beheer", "Beheer", header, raw, 380, 1);
-        bodies.set(0, headerCard(Material.NETHER_STAR, es.body));
-        List<ActionButton> all = new ArrayList<>();
-        for (ActionButton b : es.buttons) {
-            all.add(es.columns == 1 ? cardButton(b) : withWidth(b, widthForColumns(es.columns)));
-        }
-        ActionButton close = ActionButton.create(Component.text("Sluiten", NamedTextColor.GRAY),
-                Component.text("Sluit dit menu."), widthForColumns(es.columns), null);
-        final int homeColumns = es.columns;
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(themedTitle(es.title)).body(bodies).build())
-                .type(DialogType.multiAction(all, close, homeColumns)));
-        admin.showDialog(dialog);
-    }
-
-    // ---- new design: quick actions (every switch, with its state, on one screen)
-
-    private void openQuickMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        Runnable again = () -> openQuickMenu(admin);
-        List<ActionButton> buttons = new ArrayList<>();
-
-        buttons.add(stateButton("Server", !serverClosed, "open", "dicht",
-                "Sluit de server voor iedereen behalve closed-access, of maak hem weer open.", () -> {
-                    if (serverClosed) {
-                        setServerClosed(false);
-                        admin.sendMessage(Component.text("De server is weer open voor iedereen.", NamedTextColor.GREEN));
-                        again.run();
-                    } else {
-                        confirm(admin,
-                                "Server sluiten?",
-                                "Iedereen behalve " + String.join(", ", getConfig().getStringList("closed-access"))
-                                        + " wordt gekickt.",
-                                "De server blijft dicht tot je hem weer opent.",
-                                Component.text("Ja, sluiten", NamedTextColor.RED),
-                                () -> {
-                                    if (!hasClosedAccess(admin.getName())) {
-                                        admin.sendMessage(Component.text("Je staat zelf niet in 'closed-access' in "
-                                                + "config.yml, dan zou je jezelf buitensluiten.", NamedTextColor.RED));
-                                    } else {
-                                        setServerClosed(true);
-                                    }
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("Launch", launched, "gelanceerd", "nog niet",
-                "Noord gaat naar de spawn van Noord, Zuid naar die van Zuid.", () -> {
-                    if (!launched) {
-                        openLaunchConfirm(admin, again);
-                    } else {
-                        confirm(admin,
-                                "Launch resetten?",
-                                "Het lobby-item zegt daarna weer dat de server nog niet open is.",
-                                "Spelers in de gamewereld blijven daar.",
-                                Component.text("Ja, resetten", NamedTextColor.RED),
-                                () -> {
-                                    resetLaunch(admin);
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("Main wereld", mainOpen, "open", "dicht",
-                "Sluiten stuurt iedereen behalve admins naar de lobby.", () -> {
-                    if (mainOpen) {
-                        confirm(admin,
-                                "Main wereld sluiten?",
-                                "Iedereen behalve admins gaat naar de lobby en kan er niet uit tot je hem opent.",
-                                "Spelers houden hun spullen en komen later terug op hun laatste plek.",
-                                Component.text("Ja, sluiten", NamedTextColor.RED),
-                                () -> {
-                                    closeMainWorld(admin);
-                                    again.run();
-                                },
-                                again);
-                    } else {
-                        openMainWorld(admin);
-                        again.run();
-                    }
-                }));
-        buttons.add(stateButton("Nether", netherOpen, "open", "dicht",
-                "Opent of sluit de Nether, met titel en bericht bij openen.", () -> {
-                    if (netherOpen) {
-                        setNether(false);
-                        again.run();
-                    } else {
-                        confirm(admin, "Nether openen?", "Iedereen krijgt de titel en het bericht dat de Nether open is.",
-                                "Je kunt hem later weer sluiten.", Component.text("Ja, openen", NamedTextColor.GREEN),
-                                () -> {
-                                    setNether(true);
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("End", endOpen, "open", "dicht",
-                "Opent of sluit het End, met titel en bericht bij openen.", () -> {
-                    if (endOpen) {
-                        setEnd(false);
-                        again.run();
-                    } else {
-                        confirm(admin, "End openen?", "Iedereen krijgt de titel en het bericht dat het End open is.",
-                                "Je kunt het later weer sluiten.", Component.text("Ja, openen", NamedTextColor.GREEN),
-                                () -> {
-                                    setEnd(true);
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("Grenzen", bordersDropped, "open", "dicht",
-                "Droppen gaat eerst langs de checklist.", () -> {
-                    if (bordersDropped) {
-                        setBordersDropped(false);
-                        again.run();
-                    } else {
-                        openChecklistMenu(admin);
-                    }
-                }));
-        buttons.add(stateButton("Verliezerseiland", losersOpen, "open", "dicht",
-                "Uitgeschakelde spelers kunnen de rode ster gebruiken als het open is.", () -> {
-                    if (!losersCreated) {
-                        admin.sendMessage(Component.text("Maak eerst het Verliezerseiland aan (menu Verliezerseiland).",
-                                NamedTextColor.RED));
-                        again.run();
-                    } else if (losersOpen) {
-                        closeLosers(admin);
-                        again.run();
-                    } else {
-                        confirm(admin, "Verliezerseiland openen?",
-                                "Alle uitgeschakelde spelers krijgen een melding en kunnen de rode ster gebruiken.",
-                                "Je kunt het later weer sluiten.", Component.text("Ja, openen", NamedTextColor.GREEN),
-                                () -> {
-                                    openLosers(admin);
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("Team event", eventRunning, "bezig", "uit",
-                "Een bezig event stop je hier meteen. Starten doe je in het menu Team event.", () -> {
-                    if (eventRunning) {
-                        stopEvent(admin);
-                        again.run();
-                    } else {
-                        openEventMenu(admin);
-                    }
-                }));
-
-        Component body = joinLines(
-                Component.text("Klik op een schakelaar om hem om te zetten.", NamedTextColor.GRAY),
-                Component.text("Groen is aan, rood is uit.", NamedTextColor.DARK_GRAY));
-        showThemedMenu(admin, "Snelle acties", body, buttons, backButton("Terug naar Home.", () -> openMenu(admin)),
-                true, true);
-    }
-
-    // ---- new design: Spelers (one screen, everything about players)
-
-    private void openNewPlayersMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        Runnable again = () -> openPlayersMenu(admin);
-        int noord = 0;
-        int zuid = 0;
-        int geen = 0;
-        int out = 0;
-        for (Player p : getServer().getOnlinePlayers()) {
-            Side side = getSide(p);
-            if (side == Side.NOORD) {
-                noord++;
-            } else if (side == Side.ZUID) {
-                zuid++;
-            } else {
-                geen++;
-            }
-            if (isEliminated(p) || isLosersOut(p)) {
-                out++;
-            }
-        }
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(button(iconLabel(M_TEAM, "Team instellen", NamedTextColor.WHITE),
-                "Zet een speler in Noord, Zuid of geen team.", 150,
-                () -> pickPlayer(admin, "Team instellen", target -> pickTeam(admin, target))));
-        buttons.add(button(iconLabel(M_CREW, "Crew badge", NamedTextColor.WHITE),
-                "Geef of verwijder de crew-badge van een speler.", 150,
-                () -> pickPlayer(admin, "Crew badge", target -> pickCrew(admin, target))));
-        buttons.add(button(iconLabel(M_GRACE, "Grace instellen", NamedTextColor.WHITE),
-                "Zet de grace tijd van een speler.", 150,
-                () -> pickPlayer(admin, "Grace instellen", target -> pickGrace(admin, target))));
-        buttons.add(button(iconLabel(M_GRACE, "Grace voor iedereen", NamedTextColor.WHITE),
-                "Zet de grace van alle spelers weer op de standaard tijd, ook van spelers die nu offline zijn.", 150,
-                () -> {
-                    resetGraceForEveryone(admin, graceMillis / 60_000L);
-                    again.run();
-                }));
-        buttons.add(button(iconLabel(M_REVIVE, "Speler reviven", NamedTextColor.GREEN),
-                "Zet een uitgeschakelde speler weer levend, waar hij ook is.", 150,
-                () -> pickPlayer(admin, "Speler reviven", target -> {
-                    revivePlayer(admin, target);
-                    again.run();
-                }, again)));
-        buttons.add(button(iconLabel(M_REVIVE, "Terug uit het eiland", NamedTextColor.WHITE),
-                "Kies een speler die uit is en zet hem terug in de main wereld.", 150, () -> openLosersPick(admin)));
-        buttons.add(button(iconLabel(M_LOBBY, "LowkeySMP ster geven", NamedTextColor.WHITE),
-                "Geeft een speler in de lobby de LowkeySMP nether star (hotbar slot 5).", 150,
-                () -> pickPlayer(admin, "LowkeySMP ster geven", target -> {
-                    giveLobbyItemTo(admin, target);
-                    again.run();
-                })));
-        buttons.add(button(iconLabel(M_PLAYERS, "Teamverdeling", NamedTextColor.WHITE),
-                "Alle spelers met hun team, ook wie offline is.", 150, () -> openTeamListMenu(admin)));
-        buttons.add(button(iconLabel(M_REVIVE, "Alle teams resetten", NamedTextColor.RED),
-                "Haalt van iedereen het team weg.", 150, () -> confirm(admin,
-                        "Alle teams resetten?",
-                        "Iedereen, ook wie offline is, heeft daarna geen team meer.",
-                        "Dit kan niet ongedaan gemaakt worden.",
-                        Component.text("Ja, resetten", NamedTextColor.RED),
-                        () -> {
-                            resetAllTeams(admin);
-                            again.run();
-                        },
-                        again)));
-        Component body = joinLines(
-                statusLine("Online", String.valueOf(getServer().getOnlinePlayers().size()), NamedTextColor.WHITE),
-                statusLine("Noord", String.valueOf(noord), TextColor.color(Side.NOORD.rgb)),
-                statusLine("Zuid", String.valueOf(zuid), TextColor.color(Side.ZUID.rgb)),
-                statusLine("Geen team", String.valueOf(geen), NamedTextColor.GRAY),
-                statusLine("Uitgeschakeld", String.valueOf(out), out > 0 ? NamedTextColor.RED : NamedTextColor.GRAY));
-        showMenu(admin, "Spelers", body, buttons, backButton("Terug naar Home.", () -> openMenu(admin)));
-    }
-
-    // ---- new design: Wereld en server (what used to be Server and Wereld, in one screen)
-
-    private void openNewWorldMenu(Player admin) {
-        if (!admin.isOnline()) {
-            return;
-        }
-        Runnable again = () -> openWorldMenu(admin);
-        List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(stateButton("Launch", launched, "gelanceerd", "nog niet",
-                "Noord gaat naar de spawn van Noord, Zuid naar die van Zuid.", () -> {
-                    if (!launched) {
-                        openLaunchConfirm(admin, again);
-                    } else {
-                        confirm(admin, "Launch resetten?",
-                                "Het lobby-item zegt daarna weer dat de server nog niet open is.",
-                                "Spelers in de gamewereld blijven daar.", Component.text("Ja, resetten", NamedTextColor.RED),
-                                () -> {
-                                    resetLaunch(admin);
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("Main wereld", mainOpen, "open", "dicht",
-                "Sluiten stuurt iedereen behalve admins naar de lobby.", () -> {
-                    if (mainOpen) {
-                        confirm(admin, "Main wereld sluiten?",
-                                "Iedereen behalve admins gaat naar de lobby en kan er niet uit tot je hem opent.",
-                                "Spelers houden hun spullen en komen later terug op hun laatste plek.",
-                                Component.text("Ja, sluiten", NamedTextColor.RED),
-                                () -> {
-                                    closeMainWorld(admin);
-                                    again.run();
-                                },
-                                again);
-                    } else {
-                        openMainWorld(admin);
-                        again.run();
-                    }
-                }));
-        buttons.add(stateButton("Server", !serverClosed, "open", "dicht",
-                "Sluit de server voor iedereen behalve closed-access, of maak hem weer open.", () -> {
-                    if (serverClosed) {
-                        setServerClosed(false);
-                        again.run();
-                    } else {
-                        confirm(admin, "Server sluiten?",
-                                "Iedereen behalve " + String.join(", ", getConfig().getStringList("closed-access"))
-                                        + " wordt gekickt.",
-                                "De server blijft dicht tot je hem weer opent.",
-                                Component.text("Ja, sluiten", NamedTextColor.RED),
-                                () -> {
-                                    if (!hasClosedAccess(admin.getName())) {
-                                        admin.sendMessage(Component.text("Je staat zelf niet in 'closed-access' in "
-                                                + "config.yml, dan zou je jezelf buitensluiten.", NamedTextColor.RED));
-                                    } else {
-                                        setServerClosed(true);
-                                    }
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("Nether", netherOpen, "open", "dicht",
-                "Opent of sluit de Nether, met titel en bericht bij openen.", () -> {
-                    if (netherOpen) {
-                        setNether(false);
-                        again.run();
-                    } else {
-                        confirm(admin, "Nether openen?", "Iedereen krijgt de titel en het bericht dat de Nether open is.",
-                                "Je kunt hem later weer sluiten.", Component.text("Ja, openen", NamedTextColor.GREEN),
-                                () -> {
-                                    setNether(true);
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("End", endOpen, "open", "dicht",
-                "Opent of sluit het End, met titel en bericht bij openen.", () -> {
-                    if (endOpen) {
-                        setEnd(false);
-                        again.run();
-                    } else {
-                        confirm(admin, "End openen?", "Iedereen krijgt de titel en het bericht dat het End open is.",
-                                "Je kunt het later weer sluiten.", Component.text("Ja, openen", NamedTextColor.GREEN),
-                                () -> {
-                                    setEnd(true);
-                                    again.run();
-                                },
-                                again);
-                    }
-                }));
-        buttons.add(stateButton("Grenzen", bordersDropped, "open", "dicht",
-                "Droppen gaat eerst langs de checklist.", () -> {
-                    if (bordersDropped) {
-                        setBordersDropped(false);
-                        again.run();
-                    } else {
-                        openChecklistMenu(admin);
-                    }
-                }));
-        buttons.add(button(iconLabel(M_COUNTDOWN, "Countdown", NamedTextColor.WHITE),
-                "Hologram met de aftelling naar de start.", 150, () -> openCountdownMenu(admin)));
-        buttons.add(button(iconLabel(M_LOBBY, "Lobby", NamedTextColor.WHITE),
-                "Lobby aanmaken, spawn, bescherming en verwijderen.", 150, () -> openLobbyMenu(admin)));
-        buttons.add(button(iconLabel(M_SPAWN_N, "Spawnpunten", NamedTextColor.WHITE),
-                "Spawn van Noord en Zuid en naar het main eiland.", 150, () -> openSpawnMenu(admin)));
-        buttons.add(button(iconLabel(M_MAIN, "Naar main eiland", NamedTextColor.WHITE),
-                "Teleporteert jou naar de gamewereld (laatste plek of team spawn).", 150,
-                () -> enterGame(admin, false, true)));
-        Component body = joinLines(
-                statusLine("Lobby", lobbyCreated ? "aangemaakt" : (lobbyExists() ? "oude rest" : "nog niet"),
-                        lobbyCreated ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                statusLine("Spawn Noord", spawnNoord != null ? "ingesteld" : "niet ingesteld",
-                        spawnNoord != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                statusLine("Spawn Zuid", spawnZuid != null ? "ingesteld" : "niet ingesteld",
-                        spawnZuid != null ? NamedTextColor.GREEN : NamedTextColor.YELLOW),
-                Component.text("Klik op een schakelaar om hem om te zetten.", NamedTextColor.DARK_GRAY));
-        showMenu(admin, "Wereld en server", body, buttons, backButton("Terug naar Home.", () -> openMenu(admin)));
-    }
-
     // ------------------------------------------------------------------ tab completion
 
     /** Typing /lowkey (and pressing space / tab) suggests every possibility. */
@@ -9268,11 +7269,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
             }
             return names;
-        }
-        if (args.length == 2 && args[0].equalsIgnoreCase("menu")) {
-            List<String> menuOptions = new ArrayList<>(Arrays.asList("nieuw", "klassiek", "edit", "geavanceerd", "simpel"));
-            menuOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
-            return menuOptions;
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("event")) {
             List<String> eventOptions = new ArrayList<>(Arrays.asList("start", "test", "stop", "camera", "teams", "reset"));
@@ -9307,10 +7303,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("pin");
             options.add("countdown");
             options.add("mace");
-            options.add("checklist");
             options.add("event");
             options.add("losers");
-            options.add("tijdlijn");
             options.add("end");
             options.add("finale");
             options.add("say");
@@ -10264,10 +8258,10 @@ final class MaceManager implements Listener {
             return;
         }
         List<ActionButton> buttons = new ArrayList<>();
-        buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Cooldown instellen", NamedTextColor.WHITE),
+        buttons.add(core.button(core.iconLabel(LowkeyCore.M_COUNTDOWN, "Cooldown instellen", NamedTextColor.WHITE),
                 "Stel de cooldown van de mace in (in minuten).", 150, () -> openCooldownDialog(admin)));
         if (enabled) {
-            buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Mace uitzetten", NamedTextColor.RED),
+            buttons.add(core.button(core.iconLabel(LowkeyCore.M_BARRIER, "Mace uitzetten", NamedTextColor.RED),
                     "Niemand kan de mace dan craften of gebruiken.", 150, () -> {
                         setEnabled(admin, false);
                         openMenu(admin);
@@ -10280,21 +8274,21 @@ final class MaceManager implements Listener {
                     }));
         }
         if (cooldownLeftMs > 0L) {
-            buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Cooldown wissen", NamedTextColor.WHITE),
+            buttons.add(core.button(core.iconLabel(LowkeyCore.M_WATER, "Cooldown wissen", NamedTextColor.WHITE),
                     "Haalt de lopende cooldown van de mace weg.", 150, () -> {
                         resetCooldown(admin);
                         openMenu(admin);
                     }));
         }
-        buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Titel testen", NamedTextColor.WHITE),
+        buttons.add(core.button(core.iconLabel(LowkeyCore.M_HORN, "Titel testen", NamedTextColor.WHITE),
                 "Laat de titel alleen aan jou zien.", 150, () -> openTitleTest(admin)));
-        buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Mace geven", NamedTextColor.WHITE),
+        buttons.add(core.button(core.iconLabel(LowkeyCore.M_DIAMOND, "Mace geven", NamedTextColor.WHITE),
                 "Geeft de mace aan een speler (alleen als hij nog niet bestaat).", 150,
                 () -> core.pickPlayer(admin, "Mace geven", target -> {
                     giveMace(admin, target);
                     openMenu(admin);
                 }, () -> openMenu(admin))));
-        buttons.add(core.button(core.iconLabel(LowkeyCore.M_MACE, "Mace resetten", NamedTextColor.RED),
+        buttons.add(core.button(core.iconLabel(LowkeyCore.M_FIRE, "Mace resetten", NamedTextColor.RED),
                 "Haalt de mace weg en laat hem opnieuw craften.", 150, () -> openResetConfirm(admin)));
 
         Component body = LowkeyCore.joinLines(
