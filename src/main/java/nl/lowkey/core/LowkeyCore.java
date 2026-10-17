@@ -9,7 +9,6 @@ import io.papermc.paper.registry.data.dialog.action.DialogAction;
 import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.input.DialogInput;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
-import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -328,7 +327,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private boolean eliminateOnDeath;
     private String eliminatedSuffix;
     /** how long an eliminated player gets to spectate before being kicked */
-    private static final long ELIMINATION_SPECTATE_TICKS = 3600L; // 3 minutes
+    private static final long ELIMINATION_SPECTATE_TICKS = 1200L; // 60 seconds
 
     // ------------------------------------------------------------------ server hours (09:00 - 00:00)
 
@@ -879,16 +878,25 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 zuid++;
             }
         }
+        // Noord sits at the far left of the line, Zuid at the far right. The line is a fixed width (in pixels) and the
+        // tab list grows to fit it, so the counters end up against the edges. Widths: icon 10, space 4, "Noord " 34,
+        // "Zuid " 24, a bold digit 7. The gap is filled with plain spaces (4 px each).
+        int teamWidth = Math.max(60, getConfig().getInt("tab-team-width", 150));
+        String noordCount = String.valueOf(noord);
+        String zuidCount = String.valueOf(zuid);
+        int leftWidth = 10 + 4 + 34 + 7 * noordCount.length();
+        int rightWidth = 10 + 4 + 24 + 7 * zuidCount.length();
+        int gap = Math.max(2, Math.round((teamWidth - leftWidth - rightWidth) / 4.0f));
         Component teams = Component.text()
                 .append(glyph(NOORD_ICON))
                 .append(Component.space())
                 .append(Component.text("Noord ", TextColor.color(Side.NOORD.rgb)))
-                .append(Component.text(String.valueOf(noord), NamedTextColor.WHITE, TextDecoration.BOLD))
-                .append(Component.text("     "))
+                .append(Component.text(noordCount, NamedTextColor.WHITE, TextDecoration.BOLD))
+                .append(Component.text(" ".repeat(gap)))
                 .append(glyph(ZUID_ICON))
                 .append(Component.space())
                 .append(Component.text("Zuid ", TextColor.color(Side.ZUID.rgb)))
-                .append(Component.text(String.valueOf(zuid), NamedTextColor.WHITE, TextDecoration.BOLD))
+                .append(Component.text(zuidCount, NamedTextColor.WHITE, TextDecoration.BOLD))
                 .build();
         Component online = Component.text()
                 .append(Component.text("Online: ", NamedTextColor.GRAY))
@@ -1215,7 +1223,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(glyph(LOWKEY_BADGE))
                 .append(Component.space())
                 .append(Component.text("Je kunt voor de komende ", NamedTextColor.WHITE))
-                .append(Component.text("3 minuten", NamedTextColor.RED))
+                .append(Component.text("60 seconden", NamedTextColor.RED))
                 .append(Component.text(" spectaten", NamedTextColor.WHITE))
                 .build();
     }
@@ -5013,7 +5021,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private boolean finaleCheckPending;
     private final List<FinaleDeath> finaleDeaths = new ArrayList<>();
     private final Set<Integer> finaleAnnounced = new HashSet<>();
-    private BossBar finaleBar;
     private final Set<UUID> showInvulnerable = new HashSet<>();
     private final Random finaleRandom = new Random();
 
@@ -5090,10 +5097,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         if (finaleState == FinaleState.PAUSED) {
             finaleFreezeBorder();
-        }
-        if (finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED) {
-            finaleBarEnsure();
-            finaleBarUpdate();
         }
     }
 
@@ -5271,9 +5274,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     runStartCz + (runEndCz - runStartCz) * p);
         }
         finaleTickCount++;
-        if (finaleTickCount % 5 == 0) {
-            finaleBarUpdate();
-        }
         if (finaleTickCount % 50 == 0) {
             saveState();
         }
@@ -5284,47 +5284,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         border.setSize(border.getSize());
     }
 
-    // ---- boss bar
-
-    private void finaleBarEnsure() {
-        if (finaleBar == null) {
-            finaleBar = BossBar.bossBar(Component.text("FINALE"), 1.0f, BossBar.Color.PINK, BossBar.Overlay.PROGRESS);
-        }
-        for (Player p : getServer().getOnlinePlayers()) {
-            p.showBossBar(finaleBar);
-        }
-    }
-
-    private void finaleBarHide() {
-        if (finaleBar == null) {
-            return;
-        }
-        for (Player p : getServer().getOnlinePlayers()) {
-            p.hideBossBar(finaleBar);
-        }
-        finaleBar = null;
-    }
-
-    private void finaleBarUpdate() {
-        if (finaleBar == null) {
-            return;
-        }
-        long left = Math.max(0L, runTotalMs - finaleElapsedMs);
-        double size = gameWorld().getWorldBorder().getSize();
-        TextComponent.Builder name = Component.text()
-                .append(Component.text("FINALE", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD))
-                .append(Component.text("   Border: ", NamedTextColor.GRAY))
-                .append(Component.text(finaleNum(size) + " blokken", NamedTextColor.WHITE))
-                .append(Component.text("   Nog ", NamedTextColor.GRAY))
-                .append(Component.text(clock(left), NamedTextColor.WHITE));
-        if (finaleState == FinaleState.PAUSED) {
-            name.append(Component.text("   (gepauzeerd)", NamedTextColor.YELLOW));
-        }
-        finaleBar.name(name.build());
-        float progress = runTotalMs <= 0L ? 0f : (float) Math.min(1.0, Math.max(0.0, (double) left / runTotalMs));
-        finaleBar.progress(progress);
-    }
-
     @EventHandler
     public void onFinaleJoin(PlayerJoinEvent event) {
         final Player player = event.getPlayer();
@@ -5332,10 +5291,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         getServer().getScheduler().runTaskLater(this, () -> {
-            if (!player.isOnline() || finaleBar == null) {
+            if (!player.isOnline()) {
                 return;
             }
-            player.showBossBar(finaleBar);
             if (finaleRestartNotice && finaleState == FinaleState.PAUSED && isAdmin(player)) {
                 player.sendMessage(finaleLine(Component.text("De finale stond aan toen de server herstartte en staat nu "
                         + "op pauze. Open /lowkey finale om hem te hervatten.", NamedTextColor.YELLOW)));
@@ -5405,8 +5363,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finaleLastTickMs = System.currentTimeMillis();
         finaleState = FinaleState.RUNNING;
         saveState();
-        finaleBarEnsure();
-        finaleBarUpdate();
 
         int alive = finaleAlivePlayers().size();
         Title title = Title.title(
@@ -5434,7 +5390,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finaleState = FinaleState.PAUSED;
         finaleFreezeBorder();
         saveState();
-        finaleBarUpdate();
         finaleBroadcast(Component.text("De finale staat even op pauze.", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("De finale staat op pauze. De border blijft staan.", NamedTextColor.GREEN));
     }
@@ -5450,8 +5405,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finaleLastTickMs = System.currentTimeMillis();
         finaleState = FinaleState.RUNNING;
         saveState();
-        finaleBarEnsure();
-        finaleBarUpdate();
         finaleBroadcast(Component.text("De finale gaat weer verder!", NamedTextColor.WHITE));
         sender.sendMessage(Component.text("De finale loopt weer.", NamedTextColor.GREEN));
     }
@@ -5473,7 +5426,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finaleDeaths.clear();
         finaleCheckPending = false;
         finaleRestartNotice = false;
-        finaleBarHide();
         saveState();
         sender.sendMessage(Component.text("De finale is gestopt en de border staat weer als bij de start.",
                 NamedTextColor.GREEN));
@@ -5601,7 +5553,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finaleDeaths.clear();
         finaleFreezeBorder();
         saveState();
-        finaleBarHide();
         winnerShow(winner, false);
         finaleNotifyAdmins("De finale is afgelopen. " + winner.getName() + " heeft gewonnen. Zet de border terug met "
                 + "/lowkey finale stop.", NamedTextColor.GREEN);
@@ -7790,18 +7741,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** wide space glyph (advance 56) between the two big logos in the title */
     private static final String EVENT_GAP = "\uE012";
 
-    private static final String[] FAKE_NAMES = {"Alex", "Steve", "Notch", "Herobrine", "Jeb_", "Dinnerbone", "Grumm",
-            "Kelly", "Mara", "Ravi", "Luna", "Finn", "Zoe", "Max", "Nora", "Sam", "Eli", "Ivo", "Pien", "Bram"};
+    /** Real accounts, so the test heads get real skins (a name that cannot be found shows a default head). */
+    private static final String[] FAKE_NAMES = {"Notch", "jeb_", "Dinnerbone", "Grumm", "Searge", "Dream", "Technoblade",
+            "TommyInnit", "Tubbo_", "Ranboo", "Sapnap", "GeorgeNotFound", "Skeppy", "Ph1LzA", "WilburSoot", "Quackity",
+            "Fundy", "Punz", "Antfrost", "Herobrine"};
 
     // Layout of the stage in blocks, relative to the camera. Tune these numbers if it does not look right on screen.
     private static final double EV_DIST = 8.0;            // how far in front of the camera everything hangs
-    private static final double EV_COL_X = 3.4;           // distance of each team column from the middle
+    private static final double EV_COL_X = 3.9;           // distance of each team column from the middle
     private static final double EV_TOP_Y = -0.2;          // height of the first row (0 = camera height)
-    private static final double EV_CELL_W = 1.25;         // width of one head + name cell
-    private static final double EV_ROW_MAX = 0.8;         // biggest distance between two rows
-    private static final double EV_ROWS_H = 3.2;          // all rows together stay inside this height
-    private static final float EV_HEAD_SCALE = 0.55f;
-    private static final float EV_NAME_SCALE = 0.4f;
+    private static final double EV_CELL_W = 1.6;          // width of one head + name cell
+    private static final double EV_ROW_MAX = 1.05;        // biggest distance between two rows
+    private static final double EV_ROWS_H = 3.9;          // all rows together stay inside this height
+    private static final float EV_HEAD_SCALE = 1.3f;
+    private static final float EV_NAME_SCALE = 0.5f;
     private static final double EV_CENTER_Y = 0.7;        // height of the big shuffle head
     private static final float EV_CENTER_HEAD_SCALE = 1.5f;
 
@@ -7812,6 +7765,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         final boolean fake;
         Side side = Side.NONE;
         boolean placed;
+        /** the head with the real skin of a fake (test) player, once it has been loaded */
+        volatile ItemStack head;
 
         EvPlayer(UUID id, String name, boolean fake) {
             this.id = id;
@@ -7913,7 +7868,27 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .add(up.multiply(y));
     }
 
+    /** Looks up the skin of a fake (test) player by name, in the background. */
+    private void loadFakeSkin(EvPlayer ep) {
+        try {
+            Bukkit.createProfile(ep.name).update().thenAccept(profile ->
+                    getServer().getScheduler().runTask(this, () -> {
+                        ItemStack skinned = new ItemStack(Material.PLAYER_HEAD);
+                        SkullMeta meta = (SkullMeta) skinned.getItemMeta();
+                        meta.setPlayerProfile(profile);
+                        skinned.setItemMeta(meta);
+                        ep.head = skinned;
+                    })).exceptionally(t -> null);
+        } catch (Exception e) {
+            getLogger().warning("Kon de skin van " + ep.name + " niet laden: " + e.getMessage());
+        }
+    }
+
     private ItemStack eventHead(EvPlayer ep) {
+        if (ep.fake) {
+            ItemStack skinned = ep.head;
+            return skinned != null ? skinned.clone() : new ItemStack(Material.PLAYER_HEAD);
+        }
         ItemStack head = new ItemStack(Material.PLAYER_HEAD);
         if (!ep.fake) {
             SkullMeta meta = (SkullMeta) head.getItemMeta();
@@ -7936,7 +7911,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             d.setBrightness(new Display.Brightness(15, 15));
             d.setViewRange(2.5f);
             d.setPersistent(false);
-            d.setTransformation(new Transformation(new Vector3f(), new AxisAngle4f(),
+            // turned half a circle so the face looks at the camera instead of away from it
+            d.setTransformation(new Transformation(new Vector3f(), new AxisAngle4f((float) Math.PI, 0f, 1f, 0f),
                     new Vector3f(scale, scale, scale), new AxisAngle4f()));
         });
         eventEntities.add(display);
@@ -8011,7 +7987,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             List<String> names = new ArrayList<>(Arrays.asList(FAKE_NAMES));
             Collections.shuffle(names, random);
             for (int i = 0; i < fakes; i++) {
-                eventPlayers.add(new EvPlayer(UUID.randomUUID(), names.get(i), true));
+                EvPlayer fake = new EvPlayer(UUID.randomUUID(), names.get(i), true);
+                eventPlayers.add(fake);
+                loadFakeSkin(fake);
             }
         }
         Collections.shuffle(eventPlayers, random);
@@ -8287,7 +8265,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         double y = EV_TOP_Y - (k / cols) * spacing;
         Location headAt = eventPoint(x, y);
         spawnEventHead(headAt, eventHead(ep), EV_HEAD_SCALE);
-        spawnEventText(eventPoint(x, y - 0.45), Component.text(ep.name, color, TextDecoration.BOLD), EV_NAME_SCALE);
+        spawnEventText(eventPoint(x, y - 0.62), Component.text(ep.name, color, TextDecoration.BOLD), EV_NAME_SCALE);
         headAt.getWorld().spawnParticle(Particle.END_ROD, headAt, 25, 0.3, 0.3, 0.3, 0.05);
 
         Component bar = Component.text("Verdeeld: " + eventDone + " van " + eventPlayers.size(), NamedTextColor.GRAY);
