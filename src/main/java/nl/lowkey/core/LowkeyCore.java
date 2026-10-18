@@ -10,6 +10,7 @@ import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.input.DialogInput;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
 import net.kyori.adventure.key.Key;
+import net.kyori.adventure.inventory.Book;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import net.kyori.adventure.text.Component;
@@ -100,6 +101,7 @@ import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.BookMeta;
 import org.bukkit.inventory.meta.FireworkMeta;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
@@ -233,6 +235,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     static final String M_HORN = "\uE07D";
     static final String M_BONE = "\uE07E";
     static final String M_ENDCRYSTAL = "\uE07F";
+    static final String M_BOOK = "\uE080";
 
     /** -1 px space: pieces of a wide picture are joined with this so there is no seam */
     private static final String SPACER = "\uE010";
@@ -331,6 +334,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private Location spawnNoord;
     private Location spawnZuid;
     private NamespacedKey lobbyItemKey;
+    private NamespacedKey rulesBookKey;
 
     private NamespacedKey graceKey;
     /** which "grace for everybody" reset a player has already received (see /lowkey graceall) */
@@ -395,6 +399,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         sideKey = new NamespacedKey(this, "side");
         eliminatedKey = new NamespacedKey(this, "eliminated");
         lobbyItemKey = new NamespacedKey(this, "lobby_item");
+        rulesBookKey = new NamespacedKey(this, "rules_book");
         losersItemKey = new NamespacedKey(this, "losers_item");
         launched = state.getBoolean("launched", false);
         mainOpen = state.getBoolean("main-open", true);
@@ -438,6 +443,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         mace.start();
         loadEventCamera();
         finaleOnEnable();
+        loadRules();
 
         LocalTime startupTime = LocalTime.now(LOWKEY_ZONE);
         hoursOpen = startupTime.getHour() >= HOURS_OPEN_FROM;
@@ -2049,6 +2055,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private void giveLobbyItem(Player player) {
         player.getInventory().setItem(4, createLobbyItem());
+        giveRulesBook(player);
         player.getInventory().setHeldItemSlot(4);
     }
 
@@ -2105,7 +2112,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void removeLobbyItems(Player player) {
         ItemStack[] contents = player.getInventory().getContents();
         for (int i = 0; i < contents.length; i++) {
-            if (isLobbyItem(contents[i])) {
+            if (isLobbyItem(contents[i]) || isRulesBook(contents[i])) {
                 player.getInventory().setItem(i, null);
             }
         }
@@ -2133,7 +2140,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             if (!data.getBoolean("stashed", false)) {
                 ItemStack[] stash = player.getInventory().getContents().clone();
                 for (int i = 0; i < stash.length; i++) {
-                    if (isLobbyItem(stash[i]) || isLosersItem(stash[i])) {
+                    if (isLobbyItem(stash[i]) || isLosersItem(stash[i]) || isRulesBook(stash[i])) {
                         stash[i] = null; // the stars belong to the lobby, never to the real inventory
                     }
                 }
@@ -2165,6 +2172,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         } else {
             giveLobbyItem(player);
         }
+        scheduleForcedRulesRead(player);
     }
 
     /** Puts the real inventory back (and removes the lobby item). Does nothing if nothing was put away. */
@@ -2736,6 +2744,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             event.setCancelled(true);
             if (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK) {
                 useLobbyItem(player);
+            }
+            return;
+        }
+        if (isRulesBook(event.getItem())) {
+            event.setCancelled(true);
+            if (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK) {
+                openRulesBook(player);
             }
             return;
         }
@@ -3940,6 +3955,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "Launch, main wereld en de server open of dicht.", 150, () -> openServerMenu(admin)));
         buttons.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
                 "Countdown, eigen bericht, donatiebericht en websitebericht.", 150, () -> openMessagesMenu(admin)));
+        buttons.add(button(iconLabel(M_BOOK, "Regels", NamedTextColor.WHITE),
+                "Het regelboekje in de lobby: pagina's schrijven en iedereen opnieuw laten lezen.", 150,
+                () -> openRulesMenu(admin)));
         buttons.add(button(iconLabel(M_MACE, "Mace", NamedTextColor.WHITE),
                 "De ene mace: cooldown, houder en reset.", 150, () -> mace.openMenu(admin)));
         buttons.add(button(iconLabel(M_TEAM, "Teams", NamedTextColor.WHITE),
@@ -4300,8 +4318,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return name;
     }
 
-    private ActionButton teamSpacer() {
-        return ActionButton.create(Component.empty(), null, 1, null);
+    /** An empty slot: Minecraft cannot hide a button, so it is a plain grey one that only refreshes the screen. */
+    private ActionButton teamBlank(Player admin, int width) {
+        return button(Component.text(" "), "", width, () -> openTeamsMenu(admin));
     }
 
     private ActionButton teamPencilButton(Player admin, TeamEntry e) {
@@ -4360,9 +4379,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 buttons.add(teamNameButton(admin, e));
                 buttons.add(teamMoveButton(admin, e, Side.ZUID));
             } else {
-                buttons.add(teamSpacer());
-                buttons.add(teamSpacer());
-                buttons.add(teamSpacer());
+                buttons.add(teamBlank(admin, 28));
+                buttons.add(teamBlank(admin, 130));
+                buttons.add(teamBlank(admin, 28));
             }
             if (i < zuid.size()) {
                 TeamEntry e = zuid.get(i);
@@ -4370,19 +4389,24 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 buttons.add(teamNameButton(admin, e));
                 buttons.add(teamPencilButton(admin, e));
             } else {
-                buttons.add(teamSpacer());
-                buttons.add(teamSpacer());
-                buttons.add(teamSpacer());
+                buttons.add(teamBlank(admin, 28));
+                buttons.add(teamBlank(admin, 130));
+                buttons.add(teamBlank(admin, 28));
             }
         }
-        // bottom row: players without a team under Noord, grace for everybody under Zuid
-        buttons.add(teamSpacer());
+        // last row: Terug under the Noord names, Zonder team under the Zuid names
+        buttons.add(teamBlank(admin, 28));
+        buttons.add(button(iconLabel(M_BACK, "Terug", NamedTextColor.WHITE), "Terug naar het hoofdmenu.", 130,
+                () -> openMenu(admin)));
+        buttons.add(teamBlank(admin, 28));
+        buttons.add(teamBlank(admin, 28));
         buttons.add(button(iconLabel(M_PLAYERS, "Zonder team (" + geen.size() + ")", NamedTextColor.WHITE),
                 "Spelers zonder team in Noord of Zuid zetten.", 130, () -> openNoTeamList(admin)));
-        buttons.add(teamSpacer());
-        buttons.add(teamSpacer());
-        buttons.add(button(iconLabel(M_GRACE, "Grace voor iedereen", NamedTextColor.WHITE),
-                "Zet de grace van alle spelers weer op de standaard tijd.", 130, () -> confirm(admin,
+        buttons.add(teamBlank(admin, 28));
+
+        // Grace voor iedereen is the exit button of the dialog, so it always sits in the middle under everything
+        ActionButton grace = button(iconLabel(M_GRACE, "Grace voor iedereen", NamedTextColor.WHITE),
+                "Zet de grace van alle spelers weer op de standaard tijd.", 200, () -> confirm(admin,
                         "Grace voor iedereen?",
                         "De grace van alle spelers gaat terug naar " + (graceMillis / 60_000L) + " minuten, ook van "
                                 + "spelers die offline zijn.",
@@ -4392,8 +4416,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             resetGraceForEveryone(admin, graceMillis / 60_000L);
                             openTeamsMenu(admin);
                         },
-                        () -> openTeamsMenu(admin))));
-        buttons.add(teamSpacer());
+                        () -> openTeamsMenu(admin)));
 
         Component logos = Component.text()
                 .append(glyph(NOORD_BIG))
@@ -4413,10 +4436,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         List<DialogBody> bodies = new ArrayList<>();
         bodies.add(DialogBody.plainMessage(logos, 400));
         bodies.add(DialogBody.plainMessage(counts, 400));
-        ActionButton back = backButton("Terug naar het hoofdmenu.", () -> openMenu(admin));
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(menuTitle("Teams")).body(bodies).build())
-                .type(DialogType.multiAction(buttons, back, 6)));
+                .base(DialogBase.builder(menuTitle("Teams"))
+                        .canCloseWithEscape(false)
+                        .body(bodies)
+                        .build())
+                .type(DialogType.multiAction(buttons, grace, 6)));
         admin.showDialog(dialog);
     }
 
@@ -7241,6 +7266,346 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         } else {
             sender.sendMessage(Component.text("Gebruik: /lowkey event <start|test [aantal]|stop|camera|teams|reset>",
                     NamedTextColor.GRAY));
+        }
+    }
+
+    // ------------------------------------------------------------------ rules book (lobby slot 9)
+
+    /** The pages of the rules book, saved in rules.yml. In a page "|" is a new line and MiniMessage is allowed. */
+    private final List<String> rulesPages = new ArrayList<>();
+
+    private File rulesFile() {
+        return new File(getDataFolder(), "rules.yml");
+    }
+
+    private void loadRules() {
+        rulesPages.clear();
+        rulesPages.addAll(YamlConfiguration.loadConfiguration(rulesFile()).getStringList("pages"));
+    }
+
+    private void saveRules() {
+        YamlConfiguration y = new YamlConfiguration();
+        y.set("pages", new ArrayList<>(rulesPages));
+        try {
+            getDataFolder().mkdirs();
+            y.save(rulesFile());
+        } catch (IOException e) {
+            getLogger().warning("Kon rules.yml niet opslaan: " + e.getMessage());
+        }
+    }
+
+    private List<Component> rulesComponents() {
+        MiniMessage mm = MiniMessage.miniMessage();
+        List<Component> pages = new ArrayList<>();
+        for (String raw : rulesPages) {
+            pages.add(mm.deserialize(raw.replace("|", "<br>")));
+        }
+        return pages;
+    }
+
+    private boolean isRulesBook(ItemStack item) {
+        if (item == null || item.getType().isAir() || !item.hasItemMeta()) {
+            return false;
+        }
+        return item.getItemMeta().getPersistentDataContainer().has(rulesBookKey, PersistentDataType.BYTE);
+    }
+
+    private ItemStack createRulesBook() {
+        ItemStack item = new ItemStack(Material.WRITTEN_BOOK);
+        BookMeta meta = (BookMeta) item.getItemMeta();
+        meta.title(Component.text("Regels", NamedTextColor.LIGHT_PURPLE));
+        meta.author(Component.text("LowkeySMP"));
+        meta.pages(rulesComponents());
+        meta.setGeneration(BookMeta.Generation.ORIGINAL);
+        meta.getPersistentDataContainer().set(rulesBookKey, PersistentDataType.BYTE, (byte) 1);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    /** The book goes in hotbar slot 9 of everybody in the lobby (when there are rules). */
+    private void giveRulesBook(Player player) {
+        if (!rulesPages.isEmpty()) {
+            player.getInventory().setItem(8, createRulesBook());
+        }
+    }
+
+    /** Opens the book with the current rules, whatever the book item in the inventory still says. */
+    private void openRulesBook(Player player) {
+        if (rulesPages.isEmpty()) {
+            player.sendMessage(Component.text("Er zijn nog geen regels ingesteld.", NamedTextColor.YELLOW));
+            return;
+        }
+        player.openBook(Book.book(Component.text("Regels", NamedTextColor.LIGHT_PURPLE), Component.text("LowkeySMP"),
+                rulesComponents()));
+    }
+
+    private boolean rulesSeen(UUID id) {
+        return loadPlayerData(id).getBoolean("rules-seen", false);
+    }
+
+    private void setRulesSeen(UUID id, boolean seen) {
+        YamlConfiguration data = loadPlayerData(id);
+        data.set("rules-seen", seen ? Boolean.TRUE : null);
+        savePlayerData(id, data);
+    }
+
+    /** The first time somebody is in the lobby the book opens by itself. */
+    private void scheduleForcedRulesRead(Player player) {
+        if (rulesPages.isEmpty() || rulesSeen(player.getUniqueId())) {
+            return;
+        }
+        getServer().getScheduler().runTaskLater(this, () -> {
+            if (!player.isOnline() || !inLobby(player) || rulesPages.isEmpty()) {
+                return;
+            }
+            setRulesSeen(player.getUniqueId(), true);
+            player.sendMessage(Component.text()
+                    .append(glyph(LOWKEY_BADGE))
+                    .append(Component.space())
+                    .append(Component.text("Lees eerst de regels! Je kunt ze later altijd teruglezen in slot 9.",
+                            NamedTextColor.LIGHT_PURPLE))
+                    .build());
+            openRulesBook(player);
+        }, 40L);
+    }
+
+    /** After an edit: every book in the lobby gets the new text (or disappears when there are no rules left). */
+    private void refreshRulesBooks() {
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (!inLobby(p)) {
+                continue;
+            }
+            ItemStack[] contents = p.getInventory().getContents();
+            for (int i = 0; i < contents.length; i++) {
+                if (isRulesBook(contents[i])) {
+                    p.getInventory().setItem(i, null);
+                }
+            }
+            giveRulesBook(p);
+        }
+    }
+
+    /** Everybody has to read the book again the next time they are in the lobby (and the ones in it now, right away). */
+    private void resetRulesSeen() {
+        File[] files = new File(getDataFolder(), "players").listFiles((d, n) -> n.endsWith(".yml"));
+        if (files != null) {
+            for (File f : files) {
+                try {
+                    UUID id = UUID.fromString(f.getName().substring(0, f.getName().length() - 4));
+                    setRulesSeen(id, false);
+                } catch (IllegalArgumentException ignored) {
+                    // not a player file
+                }
+            }
+        }
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (inLobby(p)) {
+                scheduleForcedRulesRead(p);
+            }
+        }
+    }
+
+    private static String rulesPreview(String raw) {
+        String plain = raw.replace("|", " ").replaceAll("<[^>]*>", "");
+        return plain.length() > 70 ? plain.substring(0, 70) + "..." : plain;
+    }
+
+    private void openRulesMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        Runnable again = () -> openRulesMenu(admin);
+        List<ActionButton> buttons = new ArrayList<>();
+        for (int i = 0; i < rulesPages.size(); i++) {
+            final int index = i;
+            buttons.add(button(iconLabel(M_FEATHER, "Pagina " + (i + 1) + " bewerken", NamedTextColor.WHITE),
+                    rulesPreview(rulesPages.get(i)), 150, () -> openRulesPageDialog(admin, index)));
+        }
+        buttons.add(button(iconLabel(M_BOOK, "Pagina toevoegen", NamedTextColor.GREEN),
+                "Voeg een nieuwe pagina achteraan toe.", 150, () -> openRulesPageDialog(admin, -1)));
+        if (!rulesPages.isEmpty()) {
+            buttons.add(button(iconLabel(M_LAVA, "Laatste pagina weg", NamedTextColor.RED),
+                    "Haalt de laatste pagina weg.", 150, () -> confirm(admin,
+                            "Laatste pagina weghalen?",
+                            "Pagina " + rulesPages.size() + ": " + rulesPreview(rulesPages.get(rulesPages.size() - 1)),
+                            "Dit kan niet ongedaan gemaakt worden.",
+                            Component.text("Ja, weghalen", NamedTextColor.RED),
+                            () -> {
+                                rulesPages.remove(rulesPages.size() - 1);
+                                saveRules();
+                                refreshRulesBooks();
+                                again.run();
+                            },
+                            again)));
+            buttons.add(button(iconLabel(M_BOOK, "Boek lezen", NamedTextColor.AQUA),
+                    "Open het boek zoals spelers het zien.", 150, () -> openRulesBook(admin)));
+            buttons.add(button(iconLabel(M_STAR, "Iedereen opnieuw laten lezen", NamedTextColor.LIGHT_PURPLE),
+                    "Het boek opent de volgende keer in de lobby weer vanzelf voor iedereen.", 150, () -> confirm(admin,
+                            "Iedereen opnieuw laten lezen?",
+                            "Het boek opent weer vanzelf bij iedereen die in de lobby komt, ook bij wie het al las.",
+                            "Wie nu in de lobby is krijgt het boek meteen.",
+                            Component.text("Ja, opnieuw", NamedTextColor.GREEN),
+                            () -> {
+                                resetRulesSeen();
+                                admin.sendMessage(Component.text("Iedereen leest de regels opnieuw.",
+                                        NamedTextColor.GREEN));
+                                again.run();
+                            },
+                            again)));
+        }
+        Component body = joinLines(
+                statusLine("Pagina's", String.valueOf(rulesPages.size()),
+                        rulesPages.isEmpty() ? NamedTextColor.YELLOW : NamedTextColor.WHITE),
+                statusLine("Boek in de lobby", rulesPages.isEmpty() ? "nog niet (geen regels)" : "slot 9",
+                        rulesPages.isEmpty() ? NamedTextColor.YELLOW : NamedTextColor.GREEN),
+                Component.text("In een pagina is | een nieuwe regel en je mag MiniMessage gebruiken (<red>, <bold>).",
+                        NamedTextColor.DARK_GRAY));
+        showMenu(admin, "Regels", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+    }
+
+    /** One page of the book (index -1 = a new page at the end). */
+    private void openRulesPageDialog(Player admin, int index) {
+        boolean existing = index >= 0 && index < rulesPages.size();
+        DialogInput input = DialogInput.text("tekst", Component.text(existing ? "Pagina " + (index + 1) : "Nieuwe pagina"))
+                .width(400)
+                .initial(existing ? rulesPages.get(index) : "")
+                .maxLength(500)
+                .build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String text = view.getText("tekst");
+            getServer().getScheduler().runTask(this, () -> {
+                if (text == null || text.isBlank()) {
+                    clicker.sendMessage(Component.text("De pagina is leeg, er is niets veranderd.", NamedTextColor.RED));
+                } else if (existing && index < rulesPages.size()) {
+                    rulesPages.set(index, text.trim());
+                    saveRules();
+                    refreshRulesBooks();
+                    clicker.sendMessage(Component.text("Pagina " + (index + 1) + " is opgeslagen.", NamedTextColor.GREEN));
+                } else {
+                    rulesPages.add(text.trim());
+                    saveRules();
+                    refreshRulesBooks();
+                    clicker.sendMessage(Component.text("De pagina is toegevoegd.", NamedTextColor.GREEN));
+                }
+                openRulesMenu(clicker);
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, "Regels"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Een pagina heeft ruimte voor ongeveer 250 tekens. | is een nieuwe regel. Je mag MiniMessage "
+                                        + "gebruiken, bijvoorbeeld <red>tekst</red> of <bold>tekst</bold>.",
+                                NamedTextColor.GRAY), 400)))
+                        .inputs(List.of(input))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_BOOK, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla de pagina op."), 150, save),
+                        backButton("Terug naar de regels.", () -> openRulesMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+    // ------------------------------------------------------------------ totem limit
+
+    /** The most Totems of Undying one player may have (config.yml: max-totems, 2 when it is not there). */
+    private int maxTotems() {
+        return Math.max(0, getConfig().getInt("max-totems", 2));
+    }
+
+    private static boolean isTotem(ItemStack item) {
+        return item != null && item.getType() == Material.TOTEM_OF_UNDYING;
+    }
+
+    /** Totems a player has: inventory, offhand and the item on the cursor. */
+    private int countTotems(Player player) {
+        int n = 0;
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (isTotem(item)) {
+                n += item.getAmount();
+            }
+        }
+        ItemStack cursor = player.getItemOnCursor();
+        if (isTotem(cursor)) {
+            n += cursor.getAmount();
+        }
+        return n;
+    }
+
+    private void totemDenied(Player player) {
+        player.sendActionBar(Component.text()
+                .append(Component.text("Je mag maximaal ", NamedTextColor.RED))
+                .append(Component.text(String.valueOf(maxTotems()), NamedTextColor.WHITE))
+                .append(Component.text(" Totem of Undying hebben.", NamedTextColor.RED))
+                .build());
+    }
+
+    /** Picking one up from the ground: the message stays on the action bar as long as you stand next to it. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onTotemPickup(EntityPickupItemEvent event) {
+        if (!(event.getEntity() instanceof Player)) {
+            return;
+        }
+        Player player = (Player) event.getEntity();
+        ItemStack stack = event.getItem().getItemStack();
+        if (!isTotem(stack) || player.getGameMode() == GameMode.CREATIVE) {
+            return;
+        }
+        if (countTotems(player) + stack.getAmount() > maxTotems()) {
+            event.setCancelled(true);
+            totemDenied(player);
+        }
+    }
+
+    /** Taking one out of a chest and so on (to the cursor, shift click or a hotbar swap). */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onTotemClick(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player)) {
+            return;
+        }
+        Player player = (Player) event.getWhoClicked();
+        if (player.getGameMode() == GameMode.CREATIVE) {
+            return;
+        }
+        Inventory clicked = event.getClickedInventory();
+        if (clicked == null || clicked.getType() == InventoryType.PLAYER) {
+            return; // only things coming from another inventory can add a totem
+        }
+        ItemStack current = event.getCurrentItem();
+        ItemStack cursor = event.getCursor();
+        int gain = 0;
+        switch (event.getAction()) {
+            case PICKUP_ALL:
+            case PICKUP_HALF:
+            case PICKUP_ONE:
+            case PICKUP_SOME:
+            case MOVE_TO_OTHER_INVENTORY:
+                if (isTotem(current)) {
+                    gain = current.getAmount();
+                }
+                break;
+            case SWAP_WITH_CURSOR:
+                gain = (isTotem(current) ? current.getAmount() : 0) - (isTotem(cursor) ? cursor.getAmount() : 0);
+                break;
+            case HOTBAR_SWAP:
+            case HOTBAR_MOVE_AND_READD:
+                ItemStack other = event.getClick() == ClickType.SWAP_OFFHAND
+                        ? player.getInventory().getItemInOffHand()
+                        : (event.getHotbarButton() >= 0 ? player.getInventory().getItem(event.getHotbarButton()) : null);
+                gain = (isTotem(current) ? current.getAmount() : 0) - (isTotem(other) ? other.getAmount() : 0);
+                break;
+            default:
+                break;
+        }
+        if (gain > 0 && countTotems(player) + gain > maxTotems()) {
+            event.setCancelled(true);
+            totemDenied(player);
         }
     }
 
