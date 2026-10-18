@@ -12,6 +12,7 @@ import io.papermc.paper.registry.data.dialog.type.DialogType;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.inventory.Book;
 import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
@@ -89,6 +90,7 @@ import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerEditBookEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -335,6 +337,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private Location spawnZuid;
     private NamespacedKey lobbyItemKey;
     private NamespacedKey rulesBookKey;
+    private NamespacedKey rulesEditorKey;
 
     private NamespacedKey graceKey;
     /** which "grace for everybody" reset a player has already received (see /lowkey graceall) */
@@ -400,6 +403,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         eliminatedKey = new NamespacedKey(this, "eliminated");
         lobbyItemKey = new NamespacedKey(this, "lobby_item");
         rulesBookKey = new NamespacedKey(this, "rules_book");
+        rulesEditorKey = new NamespacedKey(this, "rules_editor");
         losersItemKey = new NamespacedKey(this, "losers_item");
         launched = state.getBoolean("launched", false);
         mainOpen = state.getBoolean("main-open", true);
@@ -6014,6 +6018,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         admin.teleport(losersSpawn);
+        // like a player who goes through the red star: the lobby items (star and rules book) stay behind
+        removeLobbyItems(admin);
     }
 
     private void setLosersSpawn(Player admin) {
@@ -7271,7 +7277,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ rules book (lobby slot 9)
 
-    /** The pages of the rules book, saved in rules.yml. In a page "|" is a new line and MiniMessage is allowed. */
+    /** The pages of the rules book, saved in rules.yml. Plain text as typed in the book; & colour codes work (&c red). */
     private final List<String> rulesPages = new ArrayList<>();
 
     private File rulesFile() {
@@ -7295,10 +7301,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     private List<Component> rulesComponents() {
-        MiniMessage mm = MiniMessage.miniMessage();
+        LegacyComponentSerializer legacy = LegacyComponentSerializer.legacyAmpersand();
         List<Component> pages = new ArrayList<>();
         for (String raw : rulesPages) {
-            pages.add(mm.deserialize(raw.replace("|", "<br>")));
+            pages.add(legacy.deserialize(raw));
         }
         return pages;
     }
@@ -7405,10 +7411,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    private static String rulesPreview(String raw) {
-        String plain = raw.replace("|", " ").replaceAll("<[^>]*>", "");
-        return plain.length() > 70 ? plain.substring(0, 70) + "..." : plain;
-    }
 
     private void openRulesMenu(Player admin) {
         if (!admin.isOnline()) {
@@ -7416,27 +7418,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         Runnable again = () -> openRulesMenu(admin);
         List<ActionButton> buttons = new ArrayList<>();
-        for (int i = 0; i < rulesPages.size(); i++) {
-            final int index = i;
-            buttons.add(button(iconLabel(M_FEATHER, "Pagina " + (i + 1) + " bewerken", NamedTextColor.WHITE),
-                    rulesPreview(rulesPages.get(i)), 150, () -> openRulesPageDialog(admin, index)));
-        }
-        buttons.add(button(iconLabel(M_BOOK, "Pagina toevoegen", NamedTextColor.GREEN),
-                "Voeg een nieuwe pagina achteraan toe.", 150, () -> openRulesPageDialog(admin, -1)));
+        buttons.add(button(iconLabel(M_FEATHER, "Regels schrijven", NamedTextColor.GREEN),
+                "Je krijgt een echt Book and Quill met de huidige regels erin. Pas het aan en klik op Klaar.", 150,
+                () -> giveRulesEditorBook(admin)));
         if (!rulesPages.isEmpty()) {
-            buttons.add(button(iconLabel(M_LAVA, "Laatste pagina weg", NamedTextColor.RED),
-                    "Haalt de laatste pagina weg.", 150, () -> confirm(admin,
-                            "Laatste pagina weghalen?",
-                            "Pagina " + rulesPages.size() + ": " + rulesPreview(rulesPages.get(rulesPages.size() - 1)),
-                            "Dit kan niet ongedaan gemaakt worden.",
-                            Component.text("Ja, weghalen", NamedTextColor.RED),
-                            () -> {
-                                rulesPages.remove(rulesPages.size() - 1);
-                                saveRules();
-                                refreshRulesBooks();
-                                again.run();
-                            },
-                            again)));
             buttons.add(button(iconLabel(M_BOOK, "Boek lezen", NamedTextColor.AQUA),
                     "Open het boek zoals spelers het zien.", 150, () -> openRulesBook(admin)));
             buttons.add(button(iconLabel(M_STAR, "Iedereen opnieuw laten lezen", NamedTextColor.LIGHT_PURPLE),
@@ -7452,65 +7437,99 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                                 again.run();
                             },
                             again)));
+            buttons.add(button(iconLabel(M_LAVA, "Alle regels wissen", NamedTextColor.RED),
+                    "Haalt alle pagina's weg. Het boek verdwijnt dan uit de lobby.", 150, () -> confirm(admin,
+                            "Alle regels wissen?",
+                            "Het boek met " + rulesPages.size() + " pagina's wordt leeg en verdwijnt uit de lobby.",
+                            "Dit kan niet ongedaan gemaakt worden.",
+                            Component.text("Ja, wissen", NamedTextColor.RED),
+                            () -> {
+                                rulesPages.clear();
+                                saveRules();
+                                refreshRulesBooks();
+                                again.run();
+                            },
+                            again)));
         }
         Component body = joinLines(
                 statusLine("Pagina's", String.valueOf(rulesPages.size()),
                         rulesPages.isEmpty() ? NamedTextColor.YELLOW : NamedTextColor.WHITE),
                 statusLine("Boek in de lobby", rulesPages.isEmpty() ? "nog niet (geen regels)" : "slot 9",
                         rulesPages.isEmpty() ? NamedTextColor.YELLOW : NamedTextColor.GREEN),
-                Component.text("In een pagina is | een nieuwe regel en je mag MiniMessage gebruiken (<red>, <bold>).",
+                Component.text("Schrijf in het boek zelf. Kleuren kan met &: &c rood, &6 goud, &l dik, &r terug.",
                         NamedTextColor.DARK_GRAY));
         showMenu(admin, "Regels", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
     }
 
-    /** One page of the book (index -1 = a new page at the end). */
-    private void openRulesPageDialog(Player admin, int index) {
-        boolean existing = index >= 0 && index < rulesPages.size();
-        DialogInput input = DialogInput.text("tekst", Component.text(existing ? "Pagina " + (index + 1) : "Nieuwe pagina"))
-                .width(400)
-                .initial(existing ? rulesPages.get(index) : "")
-                .maxLength(500)
-                .build();
-        DialogAction save = DialogAction.customClick((view, audience) -> {
-            if (!(audience instanceof Player)) {
-                return;
-            }
-            Player clicker = (Player) audience;
-            if (!isAdmin(clicker)) {
-                return;
-            }
-            final String text = view.getText("tekst");
-            getServer().getScheduler().runTask(this, () -> {
-                if (text == null || text.isBlank()) {
-                    clicker.sendMessage(Component.text("De pagina is leeg, er is niets veranderd.", NamedTextColor.RED));
-                } else if (existing && index < rulesPages.size()) {
-                    rulesPages.set(index, text.trim());
-                    saveRules();
-                    refreshRulesBooks();
-                    clicker.sendMessage(Component.text("Pagina " + (index + 1) + " is opgeslagen.", NamedTextColor.GREEN));
-                } else {
-                    rulesPages.add(text.trim());
-                    saveRules();
-                    refreshRulesBooks();
-                    clicker.sendMessage(Component.text("De pagina is toegevoegd.", NamedTextColor.GREEN));
-                }
-                openRulesMenu(clicker);
-            });
-        }, CLICK_OPTIONS);
-        Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, "Regels"))
-                        .body(List.of(DialogBody.plainMessage(Component.text(
-                                "Een pagina heeft ruimte voor ongeveer 250 tekens. | is een nieuwe regel. Je mag MiniMessage "
-                                        + "gebruiken, bijvoorbeeld <red>tekst</red> of <bold>tekst</bold>.",
-                                NamedTextColor.GRAY), 400)))
-                        .inputs(List.of(input))
-                        .build())
-                .type(DialogType.confirmation(
-                        ActionButton.create(iconLabel(M_BOOK, "Opslaan", NamedTextColor.GREEN),
-                                Component.text("Sla de pagina op."), 150, save),
-                        backButton("Terug naar de regels.", () -> openRulesMenu(admin)))));
-        admin.showDialog(dialog);
+    /** A real Book and Quill with the current rules in it. Done or Sign and Close saves them. */
+    private void giveRulesEditorBook(Player admin) {
+        removeRulesEditorBooks(admin);
+        ItemStack book = new ItemStack(Material.WRITABLE_BOOK);
+        BookMeta meta = (BookMeta) book.getItemMeta();
+        meta.setPages(rulesPages.isEmpty() ? new ArrayList<>(List.of("")) : new ArrayList<>(rulesPages));
+        meta.displayName(Component.text("Regels bewerken", NamedTextColor.YELLOW)
+                .decoration(TextDecoration.ITALIC, false));
+        meta.lore(List.of(
+                Component.text("Schrijf de regels en klik op Klaar.", NamedTextColor.GRAY)
+                        .decoration(TextDecoration.ITALIC, false),
+                Component.text("Dan gaan ze naar het boek in de lobby.", NamedTextColor.GRAY)
+                        .decoration(TextDecoration.ITALIC, false)));
+        meta.getPersistentDataContainer().set(rulesEditorKey, PersistentDataType.BYTE, (byte) 1);
+        book.setItemMeta(meta);
+        if (!admin.getInventory().addItem(book).isEmpty()) {
+            admin.sendMessage(Component.text("Je inventory is vol, maak eerst een plek vrij.", NamedTextColor.RED));
+            return;
+        }
+        admin.sendMessage(Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text("Je hebt een Book and Quill met de huidige regels gekregen. Pas het aan en klik "
+                        + "op Klaar (of Sign and Close), dan staan de regels in het boek in de lobby.",
+                        NamedTextColor.LIGHT_PURPLE))
+                .build());
     }
+
+    private void removeRulesEditorBooks(Player player) {
+        ItemStack[] contents = player.getInventory().getContents();
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack item = contents[i];
+            if (item != null && item.hasItemMeta()
+                    && item.getItemMeta().getPersistentDataContainer().has(rulesEditorKey, PersistentDataType.BYTE)) {
+                player.getInventory().setItem(i, null);
+            }
+        }
+    }
+
+    /** Saving the editor book (Done or Sign and Close) puts its pages in the rules. The book itself is removed again. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onRulesBookEdit(PlayerEditBookEvent event) {
+        if (!event.getPreviousBookMeta().getPersistentDataContainer().has(rulesEditorKey, PersistentDataType.BYTE)) {
+            return;
+        }
+        event.setCancelled(true); // the book never gets signed or changed, it only carried the text
+        Player player = event.getPlayer();
+        if (!isAdmin(player)) {
+            return;
+        }
+        List<String> pages = new ArrayList<>(event.getNewBookMeta().getPages());
+        while (!pages.isEmpty() && pages.get(pages.size() - 1).isBlank()) {
+            pages.remove(pages.size() - 1);
+        }
+        rulesPages.clear();
+        rulesPages.addAll(pages);
+        saveRules();
+        refreshRulesBooks();
+        player.sendMessage(Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text(rulesPages.isEmpty()
+                        ? "De regels zijn leeg, het boek verdwijnt uit de lobby."
+                        : "De regels zijn opgeslagen (" + rulesPages.size() + " pagina's). Het boek in de lobby is "
+                                + "bijgewerkt.", NamedTextColor.GREEN))
+                .build());
+        getServer().getScheduler().runTask(this, () -> removeRulesEditorBooks(player));
+    }
+
 
     // ------------------------------------------------------------------ totem limit
 
