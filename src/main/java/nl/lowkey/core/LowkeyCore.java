@@ -30,6 +30,7 @@ import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
@@ -38,6 +39,8 @@ import org.bukkit.WorldCreator;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.Container;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -79,6 +82,7 @@ import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.hanging.HangingBreakByEntityEvent;
 import org.bukkit.event.hanging.HangingPlaceEvent;
+import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
@@ -103,7 +107,9 @@ import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.BlockStateMeta;
 import org.bukkit.inventory.meta.BookMeta;
+import org.bukkit.inventory.meta.BundleMeta;
 import org.bukkit.inventory.meta.FireworkMeta;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
@@ -189,6 +195,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // private-use characters, mapped to textures in assets/lowkey/font/tags.json
     private static final String CREW_ICON = "\uE000";
+    /** the purple of the crew icon: crew members have this colour in the tab list and in chat */
+    private static final int CREW_RGB = 0x8B3DF0;
     private static final String LOWKEY_BADGE = "\uE001";
     private static final String JOIN_ICON = "\uE002";
     private static final String LEAVE_ICON = "\uE003";
@@ -464,6 +472,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::tickLosers, 40L, 40L);
         getServer().getScheduler().runTaskTimer(this, this::tickCountdown, 40L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::tickFinale, 20L, 2L);
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            for (Player p : getServer().getOnlinePlayers()) {
+                enforceTotemLimit(p);
+            }
+        }, 40L, 10L);
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
                 donationIntervalTicks, donationIntervalTicks);
@@ -813,7 +826,24 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         Component icons = prefix.build();
 
-        char sortKey = side.sortKey;
+        boolean crewMember = isCrew(player);
+        boolean out = isLosersOut(player) || (isEliminated(player) && !inLosers(player));
+        boolean hasGrace = graceRemaining(player) > 0L && !inLobby(player);
+        // tab list order: crew, grace, Noord, Zuid, no team, and the dead last (alphabetical inside each group)
+        final char sortKey;
+        if (crewMember) {
+            sortKey = 'a';
+        } else if (out) {
+            sortKey = 'f';
+        } else if (hasGrace) {
+            sortKey = 'b';
+        } else if (side == Side.NOORD) {
+            sortKey = 'c';
+        } else if (side == Side.ZUID) {
+            sortKey = 'd';
+        } else {
+            sortKey = 'e';
+        }
 
         // one small scoreboard team per player: gives the nametag prefix and the tab list order
         Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
@@ -839,11 +869,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         teamNames.put(id, wanted);
 
         // tab list entry: icons + name in the team colour. Eliminated players are grey and struck through.
-        TextColor nameColor = side == Side.NONE ? NamedTextColor.WHITE : TextColor.color(side.rgb);
-        boolean out = isLosersOut(player) || (isEliminated(player) && !inLosers(player));
+        TextColor nameColor = crewMember ? TextColor.color(CREW_RGB)
+                : (side == Side.NONE ? NamedTextColor.WHITE : TextColor.color(side.rgb));
         TextComponent.Builder entry = Component.text().append(icons);
         if (out) {
-            entry.append(Component.text(player.getName(), NamedTextColor.GRAY, TextDecoration.STRIKETHROUGH));
+            entry.append(Component.text(player.getName(), crewMember ? TextColor.color(CREW_RGB) : NamedTextColor.GRAY,
+                    TextDecoration.STRIKETHROUGH));
         } else {
             entry.append(Component.text(player.getName(), nameColor));
         }
@@ -977,11 +1008,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        event.joinMessage(Component.text()
-                .append(glyph(JOIN_ICON))
-                .append(Component.space())
-                .append(Component.text(player.getName(), NamedTextColor.GREEN))
-                .build());
+        event.joinMessage(null);
+        // the "+" goes to the world the player ends up in (the lobby), a moment after the teleport
+        joinSettling.add(player.getUniqueId());
+        getServer().getScheduler().runTaskLater(this, () -> {
+            if (player.isOnline()) {
+                worldMessage(worldGroup(player), player, true, true, true);
+            }
+        }, 8L);
+        getServer().getScheduler().runTaskLater(this, () -> joinSettling.remove(player.getUniqueId()), 60L);
         startTracking(player, true);
         getServer().getScheduler().runTask(this, this::updateTablist);
         if (lobbySpawn != null) {
@@ -1004,11 +1039,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
-        event.quitMessage(Component.text()
-                .append(glyph(LEAVE_ICON))
-                .append(Component.space())
-                .append(Component.text(player.getName(), NamedTextColor.RED))
-                .build());
+        event.quitMessage(null);
+        joinSettling.remove(player.getUniqueId());
+        worldMessage(worldGroup(player), player, false, false, true);
 
         persist(player);
         eventPlayerLeft(player);
@@ -1040,9 +1073,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         } else {
             statusIcon = null;
         }
-        final TextColor nameColor = side == Side.NONE ? null : TextColor.color(side.rgb);
-        event.renderer(ChatRenderer.viewerUnaware((source, sourceDisplayName, message) -> {
+        final TextColor nameColor = isCrew(sender) ? TextColor.color(CREW_RGB)
+                : (side == Side.NONE ? null : TextColor.color(side.rgb));
+        final int senderGroup = worldGroup(sender);
+        event.renderer((source, sourceDisplayName, message, viewer) -> {
             Component line = Component.empty();
+            // crew and admins see every world: a grey tag says where a message from another world comes from
+            if (viewer instanceof Player && worldGroup((Player) viewer) != senderGroup) {
+                line = line.append(Component.text("[" + worldGroupName(senderGroup) + "] ", NamedTextColor.DARK_GRAY));
+            }
             if (statusIcon != null) {
                 line = line.append(glyph(statusIcon)).append(Component.space());
             }
@@ -1050,12 +1089,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return line.append(name)
                     .append(Component.text(": ", NamedTextColor.GRAY))
                     .append(message);
-        }));
+        });
 
-        // lobby, main world and Verliezerseiland each have their own chat (staff sees all of them)
-        final int senderGroup = worldGroup(sender);
+        // lobby, main world and Verliezerseiland each have their own chat (crew and admins see all of them)
         event.viewers().removeIf(viewer -> viewer instanceof Player && !viewer.equals(sender)
-                && worldGroup((Player) viewer) != senderGroup && !isAdmin((Player) viewer));
+                && worldGroup((Player) viewer) != senderGroup && !seesAll((Player) viewer));
         if (senderGroup != 1) {
             return;
         }
@@ -1068,8 +1106,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     return false;
                 }
                 Player viewerPlayer = (Player) viewer;
-                if (isAdmin(viewerPlayer)) {
-                    return false; // staff always sees both team chats
+                if (seesAll(viewerPlayer)) {
+                    return false; // crew and admins always see both team chats
                 }
                 Side viewerSide = sideCache.getOrDefault(viewerPlayer.getUniqueId(), Side.NONE);
                 return viewerSide != side;
@@ -1578,12 +1616,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /**
      * Nobody can send a private message across worlds (lobby to main world or the other way around), and until the
-     * borders drop Noord and Zuid cannot send each other private messages either. Staff may always.
+     * borders drop Noord and Zuid cannot send each other private messages either. Crew and admins may always.
      */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onWhisper(PlayerCommandPreprocessEvent event) {
         Player sender = event.getPlayer();
-        if (isAdmin(sender)) {
+        if (seesAll(sender)) {
             return;
         }
         String[] parts = event.getMessage().trim().split("\\s+");
@@ -1627,6 +1665,64 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(Component.text("Je kunt geen priv\u00E9bericht sturen naar een speler van het andere team.",
                         NamedTextColor.RED))
                 .build());
+    }
+
+    private static final Set<String> REPLY_COMMANDS = Set.of("r", "reply");
+    /** who whispered with whom last, so /r can be followed too */
+    private final Map<UUID, UUID> lastWhisperPartner = new HashMap<>();
+
+    /** Crew and admins see every whisper on the server, also across worlds and between the teams. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onWhisperSpy(PlayerCommandPreprocessEvent event) {
+        Player sender = event.getPlayer();
+        String raw = event.getMessage().trim();
+        if (!raw.startsWith("/")) {
+            return;
+        }
+        String[] head = raw.substring(1).split("\\s+", 2);
+        String command = head[0];
+        int colon = command.lastIndexOf(':');
+        if (colon >= 0) {
+            command = command.substring(colon + 1);
+        }
+        command = command.toLowerCase(Locale.ROOT);
+        Player target;
+        String text;
+        if (WHISPER_COMMANDS.contains(command)) {
+            if (head.length < 2) {
+                return;
+            }
+            String[] rest = head[1].split("\\s+", 2);
+            if (rest.length < 2) {
+                return;
+            }
+            target = getServer().getPlayerExact(rest[0]);
+            text = rest[1];
+        } else if (REPLY_COMMANDS.contains(command)) {
+            if (head.length < 2) {
+                return;
+            }
+            UUID partner = lastWhisperPartner.get(sender.getUniqueId());
+            target = partner == null ? null : getServer().getPlayer(partner);
+            text = head[1];
+        } else {
+            return;
+        }
+        if (target == null || target.equals(sender)) {
+            return;
+        }
+        lastWhisperPartner.put(sender.getUniqueId(), target.getUniqueId());
+        lastWhisperPartner.put(target.getUniqueId(), sender.getUniqueId());
+        Component spy = Component.text()
+                .append(Component.text("[spy] ", NamedTextColor.DARK_GRAY))
+                .append(Component.text(sender.getName() + " > " + target.getName() + ": ", NamedTextColor.GRAY))
+                .append(Component.text(text, NamedTextColor.WHITE))
+                .build();
+        for (Player viewer : getServer().getOnlinePlayers()) {
+            if (!viewer.equals(sender) && !viewer.equals(target) && seesAll(viewer)) {
+                viewer.sendMessage(spy);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ Nether open / closed
@@ -2138,7 +2234,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         if (!eliminated) {
             YamlConfiguration data = loadPlayerData(id);
-            if (!inLobby(player) && data.getBoolean("entered", false)) {
+            if (!inLobby(player) && !inLosers(player) && data.getBoolean("entered", false)) {
                 writeLoc(data, "last", player.getLocation());
             }
             if (!data.getBoolean("stashed", false)) {
@@ -2150,6 +2246,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 data.set("inv", Arrays.asList(stash));
                 data.set("stashed", true);
+                data.set("food", player.getFoodLevel());
+                data.set("saturation", (double) player.getSaturation());
+                data.set("health", player.getHealth());
             }
             if (!savePlayerData(id, data)) {
                 player.sendMessage(Component.text("Er ging iets mis, vraag een admin om hulp.", NamedTextColor.RED));
@@ -2202,6 +2301,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         player.getInventory().setContents(contents);
         removeLobbyItems(player);  // stars that were stashed by an older version
         removeLosersItems(player);
+        // food, saturation and health are what they were before the lobby (the lobby makes everybody full)
+        if (data.contains("food")) {
+            player.setFoodLevel(Math.max(0, Math.min(20, data.getInt("food", 20))));
+            player.setSaturation((float) data.getDouble("saturation", 5.0));
+            AttributeInstance maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
+            double max = maxHealth == null ? 20.0 : maxHealth.getValue();
+            player.setHealth(Math.max(1.0, Math.min(max, data.getDouble("health", max))));
+        } else {
+            player.setSaturation(Math.min(player.getSaturation(), 5f)); // stashed by an older version
+        }
+        data.set("food", null);
+        data.set("saturation", null);
+        data.set("health", null);
         data.set("stashed", false);
         data.set("inv", null);
         savePlayerData(id, data);
@@ -2219,6 +2331,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Location dest = null;
         if (!toTeamSpawn) {
             dest = readLoc(data, "last");
+            if (dest != null && (dest.getWorld() == null || !inMainGroup(dest.getWorld()))) {
+                dest = null; // a saved spot on the Verliezerseiland or in the lobby is no way back into the game
+            }
         }
         if (dest == null) {
             dest = teamSpawn(getSide(player));
@@ -2246,7 +2361,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         savePlayerData(id, data);
 
         player.setFallDistance(0f);
-        player.teleport(dest);
+        teleportSafely(player, dest);
         return true;
     }
 
@@ -2322,6 +2437,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         launched = true;
         mainOpen = true;
         saveState();
+        launchCleanSlate();
 
         Title title = Title.title(
                 Component.text("Veel succes!", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD),
@@ -2431,6 +2547,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     @EventHandler
     public void onWorldChange(PlayerChangedWorldEvent event) {
         Player player = event.getPlayer();
+        // "-" in the world he left, "+" in the world he arrives in (crew members move around silently)
+        if (!joinSettling.contains(player.getUniqueId()) && !isCrew(player)) {
+            int fromGroup = worldGroupOf(event.getFrom());
+            int toGroup = worldGroup(player);
+            if (fromGroup != toGroup) {
+                worldMessage(fromGroup, player, false, false, false);
+                worldMessage(toGroup, player, true, false, false);
+            }
+        }
         refreshTags(player);
         updateTablist();
         // coming from the lobby into the game: this is where the grace message belongs
@@ -4086,7 +4211,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         confirm(admin,
                 "Server launchen?",
                 "Iedereen met een team wordt naar zijn team spawn gestuurd, met de titel Veel succes!",
-                "Dit kan niet ongedaan gemaakt worden.",
+                "Opgeslagen laatste plekken en dood-statussen van tests worden gewist. Dit kan niet ongedaan gemaakt worden.",
                 Component.text("Ja, launch", NamedTextColor.GREEN),
                 () -> launchServer(admin),
                 back);
@@ -5809,6 +5934,34 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     "Noord gaat naar de spawn van Noord, Zuid naar die van Zuid.", 150,
                     () -> openLaunchConfirm(admin, again)));
         }
+        buttons.add(button(iconLabel(M_COMPASS, "Spawn terugzetten voor iedereen", NamedTextColor.WHITE),
+                "Iedereen komt de volgende keer op zijn team spawn in plaats van op zijn laatste plek.", 150,
+                () -> confirm(admin,
+                        "Spawn terugzetten voor iedereen?",
+                        "Van iedereen, ook wie offline is, wordt de opgeslagen laatste plek gewist.",
+                        "Daarna staan ze op hun team spawn als ze de main wereld ingaan. Niemand wordt nu verplaatst.",
+                        Component.text("Ja, terugzetten", NamedTextColor.GREEN),
+                        () -> {
+                            int n = clearAllLastLocations();
+                            admin.sendMessage(Component.text("De laatste plek van " + n + " spelers is gewist.",
+                                    NamedTextColor.GREEN));
+                            again.run();
+                        },
+                        again)));
+        buttons.add(button(iconLabel(M_BARRIER, "Inventory legen voor iedereen", NamedTextColor.RED),
+                "Leegt inventory, armor, offhand, ender chest en XP van iedereen behalve admins, ook offline.", 150,
+                () -> confirm(admin,
+                        "Inventory van iedereen legen?",
+                        "Alles van alle spelers behalve admins: inventory, armor, offhand, ender chest, XP en effecten, ook "
+                                + "van spelers die offline zijn.",
+                        "De sterren en het regelboekje blijven. Dit kan niet ongedaan gemaakt worden.",
+                        Component.text("Ja, alles legen", NamedTextColor.RED),
+                        () -> {
+                            String result = clearEveryoneInventory(admin);
+                            admin.sendMessage(Component.text(result, NamedTextColor.GREEN));
+                            again.run();
+                        },
+                        again)));
         buttons.add(button(iconLabel(M_WATER, "Mace cooldown wissen", NamedTextColor.WHITE),
                 "Haalt de lopende cooldown van de mace weg, handig na een test op een bot.", 150, () -> {
                     mace.resetCooldown(admin);
@@ -7533,7 +7686,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ totem limit
 
-    /** The most Totems of Undying one player may have (config.yml: max-totems, 2 when it is not there). */
+    /** The most Totems of Undying one player may carry (config.yml: max-totems, 2 when it is not there). */
     private int maxTotems() {
         return Math.max(0, getConfig().getInt("max-totems", 2));
     }
@@ -7542,17 +7695,70 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return item != null && item.getType() == Material.TOTEM_OF_UNDYING;
     }
 
-    /** Totems a player has: inventory, offhand and the item on the cursor. */
+    /** Totems that are lying loose in this stack (stacks of totems count by amount). */
+    private static int looseTotems(ItemStack item) {
+        return isTotem(item) ? item.getAmount() : 0;
+    }
+
+    /** Inventories whose items go back to the player when he closes them: what is in there is still "on him". */
+    private static boolean returnsItems(InventoryType type) {
+        switch (type) {
+            case CRAFTING:
+            case WORKBENCH:
+            case ANVIL:
+            case SMITHING:
+            case GRINDSTONE:
+            case LOOM:
+            case CARTOGRAPHY:
+            case STONECUTTER:
+            case ENCHANTING:
+            case MERCHANT:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** Totems in a stack, including the ones inside a shulker box (or chest or barrel item) and a bundle. */
+    private static int totemsIn(ItemStack stack) {
+        if (stack == null || stack.getType().isAir()) {
+            return 0;
+        }
+        int loose = looseTotems(stack);
+        if (loose > 0) {
+            return loose;
+        }
+        int nested = 0;
+        if (stack.hasItemMeta()) {
+            ItemMeta meta = stack.getItemMeta();
+            if (meta instanceof BlockStateMeta) {
+                BlockState state = ((BlockStateMeta) meta).getBlockState();
+                if (state instanceof Container) {
+                    for (ItemStack inner : ((Container) state).getInventory().getContents()) {
+                        nested += looseTotems(inner);
+                    }
+                }
+            } else if (meta instanceof BundleMeta) {
+                for (ItemStack inner : ((BundleMeta) meta).getItems()) {
+                    nested += looseTotems(inner);
+                }
+            }
+        }
+        return nested * Math.max(1, stack.getAmount());
+    }
+
+    /** Everything a player has on him: inventory, offhand, cursor, the crafting grid or anvil he has open, and what his shulker boxes and bundles hold. */
     private int countTotems(Player player) {
         int n = 0;
         for (ItemStack item : player.getInventory().getContents()) {
-            if (isTotem(item)) {
-                n += item.getAmount();
-            }
+            n += totemsIn(item);
         }
-        ItemStack cursor = player.getItemOnCursor();
-        if (isTotem(cursor)) {
-            n += cursor.getAmount();
+        n += totemsIn(player.getItemOnCursor());
+        Inventory top = player.getOpenInventory().getTopInventory();
+        if (returnsItems(top.getType())) {
+            for (ItemStack item : top.getContents()) {
+                n += totemsIn(item);
+            }
         }
         return n;
     }
@@ -7565,6 +7771,122 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build());
     }
 
+    /** Takes up to `need` totems out of one slot (a loose totem or a container item) and puts them in `drops`. Returns how many. */
+    private static int takeFromStack(ItemStack stack, int need, List<ItemStack> drops, boolean looseOnly) {
+        if (stack == null || stack.getType().isAir() || need <= 0) {
+            return 0;
+        }
+        if (isTotem(stack)) {
+            if (!looseOnly) {
+                return 0;
+            }
+            int take = Math.min(need, stack.getAmount());
+            drops.add(new ItemStack(Material.TOTEM_OF_UNDYING, take));
+            stack.setAmount(stack.getAmount() - take);
+            return take;
+        }
+        if (looseOnly || !stack.hasItemMeta()) {
+            return 0;
+        }
+        ItemMeta meta = stack.getItemMeta();
+        int taken = 0;
+        if (meta instanceof BlockStateMeta) {
+            BlockState state = ((BlockStateMeta) meta).getBlockState();
+            if (state instanceof Container) {
+                Inventory inner = ((Container) state).getInventory();
+                for (int i = 0; i < inner.getSize() && taken < need; i++) {
+                    ItemStack item = inner.getItem(i);
+                    if (isTotem(item)) {
+                        int take = Math.min(need - taken, item.getAmount());
+                        drops.add(new ItemStack(Material.TOTEM_OF_UNDYING, take));
+                        item.setAmount(item.getAmount() - take);
+                        inner.setItem(i, item.getAmount() <= 0 ? null : item);
+                        taken += take;
+                    }
+                }
+                if (taken > 0) {
+                    ((BlockStateMeta) meta).setBlockState(state);
+                    stack.setItemMeta(meta);
+                }
+            }
+        } else if (meta instanceof BundleMeta) {
+            List<ItemStack> items = new ArrayList<>(((BundleMeta) meta).getItems());
+            List<ItemStack> kept = new ArrayList<>();
+            for (ItemStack item : items) {
+                if (isTotem(item) && taken < need) {
+                    int take = Math.min(need - taken, item.getAmount());
+                    drops.add(new ItemStack(Material.TOTEM_OF_UNDYING, take));
+                    taken += take;
+                    if (item.getAmount() - take > 0) {
+                        ItemStack rest = item.clone();
+                        rest.setAmount(item.getAmount() - take);
+                        kept.add(rest);
+                    }
+                } else {
+                    kept.add(item);
+                }
+            }
+            if (taken > 0) {
+                ((BundleMeta) meta).setItems(kept);
+                stack.setItemMeta(meta);
+            }
+        }
+        return taken;
+    }
+
+    /**
+     * The safety net: whatever way somebody found to get more totems (a command, a trick nobody thought of), within half
+     * a second the extra ones drop on the ground. Loose totems go first, then the ones inside shulker boxes and bundles.
+     */
+    private void enforceTotemLimit(Player player) {
+        if (player.getGameMode() == GameMode.CREATIVE) {
+            return;
+        }
+        int excess = countTotems(player) - maxTotems();
+        if (excess <= 0) {
+            return;
+        }
+        List<ItemStack> drops = new ArrayList<>();
+        for (int pass = 0; pass < 2 && excess > 0; pass++) {
+            boolean looseOnly = pass == 0;
+            // the cursor first, then the open crafting grid or anvil, then the inventory from the back to the front
+            ItemStack cursor = player.getItemOnCursor();
+            int took = takeFromStack(cursor, excess, drops, looseOnly);
+            if (took > 0) {
+                player.setItemOnCursor(cursor.getAmount() <= 0 ? null : cursor);
+                excess -= took;
+            }
+            Inventory top = player.getOpenInventory().getTopInventory();
+            if (excess > 0 && returnsItems(top.getType())) {
+                for (int i = top.getSize() - 1; i >= 0 && excess > 0; i--) {
+                    ItemStack item = top.getItem(i);
+                    took = takeFromStack(item, excess, drops, looseOnly);
+                    if (took > 0) {
+                        top.setItem(i, item.getAmount() <= 0 ? null : item);
+                        excess -= took;
+                    }
+                }
+            }
+            PlayerInventory inv = player.getInventory();
+            for (int i = inv.getSize() - 1; i >= 0 && excess > 0; i--) {
+                ItemStack item = inv.getItem(i);
+                took = takeFromStack(item, excess, drops, looseOnly);
+                if (took > 0) {
+                    inv.setItem(i, item.getAmount() <= 0 ? null : item);
+                    excess -= took;
+                }
+            }
+        }
+        if (drops.isEmpty()) {
+            return;
+        }
+        for (ItemStack drop : drops) {
+            Item dropped = player.getWorld().dropItem(player.getLocation(), drop);
+            dropped.setPickupDelay(40);
+        }
+        totemDenied(player);
+    }
+
     /** Picking one up from the ground: the message stays on the action bar as long as you stand next to it. */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onTotemPickup(EntityPickupItemEvent event) {
@@ -7572,17 +7894,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         Player player = (Player) event.getEntity();
-        ItemStack stack = event.getItem().getItemStack();
-        if (!isTotem(stack) || player.getGameMode() == GameMode.CREATIVE) {
+        int incoming = totemsIn(event.getItem().getItemStack());
+        if (incoming <= 0 || player.getGameMode() == GameMode.CREATIVE) {
             return;
         }
-        if (countTotems(player) + stack.getAmount() > maxTotems()) {
+        if (countTotems(player) + incoming > maxTotems()) {
             event.setCancelled(true);
             totemDenied(player);
         }
     }
 
-    /** Taking one out of a chest and so on (to the cursor, shift click or a hotbar swap). */
+    /** Taking one out of a chest and so on (to the cursor, shift click, hotbar swap, double click). */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onTotemClick(InventoryClickEvent event) {
         if (!(event.getWhoClicked() instanceof Player)) {
@@ -7592,12 +7914,30 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (player.getGameMode() == GameMode.CREATIVE) {
             return;
         }
-        Inventory clicked = event.getClickedInventory();
-        if (clicked == null || clicked.getType() == InventoryType.PLAYER) {
-            return; // only things coming from another inventory can add a totem
-        }
         ItemStack current = event.getCurrentItem();
         ItemStack cursor = event.getCursor();
+        int limit = maxTotems();
+
+        // double click: gathers every totem of the open container onto the cursor
+        if (event.getAction() == InventoryAction.COLLECT_TO_CURSOR) {
+            Inventory top = event.getView().getTopInventory();
+            if (looseTotems(cursor) > 0 && top.getType() != InventoryType.PLAYER && !returnsItems(top.getType())) {
+                int gain = 0;
+                for (ItemStack item : top.getContents()) {
+                    gain += totemsIn(item);
+                }
+                if (gain > 0 && countTotems(player) + gain > limit) {
+                    event.setCancelled(true);
+                    totemDenied(player);
+                }
+            }
+            return;
+        }
+
+        Inventory clicked = event.getClickedInventory();
+        if (clicked == null || clicked.getType() == InventoryType.PLAYER || returnsItems(clicked.getType())) {
+            return; // only things coming from another inventory can add a totem
+        }
         int gain = 0;
         switch (event.getAction()) {
             case PICKUP_ALL:
@@ -7605,27 +7945,273 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             case PICKUP_ONE:
             case PICKUP_SOME:
             case MOVE_TO_OTHER_INVENTORY:
-                if (isTotem(current)) {
-                    gain = current.getAmount();
-                }
+                gain = totemsIn(current);
                 break;
             case SWAP_WITH_CURSOR:
-                gain = (isTotem(current) ? current.getAmount() : 0) - (isTotem(cursor) ? cursor.getAmount() : 0);
+                gain = totemsIn(current) - totemsIn(cursor);
                 break;
             case HOTBAR_SWAP:
             case HOTBAR_MOVE_AND_READD:
                 ItemStack other = event.getClick() == ClickType.SWAP_OFFHAND
                         ? player.getInventory().getItemInOffHand()
                         : (event.getHotbarButton() >= 0 ? player.getInventory().getItem(event.getHotbarButton()) : null);
-                gain = (isTotem(current) ? current.getAmount() : 0) - (isTotem(other) ? other.getAmount() : 0);
+                gain = totemsIn(current) - totemsIn(other);
                 break;
             default:
                 break;
         }
-        if (gain > 0 && countTotems(player) + gain > maxTotems()) {
+        if (gain > 0 && countTotems(player) + gain > limit) {
             event.setCancelled(true);
             totemDenied(player);
         }
+    }
+
+    // ------------------------------------------------------------------ join / leave messages per world
+
+    /** Players that just joined: the move from where they logged out to the lobby is not a "move" for the messages. */
+    private final Set<UUID> joinSettling = new HashSet<>();
+
+    /** 0 = lobby, 1 = main world (with Nether and End), 2 = Verliezerseiland. */
+    private int worldGroupOf(World world) {
+        if (losersSpawn != null && world.equals(losersSpawn.getWorld())) {
+            return 2;
+        }
+        if (lobbySpawn != null && world.equals(lobbySpawn.getWorld())) {
+            return 0;
+        }
+        return 1;
+    }
+
+    /** Crew and admins see everything: every message, every whisper and every world. */
+    private boolean seesAll(Player viewer) {
+        return isAdmin(viewer) || isCrew(viewer);
+    }
+
+    private static String worldGroupName(int group) {
+        return group == 0 ? "lobby" : (group == 2 ? "eiland" : "main");
+    }
+
+    /** "+ name" or "- name", for the people who are in that world right now (and for crew and admins, in every world). */
+    private void worldMessage(int group, Player subject, boolean joined, boolean includeSubject, boolean log) {
+        Component message = Component.text()
+                .append(glyph(joined ? JOIN_ICON : LEAVE_ICON))
+                .append(Component.space())
+                .append(Component.text(subject.getName(), joined ? NamedTextColor.GREEN : NamedTextColor.RED))
+                .build();
+        Component tagged = Component.text("[" + worldGroupName(group) + "] ", NamedTextColor.DARK_GRAY).append(message);
+        for (Player viewer : getServer().getOnlinePlayers()) {
+            if (viewer.equals(subject) && !includeSubject) {
+                continue;
+            }
+            if (worldGroup(viewer) == group) {
+                viewer.sendMessage(message);
+            } else if (seesAll(viewer) && !viewer.equals(subject)) {
+                viewer.sendMessage(tagged);
+            }
+        }
+        if (log) {
+            getServer().getConsoleSender().sendMessage(message);
+        }
+    }
+
+    // ------------------------------------------------------------------ safe teleport into the game world
+
+    private static boolean spotFree(World world, int x, int y, int z) {
+        if (y < world.getMinHeight() || y + 1 >= world.getMaxHeight()) {
+            return false;
+        }
+        Block feet = world.getBlockAt(x, y, z);
+        Block head = world.getBlockAt(x, y + 1, z);
+        return !feet.getType().isSolid() && !head.getType().isSolid() && !feet.isLiquid() && !head.isLiquid();
+    }
+
+    /** The same spot, or the first free spot above it when it lies inside blocks. */
+    private Location safeLocation(Location loc) {
+        World world = loc.getWorld();
+        if (world == null) {
+            return loc;
+        }
+        int x = loc.getBlockX();
+        int y = loc.getBlockY();
+        int z = loc.getBlockZ();
+        if (spotFree(world, x, y, z)) {
+            return loc;
+        }
+        for (int yy = y + 1; yy < Math.min(world.getMaxHeight() - 2, y + 80); yy++) {
+            if (spotFree(world, x, yy, z)) {
+                Location up = loc.clone();
+                up.setY(yy);
+                return up;
+            }
+        }
+        Location top = loc.clone();
+        top.setY(world.getHighestBlockYAt(x, z) + 1.0);
+        return top;
+    }
+
+    /** Loads the chunk first, so nobody lands in blocks that did not exist yet, then teleports to a free spot. */
+    private void teleportSafely(Player player, Location dest) {
+        World world = dest.getWorld();
+        if (world == null) {
+            player.teleport(dest);
+            return;
+        }
+        if (world.isChunkLoaded(dest.getBlockX() >> 4, dest.getBlockZ() >> 4)) {
+            player.teleport(safeLocation(dest));
+            return;
+        }
+        world.getChunkAtAsync(dest).thenAccept(chunk -> getServer().getScheduler().runTask(this, () -> {
+            if (player.isOnline()) {
+                player.teleport(safeLocation(dest));
+            }
+        })).exceptionally(t -> {
+            getServer().getScheduler().runTask(this, () -> {
+                if (player.isOnline()) {
+                    player.teleport(dest);
+                }
+            });
+            return null;
+        });
+    }
+
+    // ------------------------------------------------------------------ clean slate, spawn reset, empty everybody's inventory
+
+    /** Every player the plugin has a file for. */
+    private List<UUID> allPlayerIds() {
+        List<UUID> ids = new ArrayList<>();
+        File[] files = new File(getDataFolder(), "players").listFiles((d, n) -> n.endsWith(".yml"));
+        if (files != null) {
+            for (File f : files) {
+                try {
+                    ids.add(UUID.fromString(f.getName().substring(0, f.getName().length() - 4)));
+                } catch (IllegalArgumentException ignored) {
+                    // not a player file
+                }
+            }
+        }
+        return ids;
+    }
+
+    /** Wipes the saved "last position" of everybody (also offline), so the next time they enter they stand on their team spawn. */
+    private int clearAllLastLocations() {
+        int cleared = 0;
+        for (UUID id : allPlayerIds()) {
+            YamlConfiguration data = loadPlayerData(id);
+            if (data.contains("last")) {
+                data.set("last", null);
+                savePlayerData(id, data);
+                cleared++;
+            }
+        }
+        return cleared;
+    }
+
+    /** The official launch is a fresh start: leftovers of tests (saved positions, dead statuses, red stars) are wiped. */
+    private void launchCleanSlate() {
+        clearAllLastLocations();
+        for (UUID id : allPlayerIds()) {
+            if (getServer().getPlayer(id) != null) {
+                continue;
+            }
+            YamlConfiguration data = loadPlayerData(id);
+            if (data.getBoolean("identity.eliminated", false) || data.getBoolean("identity.losers-out", false)) {
+                data.set("identity.eliminated", false);
+                data.set("identity.losers-out", null);
+                savePlayerData(id, data);
+            }
+        }
+        for (Player p : new ArrayList<>(getServer().getOnlinePlayers())) {
+            if (isEliminated(p) || isLosersOut(p)) {
+                setEliminated(p, false);
+                setLosersOut(p, false);
+            }
+            removeLosersItems(p);
+            refreshTags(p);
+        }
+    }
+
+    /**
+     * Empties everything of everybody except the admins: inventory, armor, offhand, ender chest, XP and effects. Online
+     * players are done directly. For players who are offline the saved inventory of the lobby is emptied and their player
+     * data file is deleted, so they join with nothing. The stars and the rules book belong to the lobby and stay.
+     */
+    private String clearEveryoneInventory(Player admin) {
+        int online = 0;
+        int offline = 0;
+        Set<UUID> handled = new HashSet<>();
+        for (Player p : new ArrayList<>(getServer().getOnlinePlayers())) {
+            if (isAdmin(p)) {
+                continue;
+            }
+            handled.add(p.getUniqueId());
+            YamlConfiguration data = loadPlayerData(p.getUniqueId());
+            if (data.getBoolean("stashed", false)) {
+                data.set("inv", new ArrayList<ItemStack>());
+                data.set("food", null);
+                data.set("saturation", null);
+                data.set("health", null);
+                savePlayerData(p.getUniqueId(), data);
+            }
+            p.closeInventory();
+            p.setItemOnCursor(null);
+            if (!inLobby(p)) {
+                p.getInventory().clear();
+                p.getInventory().setArmorContents(new ItemStack[4]);
+                p.getInventory().setItemInOffHand(null);
+            }
+            p.getEnderChest().clear();
+            p.setLevel(0);
+            p.setExp(0f);
+            p.setTotalExperience(0);
+            for (PotionEffect effect : new ArrayList<>(p.getActivePotionEffects())) {
+                p.removePotionEffect(effect.getType());
+            }
+            online++;
+        }
+
+        Set<UUID> everybody = new HashSet<>(allPlayerIds());
+        World main = gameWorld();
+        String[] folders = {"playerdata", "players/data"};
+        for (String folder : folders) {
+            File[] dats = new File(main.getWorldFolder(), folder).listFiles((d, n) -> n.endsWith(".dat"));
+            if (dats != null) {
+                for (File f : dats) {
+                    try {
+                        everybody.add(UUID.fromString(f.getName().substring(0, f.getName().length() - 4)));
+                    } catch (IllegalArgumentException ignored) {
+                        // not a player file
+                    }
+                }
+            }
+        }
+        List<String> staff = getConfig().getStringList("closed-access");
+        for (UUID id : everybody) {
+            if (handled.contains(id) || getServer().getPlayer(id) != null) {
+                continue;
+            }
+            OfflinePlayer other = getServer().getOfflinePlayer(id);
+            String name = other.getName();
+            if (other.isOp() || (name != null && staff.stream().anyMatch(s -> s.equalsIgnoreCase(name)))) {
+                continue;
+            }
+            YamlConfiguration data = loadPlayerData(id);
+            data.set("stashed", false);
+            data.set("inv", null);
+            data.set("food", null);
+            data.set("saturation", null);
+            data.set("health", null);
+            savePlayerData(id, data);
+            for (String folder : folders) {
+                for (String suffix : new String[] {".dat", ".dat_old"}) {
+                    File f = new File(main.getWorldFolder(), folder + "/" + id + suffix);
+                    if (f.exists()) {
+                        f.delete();
+                    }
+                }
+            }
+            offline++;
+        }
+        return online + " spelers die online zijn en " + offline + " die offline zijn zijn geleegd.";
     }
 
     // ------------------------------------------------------------------ tab completion
