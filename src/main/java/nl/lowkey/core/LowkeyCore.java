@@ -208,6 +208,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** test badges (resource pack): the big LOWKEY wordmark in red and in pink, to compare with the pixel badge */
     private static final String BADGE_WM_RED = "\uE00A";
     private static final String BADGE_WM_PINK = "\uE00B";
+    /** the LowkeySMP logo of the launch title (resource pack, exactly the artwork Gaspard supplied) */
+    private static final String WELCOME_LOGO = "\uE00C";
     /** which LOWKEY badge is shown everywhere: 0 = huidig (pixel badge), 1 = rood (wordmark), 2 = roze (wordmark). /lowkey badge */
     private static volatile int badgeStyle = 0;
 
@@ -456,6 +458,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         countdownLoc = readLoc(state, "countdown-loc");
         boardLoc = readLoc(state, "board-loc");
         boardScale = state.getDouble("board-scale", 2.0);
+        loadWorldBans(state);
         loadPlaytime();
 
         cleanupTeams();
@@ -1865,6 +1868,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         writeLoc(state, "countdown-loc", countdownLoc);
         writeLoc(state, "board-loc", boardLoc);
         state.set("board-scale", boardScale);
+        saveWorldBans(state);
         state.set("main-open", mainOpen);
         state.set("badge-style", badgeStyle);
         state.set("lobby-protect", lobbyProtect);
@@ -2454,6 +2458,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * main world spawn as a last resort. Returns true if the player was moved.
      */
     private boolean enterGame(Player player, boolean toTeamSpawn, boolean adminFallback) {
+        if (isBannedFromMain(player)) {
+            player.sendActionBar(Component.text("Je mag niet meer meedoen aan het main eiland!", NamedTextColor.RED));
+            return false;
+        }
         UUID id = player.getUniqueId();
         YamlConfiguration data = loadPlayerData(id);
 
@@ -2503,6 +2511,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             player.sendActionBar(Component.text("Je kunt niet joinen, je bent dood!", NamedTextColor.RED));
             return;
         }
+        if (isBannedFromMain(player)) {
+            player.sendActionBar(Component.text("Je mag niet meer meedoen aan het main eiland!", NamedTextColor.RED));
+            return;
+        }
         if (!launched) {
             player.sendActionBar(Component.text("De server is nog niet open!", NamedTextColor.RED));
             return;
@@ -2534,7 +2546,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private void teleportToMain(Player player) {
         if (!player.isOnline() || !inLobby(player) || isEliminated(player) || !launched
-                || !mainOpen || getSide(player) == Side.NONE) {
+                || !mainOpen || getSide(player) == Side.NONE || isBannedFromMain(player)) {
             return;
         }
         enterGame(player, false, false);
@@ -2568,10 +2580,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveState();
         launchCleanSlate();
 
-        Title title = Title.title(
-                Component.text("Veel succes!", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD),
-                Component.empty(),
-                Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(3000), Duration.ofMillis(1000)));
+        List<Player> arrived = new ArrayList<>();
         int moved = 0;
         List<String> noTeam = new ArrayList<>();
         for (Player player : new ArrayList<>(getServer().getOnlinePlayers())) {
@@ -2589,10 +2598,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
             if (enterGame(player, true, false)) {
                 moved++;
-                player.showTitle(title);
-                player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+                arrived.add(player);
             }
         }
+        welcomeTitle(arrived);
         String extra = noTeam.isEmpty() ? "" : " Zonder team (blijven in de lobby): " + String.join(", ", noTeam) + ".";
         admin.sendMessage(Component.text("De server is gelanceerd! " + moved
                 + " spelers zijn naar hun team spawn gestuurd." + extra, NamedTextColor.GREEN));
@@ -2708,6 +2717,283 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (spawn != null && spawn.getWorld() != null) {
             event.setRespawnLocation(spawn);
         }
+    }
+
+    // ------------------------------------------------------------------ kick to lobby and world bans
+
+    /** A player who may not join the main world and/or the Verliezerseiland. full = banned from the whole server. */
+    private static final class WorldBan {
+        String name = "?";
+        boolean main;
+        boolean losers;
+        boolean full;
+    }
+
+    private final Map<UUID, WorldBan> worldBans = new HashMap<>();
+    private static final String FULL_BAN_REASON = "Je mag niet meer meedoen aan LowkeySMP";
+
+    private void loadWorldBans(YamlConfiguration state) {
+        worldBans.clear();
+        org.bukkit.configuration.ConfigurationSection section = state.getConfigurationSection("world-bans");
+        if (section == null) {
+            return;
+        }
+        for (String key : section.getKeys(false)) {
+            try {
+                UUID id = UUID.fromString(key);
+                WorldBan ban = new WorldBan();
+                ban.name = section.getString(key + ".name", "?");
+                ban.main = section.getBoolean(key + ".main", false);
+                ban.losers = section.getBoolean(key + ".losers", false);
+                ban.full = section.getBoolean(key + ".full", false);
+                worldBans.put(id, ban);
+            } catch (IllegalArgumentException ignored) {
+                // not a player entry
+            }
+        }
+    }
+
+    private void saveWorldBans(YamlConfiguration state) {
+        for (Map.Entry<UUID, WorldBan> entry : worldBans.entrySet()) {
+            String key = "world-bans." + entry.getKey();
+            state.set(key + ".name", entry.getValue().name);
+            state.set(key + ".main", entry.getValue().main);
+            state.set(key + ".losers", entry.getValue().losers);
+            state.set(key + ".full", entry.getValue().full);
+        }
+    }
+
+    private boolean isBannedFromMain(Player player) {
+        WorldBan ban = worldBans.get(player.getUniqueId());
+        return ban != null && ban.main;
+    }
+
+    private boolean isBannedFromLosers(Player player) {
+        WorldBan ban = worldBans.get(player.getUniqueId());
+        return ban != null && ban.losers;
+    }
+
+    private String banText(WorldBan ban) {
+        if (ban.full) {
+            return "volledig verbannen";
+        }
+        if (ban.main && ban.losers) {
+            return "main wereld en Verliezerseiland";
+        }
+        return ban.main ? "main wereld" : "Verliezerseiland";
+    }
+
+    private Component lowkeyLine(String text, NamedTextColor color) {
+        return Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text(text, color))
+                .build();
+    }
+
+    /** Takes a player out of whatever world he is in and puts him in the lobby (with the usual inventory stash). */
+    private boolean kickToLobby(CommandSender sender, Player target) {
+        if (lobbySpawn == null || lobbySpawn.getWorld() == null) {
+            sender.sendMessage(Component.text("Er is nog geen lobby.", NamedTextColor.RED));
+            return false;
+        }
+        if (inLobby(target)) {
+            sender.sendMessage(Component.text(target.getName() + " is al in de lobby.", NamedTextColor.RED));
+            return false;
+        }
+        sendToLobby(target);
+        target.sendMessage(lowkeyLine("Een admin heeft je naar de lobby gestuurd.", NamedTextColor.RED));
+        sender.sendMessage(Component.text(target.getName() + " is naar de lobby gestuurd.", NamedTextColor.GREEN));
+        return true;
+    }
+
+    /**
+     * Bans a player from the main world and/or the Verliezerseiland. With lobbyAllowed = false it is a real ban from
+     * the whole server (vanilla ban list).
+     */
+    private void applyWorldBan(CommandSender sender, Player target, boolean main, boolean losers, boolean lobbyAllowed) {
+        WorldBan ban = worldBans.computeIfAbsent(target.getUniqueId(), k -> new WorldBan());
+        ban.name = target.getName();
+        ban.full = !lobbyAllowed;
+        ban.main = lobbyAllowed ? main : true;
+        ban.losers = lobbyAllowed ? losers : true;
+        saveState();
+        if (!lobbyAllowed) {
+            getServer().dispatchCommand(getServer().getConsoleSender(), "ban " + target.getName() + " " + FULL_BAN_REASON);
+            if (target.isOnline()) {
+                target.kick(Component.text(FULL_BAN_REASON, NamedTextColor.RED));
+            }
+            sender.sendMessage(Component.text(target.getName() + " is volledig verbannen van de server.", NamedTextColor.GREEN));
+            return;
+        }
+        boolean inMain = !inLobby(target) && !inLosers(target);
+        if ((ban.main && inMain) || (ban.losers && inLosers(target))) {
+            kickToLobby(sender, target);
+        }
+        target.sendMessage(lowkeyLine("Je mag niet meer meedoen aan: " + banText(ban) + ".", NamedTextColor.RED));
+        sender.sendMessage(Component.text(target.getName() + " is verbannen van: " + banText(ban)
+                + ". De lobby blijft toegestaan.", NamedTextColor.GREEN));
+    }
+
+    private void liftWorldBan(CommandSender sender, UUID id) {
+        WorldBan ban = worldBans.remove(id);
+        if (ban == null) {
+            sender.sendMessage(Component.text("Die speler staat niet in de lijst.", NamedTextColor.RED));
+            return;
+        }
+        if (ban.full) {
+            getServer().dispatchCommand(getServer().getConsoleSender(), "pardon " + ban.name);
+        }
+        saveState();
+        sender.sendMessage(Component.text("De verbanning van " + ban.name + " is opgeheven.", NamedTextColor.GREEN));
+    }
+
+    private void openBanPickMenu(Player admin) {
+        pickPlayer(admin, "Verbannen: kies een speler", target -> openBanWorldPick(admin, target, true, true),
+                () -> openWorldMenu(admin));
+    }
+
+    /** Step 2: pick the worlds (one button per world, press to switch it on or off). */
+    private void openBanWorldPick(Player admin, Player target, boolean main, boolean losers) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        if (!target.isOnline()) {
+            admin.sendMessage(Component.text("Die speler is niet meer online.", NamedTextColor.RED));
+            openBanPickMenu(admin);
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_MAIN, "Main wereld: " + (main ? "verbannen" : "toegestaan"),
+                        main ? NamedTextColor.RED : NamedTextColor.GREEN),
+                "Klik om te wisselen.", 150, () -> openBanWorldPick(admin, target, !main, losers)));
+        buttons.add(button(iconLabel(M_BONE, "Verliezerseiland: " + (losers ? "verbannen" : "toegestaan"),
+                        losers ? NamedTextColor.RED : NamedTextColor.GREEN),
+                "Klik om te wisselen.", 150, () -> openBanWorldPick(admin, target, main, !losers)));
+        buttons.add(button(iconLabel(M_BARRIER, "Verder", NamedTextColor.WHITE),
+                "Naar de bevestiging.", 150, () -> {
+                    if (!main && !losers) {
+                        admin.sendMessage(Component.text("Kies minstens een wereld.", NamedTextColor.RED));
+                        openBanWorldPick(admin, target, main, losers);
+                    } else {
+                        openBanConfirm(admin, target, main, losers);
+                    }
+                }));
+        Component body = Component.text("Kies waar " + target.getName() + " niet meer in mag. Daarna vraag ik of hij nog "
+                + "in de lobby mag.", NamedTextColor.GRAY);
+        showMenu(admin, "Verbannen: " + target.getName(), body, buttons,
+                backButton("Terug naar de spelerlijst.", () -> openBanPickMenu(admin)));
+    }
+
+    private void openBanConfirm(Player admin, Player target, boolean main, boolean losers) {
+        WorldBan preview = new WorldBan();
+        preview.main = main;
+        preview.losers = losers;
+        confirm(admin,
+                target.getName() + " verbannen?",
+                target.getName() + " mag niet meer in: " + banText(preview) + ".",
+                "Hierna kies je of hij nog in de lobby mag.",
+                Component.text("Ja, verder", NamedTextColor.RED),
+                () -> openBanLobbyQuestion(admin, target, main, losers),
+                () -> openBanWorldPick(admin, target, main, losers));
+    }
+
+    /** Last step: yes = he stays welcome in the lobby, no = banned from the whole server. */
+    private void openBanLobbyQuestion(Player admin, Player target, boolean main, boolean losers) {
+        if (!target.isOnline()) {
+            admin.sendMessage(Component.text("Die speler is niet meer online.", NamedTextColor.RED));
+            openBanPickMenu(admin);
+            return;
+        }
+        WorldBan preview = new WorldBan();
+        preview.main = main;
+        preview.losers = losers;
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(Component.text("Mag deze speler nog in de lobby?", NamedTextColor.RED,
+                                TextDecoration.BOLD))
+                        .body(List.of(
+                                DialogBody.plainMessage(Component.text("Ja: " + target.getName() + " blijft welkom in de lobby, "
+                                        + "maar mag niet meer in: " + banText(preview) + ".", NamedTextColor.WHITE)),
+                                DialogBody.plainMessage(Component.text("Nee: " + target.getName() + " wordt volledig van de "
+                                        + "server verbannen met \"" + FULL_BAN_REASON + "\".", NamedTextColor.GRAY))))
+                        .build())
+                .type(DialogType.confirmation(
+                        button(Component.text("Ja, lobby mag", NamedTextColor.GREEN),
+                                "Alleen verbannen van " + banText(preview) + ".", 150, () -> {
+                                    applyWorldBan(admin, target, main, losers, true);
+                                    openWorldMenu(admin);
+                                }),
+                        button(Component.text("Nee, volledig", NamedTextColor.RED),
+                                "Verbant " + target.getName() + " van de hele server.", 150, () -> {
+                                    applyWorldBan(admin, target, main, losers, false);
+                                    openWorldMenu(admin);
+                                }))));
+        admin.showDialog(dialog);
+    }
+
+    private void openBanListMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        if (worldBans.isEmpty()) {
+            openWorldMenu(admin);
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        for (Map.Entry<UUID, WorldBan> entry : new ArrayList<>(worldBans.entrySet())) {
+            final UUID id = entry.getKey();
+            final WorldBan ban = entry.getValue();
+            buttons.add(button(Component.text(ban.name + ": " + banText(ban), NamedTextColor.WHITE),
+                    "Klik om de verbanning van " + ban.name + " op te heffen.", 300, () -> {
+                        liftWorldBan(admin, id);
+                        openBanListMenu(admin);
+                    }));
+        }
+        showMenu(admin, "Verbanningen", Component.text("Klik op een speler om de verbanning op te heffen.",
+                NamedTextColor.GRAY), buttons, backButton("Terug naar Wereld.", () -> openWorldMenu(admin)));
+    }
+
+    // ------------------------------------------------------------------ welcome title at the launch
+
+    /** "Welkom bij:" and after that the LowkeySMP logo with "Veel succes!" under it. */
+    private void welcomeTitle(List<Player> players) {
+        Title welcome = Title.title(
+                Component.text("Welkom bij:", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD),
+                Component.empty(),
+                Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(1800), Duration.ofMillis(300)));
+        Title logo = Title.title(
+                rawGlyph(WELCOME_LOGO),
+                Component.text("Veel succes!", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD),
+                Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(3500), Duration.ofMillis(1000)));
+        final List<Player> list = new ArrayList<>(players);
+        for (Player p : list) {
+            p.showTitle(welcome);
+            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, 1.0f, 1.2f);
+        }
+        getServer().getScheduler().runTaskLater(this, () -> {
+            for (Player p : list) {
+                if (p.isOnline()) {
+                    p.showTitle(logo);
+                    p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+                }
+            }
+        }, 50L);
+    }
+
+    /** Test of the winner show of the Verliezerseiland with three fake names; only for the admin, nothing changes. */
+    private void winnerShowIsland(Player admin) {
+        String joined = String.join(", ", Arrays.asList("TestSpeler1", "TestSpeler2", "TestSpeler3"));
+        admin.showTitle(Title.title(
+                Component.text("Verliezerseiland gewonnen!", NamedTextColor.RED, TextDecoration.BOLD),
+                Component.text(joined, NamedTextColor.WHITE),
+                Title.Times.times(Duration.ofMillis(500), Duration.ofMillis(7000), Duration.ofMillis(1500))));
+        admin.sendMessage(finaleLine(Component.text()
+                .append(Component.text(joined, NamedTextColor.WHITE, TextDecoration.BOLD))
+                .append(Component.text(" komen terug in het spel!", NamedTextColor.RED))
+                .append(Component.text(" (test)", NamedTextColor.GRAY))
+                .build()));
+        admin.playSound(admin.getLocation(), Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 1.0f, 0.8f);
+        fireworkShow(admin);
     }
 
     // ------------------------------------------------------------------ leaderboard: playtime in the main world
@@ -4087,6 +4373,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey give <speler> : geeft een speler in de lobby de LowkeySMP nether star (hotbar slot 5)
      * /lowkey website : stuurt meteen een websitebericht met klikbare link (ook elke website-interval-minutes minuten automatisch)
      * /lowkey donate : stuurt meteen een willekeurig donatiebericht (voor testen)
+     * /lowkey tolobby <speler> : haalt een speler uit zijn wereld en stuurt hem naar de lobby
+     * /lowkey verban <speler> <main|verliezerseiland|beide> <lobby|volledig> : verbant van die wereld(en), met of zonder de lobby
+     * /lowkey verbanopheffen <speler> : heft een verbanning weer op
      * /lowkey leaderboard [spawn|remove|refresh|size <getal>|reset confirm] : hologram met de top 10 speeltijd in de main wereld (dag:uur:minuut)
      * /lowkey badge <huidig|rood|roze> : wisselt de LOWKEY badge overal tussen het pixel badge, het rode en het roze logo (voor testen)
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
@@ -4236,6 +4525,46 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
             } else {
                 giveLobbyItemTo(sender, target);
+            }
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("tolobby")) {
+            Player target = args.length >= 2 ? getServer().getPlayerExact(args[1]) : null;
+            if (target == null) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey tolobby <speler> (die moet online zijn).", NamedTextColor.GRAY));
+            } else {
+                kickToLobby(sender, target);
+            }
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("verban")) {
+            Player target = args.length >= 2 ? getServer().getPlayerExact(args[1]) : null;
+            String where = args.length >= 3 ? args[2].toLowerCase(Locale.ROOT) : "";
+            String mode = args.length >= 4 ? args[3].toLowerCase(Locale.ROOT) : "";
+            boolean main = where.equals("main") || where.equals("beide");
+            boolean losers = where.equals("verliezerseiland") || where.equals("losers") || where.equals("beide");
+            boolean lobbyAllowed = mode.equals("lobby");
+            if (target == null || (!main && !losers) || (!lobbyAllowed && !mode.equals("volledig"))) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey verban <speler> <main|verliezerseiland|beide> <lobby|volledig>. "
+                        + "'lobby' laat de speler nog in de lobby, 'volledig' verbant hem van de hele server.", NamedTextColor.GRAY));
+            } else {
+                applyWorldBan(sender, target, main, losers, lobbyAllowed);
+            }
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("verbanopheffen")) {
+            UUID found = null;
+            for (Map.Entry<UUID, WorldBan> entry : worldBans.entrySet()) {
+                if (args.length >= 2 && entry.getValue().name.equalsIgnoreCase(args[1])) {
+                    found = entry.getKey();
+                }
+            }
+            if (found == null) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey verbanopheffen <speler>. Verbannen: "
+                        + (worldBans.isEmpty() ? "niemand" : worldBans.values().stream().map(b -> b.name)
+                        .collect(Collectors.joining(", "))), NamedTextColor.GRAY));
+            } else {
+                liftWorldBan(sender, found);
             }
             return true;
         }
@@ -4713,7 +5042,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void openLaunchConfirm(Player admin, Runnable back) {
         confirm(admin,
                 "Server launchen?",
-                "Iedereen met een team wordt naar zijn team spawn gestuurd, met de titel Veel succes!",
+                "Iedereen met een team wordt naar zijn team spawn gestuurd, met de titel Welkom bij: en het LowkeySMP logo",
                 "Opgeslagen laatste plekken en dood-statussen van tests worden gewist. Dit kan niet ongedaan gemaakt worden.",
                 Component.text("Ja, launch", NamedTextColor.GREEN),
                 () -> launchServer(admin),
@@ -4846,6 +5175,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "Teleporteert jou naar het spawnpunt van Noord.", 150, () -> teleportAdminToSpawn(admin, Side.NOORD)));
         buttons.add(button(iconLabel(M_SPAWN_Z, "Naar spawn Zuid", NamedTextColor.BLUE),
                 "Teleporteert jou naar het spawnpunt van Zuid.", 150, () -> teleportAdminToSpawn(admin, Side.ZUID)));
+        buttons.add(button(iconLabel(M_LOBBY, "Speler naar lobby", NamedTextColor.WHITE),
+                "Haalt een speler uit zijn huidige wereld en stuurt hem naar de lobby.", 150,
+                () -> pickPlayer(admin, "Naar de lobby sturen", target -> {
+                    kickToLobby(admin, target);
+                    again.run();
+                }, again)));
+        buttons.add(button(iconLabel(M_BARRIER, "Verbannen", NamedTextColor.RED),
+                "Verban een speler van de main wereld en/of het Verliezerseiland, of van de hele server.", 150,
+                () -> openBanPickMenu(admin)));
+        if (!worldBans.isEmpty()) {
+            buttons.add(button(iconLabel(M_BARRIER, "Verbanningen (" + worldBans.size() + ")", NamedTextColor.WHITE),
+                    "Bekijk wie verbannen is en hef een verbanning op.", 150, () -> openBanListMenu(admin)));
+        }
         buttons.add(netherToggle(admin, again));
         buttons.add(endToggle(admin, again));
         if (bordersDropped) {
@@ -5188,6 +5530,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     giveLobbyItemTo(admin, target);
                     again.run();
                 }));
+        if (!inLobby(target)) {
+            buttons.add(button(iconLabel(M_LOBBY, "Naar lobby sturen", NamedTextColor.WHITE),
+                    "Haalt " + target.getName() + " uit zijn huidige wereld en stuurt hem naar de lobby.", 150, () -> {
+                        kickToLobby(admin, target);
+                        again.run();
+                    }));
+        }
+        buttons.add(button(iconLabel(M_BARRIER, "Verbannen", NamedTextColor.RED),
+                "Verban " + target.getName() + " van de main wereld en/of het Verliezerseiland, of van de hele server.", 150,
+                () -> openBanWorldPick(admin, target, true, true)));
         if (dead) {
             buttons.add(button(iconLabel(M_REVIVE, "Reviven", NamedTextColor.GREEN),
                     "Zet " + target.getName() + " weer levend, waar hij ook is.", 150, () -> {
@@ -6415,8 +6767,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     () -> openLosersWinnersDialog(admin)));
         }
         buttons.add(button(iconLabel(M_STAR, "Winnaarsshow testen", NamedTextColor.AQUA),
-                "Title en vuurwerk rond jou. Raakt niemand anders en niets van de finale.", 150,
-                () -> winnerShow(admin, true)));
+                losers ? "Test van het Verliezerseiland met 3 testnamen, alleen voor jou. Niets van de finale verandert."
+                        : "Title en vuurwerk rond jou. Raakt niemand anders en niets van de finale.", 150,
+                () -> {
+                    if (losers) {
+                        winnerShowIsland(admin);
+                    } else {
+                        winnerShow(admin, true);
+                    }
+                }));
 
         showMenu(admin, losers ? "Verliezerseiland finale" : "Finale", finaleStatusBody(), buttons,
                 losers ? backButton("Terug naar het Verliezerseiland.", () -> openLosersMenu(admin))
@@ -6761,6 +7120,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             again.run();
                         },
                         again)));
+        buttons.add(button(iconLabel(M_STAR, "Welkomsttitel testen", NamedTextColor.AQUA),
+                "Laat alleen jou \"Welkom bij:\" en het logo zien, zoals bij de launch.", 150, () -> {
+                    welcomeTitle(List.of(admin));
+                    again.run();
+                }));
         buttons.add(button(iconLabel(M_WATER, "Mace cooldown wissen", NamedTextColor.WHITE),
                 "Haalt de lopende cooldown van de mace weg, handig na een test op een bot.", 150, () -> {
                     mace.resetCooldown(admin);
@@ -6894,6 +7258,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             player.sendActionBar(Component.text("Je bent definitief uitgeschakeld.", NamedTextColor.RED));
             return;
         }
+        if (isBannedFromLosers(player)) {
+            player.sendActionBar(Component.text("Je mag niet meer meedoen aan het Verliezerseiland!", NamedTextColor.RED));
+            return;
+        }
         if (losersEnded) {
             player.sendActionBar(Component.text("Het Verliezerseiland is afgelopen.", NamedTextColor.RED));
             return;
@@ -6917,7 +7285,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     private void teleportToLosers(Player player) {
         if (!player.isOnline() || !inLobby(player) || !isEliminated(player) || !losersOpen || isLosersOut(player)
-                || losersSpawn == null || losersSpawn.getWorld() == null) {
+                || isBannedFromLosers(player) || losersSpawn == null || losersSpawn.getWorld() == null) {
             return;
         }
         removeLobbyItems(player);
@@ -9053,6 +9421,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             finaleOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
             return finaleOptions;
         }
+        if (args.length == 3 && args[0].equalsIgnoreCase("verban")) {
+            return Stream.of("main", "verliezerseiland", "beide").filter(o -> o.startsWith(args[2].toLowerCase(Locale.ROOT)))
+                    .collect(Collectors.toList());
+        }
+        if (args.length == 4 && args[0].equalsIgnoreCase("verban")) {
+            return Stream.of("lobby", "volledig").filter(o -> o.startsWith(args[3].toLowerCase(Locale.ROOT)))
+                    .collect(Collectors.toList());
+        }
         List<String> options = new ArrayList<>();
         if (args.length == 1) {
             options.add("menu");
@@ -9067,6 +9443,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("donate");
             options.add("badge");
             options.add("leaderboard");
+            options.add("tolobby");
+            options.add("verban");
+            options.add("verbanopheffen");
             options.add("website");
             options.add("give");
             options.add("launch");
@@ -9085,7 +9464,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
-            if (sub.equals("grace") || sub.equals("team") || sub.equals("revive") || sub.equals("crew") || sub.equals("give")) {
+            if (sub.equals("verbanopheffen")) {
+                for (WorldBan ban : worldBans.values()) {
+                    options.add(ban.name);
+                }
+            } else if (sub.equals("grace") || sub.equals("team") || sub.equals("revive") || sub.equals("crew")
+                    || sub.equals("give") || sub.equals("tolobby") || sub.equals("verban")) {
                 for (Player player : getServer().getOnlinePlayers()) {
                     options.add(player.getName());
                 }
