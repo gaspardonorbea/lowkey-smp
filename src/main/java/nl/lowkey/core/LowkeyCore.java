@@ -179,7 +179,7 @@ import java.util.EnumSet;
 /**
  * LowkeySMP visuals and rules:
  * - tab list: logo on top, "Online: N" at the bottom, Noord (red) above Zuid (blue), icons before every name
- * - nametag icons: CREW, grace (yellow) and team (Noord / Zuid)
+ * - nametag icons: CREW (wide purple badge), grace (blue in a gold frame) and team (Noord / Zuid)
  * - join / leave messages with icons
  * - grace period: the first hour of playtime per player you simply respawn
  * - after that: elimination message, big title, blood, straight to spectator, then the lobby
@@ -205,6 +205,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private static final String ZUID_ICON = "\uE007";
     /** the same badge in red: only used for death messages and the Nether messages */
     private static final String LOWKEY_BADGE_RED = "\uE009";
+    /** test badges (resource pack): the big LOWKEY wordmark in red and in pink, to compare with the pixel badge */
+    private static final String BADGE_WM_RED = "\uE00A";
+    private static final String BADGE_WM_PINK = "\uE00B";
+    /** which LOWKEY badge is shown everywhere: 0 = huidig (pixel badge), 1 = rood (wordmark), 2 = roze (wordmark). /lowkey badge */
+    private static volatile int badgeStyle = 0;
 
     // admin menu icons (vanilla item textures, see tags.json)
     private static final String M_LAUNCH = "\uE040";
@@ -415,6 +420,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         losersItemKey = new NamespacedKey(this, "losers_item");
         launched = state.getBoolean("launched", false);
         mainOpen = state.getBoolean("main-open", true);
+        badgeStyle = Math.max(0, Math.min(2, state.getInt("badge-style", 0)));
         lobbyProtect = state.getBoolean("lobby-protect", true);
         graceResetVersion = state.getInt("grace-reset-version", 0);
         graceResetMillis = state.getLong("grace-reset-millis", 0L);
@@ -448,6 +454,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         countdownScale = state.getDouble("countdown-scale", 6.0);
         countdownLoc = readLoc(state, "countdown-loc");
+        boardLoc = readLoc(state, "board-loc");
+        boardScale = state.getDouble("board-scale", 2.0);
+        loadPlaytime();
 
         cleanupTeams();
         getServer().getPluginManager().registerEvents(this, this);
@@ -471,6 +480,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::tickLobbyPlayers, 10L, 10L);
         getServer().getScheduler().runTaskTimer(this, this::tickLosers, 40L, 40L);
         getServer().getScheduler().runTaskTimer(this, this::tickCountdown, 40L, 20L);
+        getServer().getScheduler().runTaskTimer(this, this::tickPlaytime, 100L, 100L);
+        getServer().getScheduler().runTaskTimer(this, this::tickBoard, 200L, 600L);
         getServer().getScheduler().runTaskTimer(this, this::tickFinale, 20L, 2L);
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (Player p : getServer().getOnlinePlayers()) {
@@ -498,6 +509,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             mace.stop();
         }
         removeCountdownEntity();
+        removeBoardEntity();
+        savePlaytime();
         for (Player player : getServer().getOnlinePlayers()) {
             logout(player, false); // nobody keeps a temporary op after a restart
         }
@@ -524,7 +537,72 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     // ------------------------------------------------------------------ helpers
 
     static Component glyph(String characters) {
+        return rawGlyph(styledBadge(characters));
+    }
+
+    /** A glyph exactly as given, without the badge style swap (used for the previews in the badge menu). */
+    static Component rawGlyph(String characters) {
         return Component.text(characters).font(FONT).color(NamedTextColor.WHITE);
+    }
+
+    /**
+     * The LOWKEY badge swap for testing: "huidig" keeps the pixel badges, "rood" shows the red wordmark everywhere,
+     * "roze" shows the pink wordmark for the normal badge and keeps the red wordmark for the red uses (death and Nether).
+     */
+    private static String styledBadge(String characters) {
+        if (badgeStyle == 1 && (characters.equals(LOWKEY_BADGE) || characters.equals(LOWKEY_BADGE_RED))) {
+            return BADGE_WM_RED;
+        }
+        if (badgeStyle == 2) {
+            if (characters.equals(LOWKEY_BADGE)) {
+                return BADGE_WM_PINK;
+            }
+            if (characters.equals(LOWKEY_BADGE_RED)) {
+                return BADGE_WM_RED;
+            }
+        }
+        return characters;
+    }
+
+    private static String badgeStyleName(int style) {
+        switch (style) {
+            case 1:
+                return "rood";
+            case 2:
+                return "roze";
+            default:
+                return "huidig";
+        }
+    }
+
+    private static int parseBadgeStyle(String text) {
+        String t = text.toLowerCase(Locale.ROOT);
+        if (t.equals("huidig") || t.equals("current") || t.equals("pixel") || t.equals("0")) {
+            return 0;
+        }
+        if (t.equals("rood") || t.equals("red") || t.equals("1")) {
+            return 1;
+        }
+        if (t.equals("roze") || t.equals("pink") || t.equals("2")) {
+            return 2;
+        }
+        return -1;
+    }
+
+    /** Switches the LOWKEY badge style, remembers it over restarts and shows the admin what it looks like now. */
+    private void applyBadgeStyle(CommandSender admin, int style) {
+        badgeStyle = style;
+        saveState();
+        admin.sendMessage(Component.text()
+                .append(glyph(LOWKEY_BADGE)).append(Component.space())
+                .append(Component.text("Badge staat nu op ", NamedTextColor.GRAY))
+                .append(Component.text(badgeStyleName(style), NamedTextColor.WHITE, TextDecoration.BOLD))
+                .append(Component.text(". Zo zie je hem in gewone berichten.", NamedTextColor.GRAY))
+                .build());
+        admin.sendMessage(Component.text()
+                .append(glyph(LOWKEY_BADGE_RED)).append(Component.space())
+                .append(Component.text("En zo in doodsberichten en Nether berichten.", NamedTextColor.RED))
+                .build());
     }
 
     private boolean isCrew(Player player) {
@@ -1785,7 +1863,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         state.set("countdown-target", countdownTarget.toString());
         state.set("countdown-scale", countdownScale);
         writeLoc(state, "countdown-loc", countdownLoc);
+        writeLoc(state, "board-loc", boardLoc);
+        state.set("board-scale", boardScale);
         state.set("main-open", mainOpen);
+        state.set("badge-style", badgeStyle);
         state.set("lobby-protect", lobbyProtect);
         state.set("grace-reset-version", graceResetVersion);
         state.set("grace-reset-millis", graceResetMillis);
@@ -2629,6 +2710,364 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    // ------------------------------------------------------------------ leaderboard: playtime in the main world
+
+    private static final int BOARD_ROWS = 10;
+    private final Map<UUID, Long> playMillis = new HashMap<>();
+    private final Map<UUID, String> playNames = new HashMap<>();
+    private final Map<UUID, Long> playLast = new HashMap<>();
+    private int playSaveCounter = 0;
+    private File leaderboardFile;
+    private Location boardLoc;
+    /** 1 = normal text size */
+    private double boardScale = 2.0;
+    private UUID boardId;
+
+    private void loadPlaytime() {
+        leaderboardFile = new File(getDataFolder(), "leaderboard.yml");
+        playMillis.clear();
+        playNames.clear();
+        YamlConfiguration y = YamlConfiguration.loadConfiguration(leaderboardFile);
+        org.bukkit.configuration.ConfigurationSection section = y.getConfigurationSection("players");
+        if (section == null) {
+            return;
+        }
+        for (String key : section.getKeys(false)) {
+            try {
+                UUID id = UUID.fromString(key);
+                playMillis.put(id, section.getLong(key + ".ms", 0L));
+                playNames.put(id, section.getString(key + ".name", "?"));
+            } catch (IllegalArgumentException ignored) {
+                // not a player entry
+            }
+        }
+    }
+
+    private void savePlaytime() {
+        if (leaderboardFile == null) {
+            return;
+        }
+        YamlConfiguration y = new YamlConfiguration();
+        for (Map.Entry<UUID, Long> entry : playMillis.entrySet()) {
+            String key = "players." + entry.getKey();
+            y.set(key + ".ms", entry.getValue());
+            y.set(key + ".name", playNames.getOrDefault(entry.getKey(), "?"));
+        }
+        try {
+            leaderboardFile.getParentFile().mkdirs();
+            y.save(leaderboardFile);
+        } catch (IOException e) {
+            getLogger().warning("Could not save leaderboard.yml: " + e.getMessage());
+        }
+    }
+
+    /** Every 5 seconds: everybody who is in the main world gets that time added (not the lobby, not the Verliezerseiland). */
+    private void tickPlaytime() {
+        long now = System.currentTimeMillis();
+        boolean skipCrew = getConfig().getBoolean("leaderboard.skip-crew", true);
+        for (Player player : getServer().getOnlinePlayers()) {
+            UUID id = player.getUniqueId();
+            Long last = playLast.put(id, now);
+            if (last == null) {
+                continue;
+            }
+            boolean counts = !inLobby(player) && !inLosers(player) && !isEliminated(player)
+                    && !(skipCrew && isCrew(player));
+            if (!counts) {
+                continue;
+            }
+            long delta = Math.min(now - last, 15_000L);
+            if (delta > 0L) {
+                playMillis.merge(id, delta, Long::sum);
+                playNames.put(id, player.getName());
+            }
+        }
+        playLast.keySet().removeIf(id -> getServer().getPlayer(id) == null);
+        playSaveCounter++;
+        if (playSaveCounter % 12 == 0) {
+            savePlaytime();
+        }
+    }
+
+    /** day:hour:minute, no seconds */
+    private static String playtimeText(long millis) {
+        long minutes = millis / 60_000L;
+        return String.format(Locale.ROOT, "%02d:%02d:%02d", minutes / 1440L, (minutes % 1440L) / 60L, minutes % 60L);
+    }
+
+    private List<Map.Entry<UUID, Long>> playtimeTop() {
+        return playMillis.entrySet().stream()
+                .filter(e -> e.getValue() >= 60_000L)
+                .sorted((a, b) -> {
+                    int c = Long.compare(b.getValue(), a.getValue());
+                    return c != 0 ? c : playNames.getOrDefault(a.getKey(), "").compareToIgnoreCase(
+                            playNames.getOrDefault(b.getKey(), ""));
+                })
+                .limit(BOARD_ROWS)
+                .collect(Collectors.toList());
+    }
+
+    private Component boardComponent() {
+        List<Map.Entry<UUID, Long>> top = playtimeTop();
+        TextComponent.Builder builder = Component.text()
+                .append(Component.text("Leaderboard van speeltijd", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD))
+                .append(Component.newline())
+                .append(Component.text("dag:uur:minuut", NamedTextColor.DARK_GRAY));
+        for (int i = 0; i < BOARD_ROWS; i++) {
+            TextColor rankColor = i == 0 ? TextColor.color(0xFFD700) : i == 1 ? TextColor.color(0xC0C0C0)
+                    : i == 2 ? TextColor.color(0xCD7F32) : NamedTextColor.GRAY;
+            builder.append(Component.newline());
+            builder.append(Component.text("#" + (i + 1), rankColor, TextDecoration.BOLD));
+            builder.append(Component.text(" - ", NamedTextColor.DARK_GRAY));
+            if (i < top.size()) {
+                Map.Entry<UUID, Long> entry = top.get(i);
+                builder.append(Component.text(playNames.getOrDefault(entry.getKey(), "?"), NamedTextColor.WHITE));
+                builder.append(Component.text(" - ", NamedTextColor.DARK_GRAY));
+                builder.append(Component.text(playtimeText(entry.getValue()), NamedTextColor.GREEN));
+            } else {
+                builder.append(Component.text("-", NamedTextColor.DARK_GRAY));
+            }
+        }
+        return builder.build();
+    }
+
+    private TextDisplay boardDisplay() {
+        if (boardId == null) {
+            return null;
+        }
+        Entity entity = Bukkit.getEntity(boardId);
+        return entity instanceof TextDisplay && entity.isValid() ? (TextDisplay) entity : null;
+    }
+
+    private Transformation boardTransformation() {
+        float scale = (float) boardScale;
+        return new Transformation(new Vector3f(), new AxisAngle4f(), new Vector3f(scale, scale, scale), new AxisAngle4f());
+    }
+
+    private TextDisplay spawnBoard() {
+        final Location where = boardLoc;
+        World world = where.getWorld();
+        TextDisplay display = world.spawn(where, TextDisplay.class, td -> {
+            td.setPersistent(false); // never saved: the plugin puts it back after a restart
+            td.setBillboard(Display.Billboard.CENTER);
+            td.setAlignment(TextDisplay.TextAlignment.CENTER);
+            td.setLineWidth(10_000);
+            td.setBackgroundColor(Color.fromARGB(0, 0, 0, 0));
+            td.setShadowed(true);
+            td.setSeeThrough(false);
+            td.setBrightness(new Display.Brightness(15, 15));
+            td.setViewRange(1.5f);
+            td.setTransformation(boardTransformation());
+            td.text(boardComponent());
+        });
+        boardId = display.getUniqueId();
+        world.addPluginChunkTicket(where.getBlockX() >> 4, where.getBlockZ() >> 4, this);
+        return display;
+    }
+
+    private void removeBoardEntity() {
+        if (boardId == null) {
+            return;
+        }
+        TextDisplay display = boardDisplay();
+        if (display != null) {
+            display.remove();
+        }
+        boardId = null;
+        if (boardLoc != null && boardLoc.getWorld() != null) {
+            boardLoc.getWorld().removePluginChunkTicket(boardLoc.getBlockX() >> 4, boardLoc.getBlockZ() >> 4, this);
+        }
+    }
+
+    /** Every 30 seconds (and on every change): puts the hologram back if it is gone and refreshes the list. */
+    private void tickBoard() {
+        if (boardLoc == null || boardLoc.getWorld() == null) {
+            return;
+        }
+        TextDisplay display = boardDisplay();
+        if (display == null) {
+            spawnBoard();
+            return;
+        }
+        display.text(boardComponent());
+    }
+
+    private String boardScaleText() {
+        return boardScale == Math.rint(boardScale) ? String.valueOf((long) boardScale) : String.valueOf(boardScale);
+    }
+
+    private void placeBoard(Player admin) {
+        removeBoardEntity();
+        boardLoc = admin.getLocation().clone();
+        boardLoc.setPitch(0f);
+        saveState();
+        tickBoard();
+        admin.sendMessage(Component.text("Het leaderboard staat nu op jouw positie.", NamedTextColor.GREEN));
+    }
+
+    private void clearBoard(CommandSender sender) {
+        if (boardLoc == null) {
+            sender.sendMessage(Component.text("Er staat geen leaderboard.", NamedTextColor.RED));
+            return;
+        }
+        removeBoardEntity();
+        boardLoc = null;
+        saveState();
+        sender.sendMessage(Component.text("Het leaderboard is verwijderd.", NamedTextColor.GREEN));
+    }
+
+    private boolean setBoardScale(CommandSender sender, String text) {
+        double value;
+        try {
+            value = Double.parseDouble(text.trim().replace(',', '.'));
+        } catch (NumberFormatException e) {
+            sender.sendMessage(Component.text("Dat is geen getal.", NamedTextColor.RED));
+            return false;
+        }
+        if (value < 0.5 || value > 20.0) {
+            sender.sendMessage(Component.text("De grootte moet tussen 0,5 en 20 liggen.", NamedTextColor.RED));
+            return false;
+        }
+        boardScale = value;
+        saveState();
+        TextDisplay display = boardDisplay();
+        if (display != null) {
+            display.setTransformation(boardTransformation());
+        }
+        sender.sendMessage(Component.text("De grootte van het leaderboard is nu " + boardScaleText() + ".", NamedTextColor.GREEN));
+        return true;
+    }
+
+    /** Wipes all playtime (also of offline players) and refreshes the hologram. */
+    private int resetPlaytimeData() {
+        int n = playMillis.size();
+        playMillis.clear();
+        playNames.clear();
+        playLast.clear();
+        savePlaytime();
+        tickBoard();
+        return n;
+    }
+
+    private void leaderboardCommand(CommandSender sender, String[] args) {
+        String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "top";
+        switch (sub) {
+            case "spawn":
+            case "place":
+                if (sender instanceof Player) {
+                    placeBoard((Player) sender);
+                } else {
+                    sender.sendMessage(Component.text("Alleen een speler kan het leaderboard plaatsen.", NamedTextColor.RED));
+                }
+                break;
+            case "remove":
+                clearBoard(sender);
+                break;
+            case "refresh":
+                tickBoard();
+                sender.sendMessage(Component.text("Het leaderboard is ververst.", NamedTextColor.GREEN));
+                break;
+            case "size":
+                if (args.length >= 3) {
+                    setBoardScale(sender, args[2]);
+                } else {
+                    sender.sendMessage(Component.text("Gebruik: /lowkey leaderboard size <0,5 tot 20>. Nu: "
+                            + boardScaleText(), NamedTextColor.GRAY));
+                }
+                break;
+            case "reset":
+                if (args.length >= 3 && args[2].equalsIgnoreCase("confirm")) {
+                    int n = resetPlaytimeData();
+                    sender.sendMessage(Component.text("De speeltijd van " + n + " spelers is gewist.", NamedTextColor.GREEN));
+                } else {
+                    sender.sendMessage(Component.text("Dit wist de speeltijd van iedereen. Typ /lowkey leaderboard reset confirm om door te gaan.",
+                            NamedTextColor.YELLOW));
+                }
+                break;
+            default:
+                sender.sendMessage(boardComponent());
+                break;
+        }
+    }
+
+    private void openLeaderboardMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_DIAMOND, "Hier plaatsen", NamedTextColor.WHITE),
+                "Zet het leaderboard hologram op jouw positie.", 150, () -> {
+                    placeBoard(admin);
+                    openLeaderboardMenu(admin);
+                }));
+        if (boardLoc != null) {
+            buttons.add(button(iconLabel(M_DIAMOND, "Verwijderen", NamedTextColor.RED),
+                    "Haalt het hologram weg. De speeltijd blijft bewaard.", 150, () -> {
+                        clearBoard(admin);
+                        openLeaderboardMenu(admin);
+                    }));
+        }
+        buttons.add(button(iconLabel(M_DIAMOND, "Grootte", NamedTextColor.WHITE),
+                "Pas de grootte van het hologram aan.", 150, () -> openBoardSizeDialog(admin)));
+        buttons.add(button(iconLabel(M_REDSTONE, "Stats resetten", NamedTextColor.RED),
+                "Wist de speeltijd van iedereen en begint opnieuw.", 150,
+                () -> confirm(admin,
+                        "Speeltijd resetten?",
+                        "De speeltijd in de main wereld van iedereen wordt op nul gezet, ook van spelers die offline zijn.",
+                        "Dit kan niet ongedaan gemaakt worden.",
+                        Component.text("Ja, resetten", NamedTextColor.GREEN),
+                        () -> {
+                            int n = resetPlaytimeData();
+                            admin.sendMessage(Component.text("De speeltijd van " + n + " spelers is gewist.",
+                                    NamedTextColor.GREEN));
+                            openLeaderboardMenu(admin);
+                        },
+                        () -> openLeaderboardMenu(admin))));
+        List<Map.Entry<UUID, Long>> top = playtimeTop();
+        Component first = top.isEmpty()
+                ? statusLine("Nummer 1", "nog niemand", NamedTextColor.GRAY)
+                : statusLine("Nummer 1", playNames.getOrDefault(top.get(0).getKey(), "?") + " (" + playtimeText(top.get(0).getValue()) + ")",
+                        NamedTextColor.GOLD);
+        Component body = joinLines(
+                statusLine("Hologram", boardLoc == null ? "niet geplaatst" : "geplaatst",
+                        boardLoc == null ? NamedTextColor.YELLOW : NamedTextColor.GREEN),
+                statusLine("Grootte", boardScaleText(), NamedTextColor.WHITE),
+                statusLine("Spelers met speeltijd", String.valueOf(playMillis.size()), NamedTextColor.WHITE),
+                first,
+                Component.text("Telt alleen tijd in de main wereld, niet in de lobby en niet van crew.", NamedTextColor.DARK_GRAY));
+        showMenu(admin, "Leaderboard", body, buttons, backButton("Terug naar berichten.", () -> openMessagesMenu(admin)));
+    }
+
+    private void openBoardSizeDialog(Player admin) {
+        DialogInput size = DialogInput.text("grootte", Component.text("Grootte (0,5 tot 20)"))
+                .width(300).initial(boardScaleText()).maxLength(5).build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String text = view.getText("grootte");
+            getServer().getScheduler().runTask(this, () -> {
+                setBoardScale(clicker, text == null ? "" : text);
+                openLeaderboardMenu(clicker);
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, "Grootte leaderboard"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "1 is normale tekstgrootte. Het hologram past zich meteen aan.", NamedTextColor.GRAY))))
+                        .inputs(List.of(size))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_DIAMOND, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla de grootte op."), 150, save),
+                        backButton("Terug naar het leaderboard.", () -> openLeaderboardMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
     // ------------------------------------------------------------------ countdown hologram
 
     private static final LocalDateTime DEFAULT_COUNTDOWN = LocalDateTime.of(2026, 11, 7, 14, 0);
@@ -3239,7 +3678,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private boolean isOwner(Player player) {
         List<String> owners = getConfig().getStringList("login.owners");
         if (owners.isEmpty()) {
-            owners = List.of("r3ktify");
+            owners = List.of("Lowkey_SMP");
         }
         for (String owner : owners) {
             if (owner.equalsIgnoreCase(player.getName())) {
@@ -3648,6 +4087,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey give <speler> : geeft een speler in de lobby de LowkeySMP nether star (hotbar slot 5)
      * /lowkey website : stuurt meteen een websitebericht met klikbare link (ook elke website-interval-minutes minuten automatisch)
      * /lowkey donate : stuurt meteen een willekeurig donatiebericht (voor testen)
+     * /lowkey leaderboard [spawn|remove|refresh|size <getal>|reset confirm] : hologram met de top 10 speeltijd in de main wereld (dag:uur:minuut)
+     * /lowkey badge <huidig|rood|roze> : wisselt de LOWKEY badge overal tussen het pixel badge, het rode en het roze logo (voor testen)
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
      * /lowkey countdown <spawn|remove|set <datum> <tijd>|size <getal>> : groot hologram met het logo en de aftelling (verdwijnt bij de launch)
@@ -3795,6 +4236,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
             } else {
                 giveLobbyItemTo(sender, target);
+            }
+            return true;
+        }
+        if (args.length >= 1 && (args[0].equalsIgnoreCase("leaderboard") || args[0].equalsIgnoreCase("speeltijd"))) {
+            leaderboardCommand(sender, args);
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("badge")) {
+            int style = args.length >= 2 ? parseBadgeStyle(args[1]) : -1;
+            if (style < 0) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey badge <huidig|rood|roze>. Nu: " + badgeStyleName(badgeStyle),
+                        NamedTextColor.GRAY));
+            } else {
+                applyBadgeStyle(sender, style);
             }
             return true;
         }
@@ -4131,7 +4586,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         buttons.add(button(iconLabel(M_SERVER, "Server", NamedTextColor.WHITE),
                 "Launch, main wereld en de server open of dicht.", 150, () -> openServerMenu(admin)));
         buttons.add(button(iconLabel(M_MESSAGES, "Berichten", NamedTextColor.WHITE),
-                "Countdown, eigen bericht, donatiebericht en websitebericht.", 150, () -> openMessagesMenu(admin)));
+                "Countdown, eigen bericht, donatiebericht, websitebericht, leaderboard en badge.", 150, () -> openMessagesMenu(admin)));
         buttons.add(button(iconLabel(M_BOOK, "Regels", NamedTextColor.WHITE),
                 "Het regelboekje in de lobby: pagina's schrijven en iedereen opnieuw laten lezen.", 150,
                 () -> openRulesMenu(admin)));
@@ -4286,8 +4741,43 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     sendWebsiteMessage();
                     openMessagesMenu(admin);
                 }));
+        buttons.add(button(iconLabel(M_DIAMOND, "Leaderboard", NamedTextColor.WHITE),
+                "Hologram met de top 10 speeltijd in de main wereld.", 150, () -> openLeaderboardMenu(admin)));
+        buttons.add(button(iconLabel(M_SIGN, "Badge testen", NamedTextColor.WHITE),
+                "Wissel de LOWKEY badge tussen het huidige pixel badge, rood en roze.", 150, () -> openBadgeMenu(admin)));
         Component body = Component.text("Berichten naar alle spelers, met de LOWKEY badge.", NamedTextColor.GRAY);
         showMenu(admin, "Berichten", body, buttons, backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+    }
+
+    /** Test menu: switch the LOWKEY badge between the pixel badge, the red wordmark and the pink wordmark. */
+    private void openBadgeMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(badgeStyleButton(admin, 0, rawGlyph(LOWKEY_BADGE), "Huidig",
+                "Het pixel badge dat nu in de pack zit."));
+        buttons.add(badgeStyleButton(admin, 1, rawGlyph(BADGE_WM_RED), "Rood",
+                "Het grote LOWKEY logo in rood, overal."));
+        buttons.add(badgeStyleButton(admin, 2, rawGlyph(BADGE_WM_PINK), "Roze",
+                "Het grote LOWKEY logo in roze. Doodsberichten en Nether berichten blijven rood."));
+        Component body = Component.text()
+                .append(Component.text("Kies welke LOWKEY badge overal getoond wordt, ook in de menu's. Het geldt meteen voor nieuwe berichten. Nu: ",
+                        NamedTextColor.GRAY))
+                .append(Component.text(badgeStyleName(badgeStyle), NamedTextColor.WHITE, TextDecoration.BOLD))
+                .build();
+        showMenu(admin, "Badge testen", body, buttons, backButton("Terug naar berichten.", () -> openMessagesMenu(admin)));
+    }
+
+    private ActionButton badgeStyleButton(Player admin, int style, Component preview, String name, String tooltip) {
+        Component label = Component.text()
+                .append(preview).append(Component.space())
+                .append(Component.text(name, NamedTextColor.WHITE))
+                .build();
+        return button(label, tooltip, 150, () -> {
+            applyBadgeStyle(admin, style);
+            openBadgeMenu(admin);
+        });
     }
 
     /** A dialog with a text field: whatever you type goes to everybody with the LOWKEY badge. */
@@ -8421,6 +8911,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** The official launch is a fresh start: leftovers of tests (saved positions, dead statuses, red stars) are wiped. */
     private void launchCleanSlate() {
         clearAllLastLocations();
+        resetPlaytimeData(); // the leaderboard starts at zero with the official launch
         for (UUID id : allPlayerIds()) {
             if (getServer().getPlayer(id) != null) {
                 continue;
@@ -8574,6 +9065,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("border");
             options.add("revive");
             options.add("donate");
+            options.add("badge");
+            options.add("leaderboard");
             options.add("website");
             options.add("give");
             options.add("launch");
@@ -8605,6 +9098,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("setspawn");
                 options.add("delete");
                 options.add("protect");
+            } else if (sub.equals("leaderboard")) {
+                options.add("spawn");
+                options.add("remove");
+                options.add("refresh");
+                options.add("size");
+                options.add("reset");
+            } else if (sub.equals("badge")) {
+                options.add("huidig");
+                options.add("rood");
+                options.add("roze");
             } else if (sub.equals("seed")) {
                 options.add("random");
                 options.add("cancel");
