@@ -20,6 +20,7 @@ import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.ShadowColor;
 import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
@@ -449,6 +450,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             loadLosersWorld();
         }
         losersSpawn = readLoc(state, "losers-spawn");
+        finaleWorldCreated = state.getBoolean("finale.world-created", false);
+        if (finaleWorldCreated) {
+            loadFinaleWorld();
+        }
+        finaleSpawn = readLoc(state, "finale.world-spawn");
         try {
             countdownTarget = LocalDateTime.parse(state.getString("countdown-target", DEFAULT_COUNTDOWN.toString()));
         } catch (DateTimeParseException e) {
@@ -1064,7 +1070,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         // Noord sits at the far left of the line, Zuid at the far right. The line is a fixed width (in pixels) and the
         // tab list grows to fit it, so the counters end up against the edges. Widths: icon 10, space 4, "Noord " 34,
         // "Zuid " 24, a bold digit 7. The gap is filled with plain spaces (4 px each).
-        int teamWidth = Math.max(60, getConfig().getInt("tab-team-width", 150));
+        int teamWidth = Math.max(60, getConfig().getInt("tab-team-width", 120));
         String noordCount = String.valueOf(noord);
         String zuidCount = String.valueOf(zuid);
         int leftWidth = 8 + 4 + 34 + 7 * noordCount.length();
@@ -1317,7 +1323,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
 
         // GRACE: a completely normal death and respawn, only with our own message
-        if (graceRemaining(player) > 0L) {
+        if (graceRemaining(player) > 0L && !inFinaleWorld(player)) {
             getServer().sendMessage(Component.text()
                     .append(glyph(LOWKEY_BADGE_RED))
                     .append(Component.space())
@@ -1330,6 +1336,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         // ELIMINATION
         final Location spot = player.getLocation().clone();
         final World world = spot.getWorld();
+        // in the finale world you spectate until the finale is over, then you go to the lobby with everybody
+        final boolean finaleDeath = world != null && world.equals(finaleMainWorld()) && finaleState != FinaleState.IDLE;
 
         getServer().sendMessage(Component.text()
                 .append(glyph(LOWKEY_BADGE_RED))
@@ -1382,9 +1390,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 player.teleport(safe);
                 player.setGameMode(GameMode.SPECTATOR);
-                player.sendMessage(spectateMessage());
-                // a few minutes to spectate, then to the lobby (for good). Without a lobby: off the server.
-                getServer().getScheduler().runTaskLater(this, () -> {
+                player.sendMessage(finaleDeath ? finaleSpectateMessage() : spectateMessage());
+                // some time to spectate, then to the lobby (for good). Without a lobby: off the server.
+                // In the finale world there is no timer: the finale sends everybody to the lobby at the end.
+                if (!finaleDeath) getServer().getScheduler().runTaskLater(this, () -> {
                     if (!player.isOnline() || !isEliminated(player)) {
                         return;
                     }
@@ -1398,7 +1407,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                                         NamedTextColor.RED))
                                 .build());
                     }
-                }, ELIMINATION_SPECTATE_TICKS);
+                }, Math.max(1L, spectateSeconds * 20L));
             }
 
             player.showTitle(Title.title(
@@ -1414,8 +1423,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(glyph(LOWKEY_BADGE))
                 .append(Component.space())
                 .append(Component.text("Je kunt voor de komende ", NamedTextColor.WHITE))
-                .append(Component.text("60 seconden", NamedTextColor.RED))
+                .append(Component.text(spectateSeconds + (spectateSeconds == 1 ? " seconde" : " seconden"), NamedTextColor.RED))
                 .append(Component.text(" spectaten", NamedTextColor.WHITE))
+                .build();
+    }
+
+    /** Private message to somebody who died in the finale world. */
+    private Component finaleSpectateMessage() {
+        return Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text("Je kunt spectaten tot het einde van de finale", NamedTextColor.WHITE))
+                .append(Component.text(" en daarna ga je met iedereen mee naar de lobby.", NamedTextColor.GRAY))
                 .build();
     }
 
@@ -2462,6 +2481,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             player.sendActionBar(Component.text("Je mag niet meer meedoen aan het main eiland!", NamedTextColor.RED));
             return false;
         }
+        if (!finaleLosers && (finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED) && !isAdmin(player)) {
+            player.sendActionBar(Component.text("De finale is bezig, je kunt niet meer meedoen.", NamedTextColor.RED));
+            return false;
+        }
         UUID id = player.getUniqueId();
         YamlConfiguration data = loadPlayerData(id);
 
@@ -2961,8 +2984,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 Component.text("Welkom bij:", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD),
                 Component.empty(),
                 Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(1800), Duration.ofMillis(300)));
+        // no text shadow: a title is drawn 4x bigger, so the shadow would show as a dark copy behind the logo
         Title logo = Title.title(
-                rawGlyph(WELCOME_LOGO),
+                rawGlyph(WELCOME_LOGO).shadowColor(ShadowColor.none()),
                 Component.text("Veel succes!", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD),
                 Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(3500), Duration.ofMillis(1000)));
         final List<Player> list = new ArrayList<>(players);
@@ -4738,6 +4762,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             handleFinaleCommand(sender, args);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("spectate")) {
+            try {
+                int seconds = (int) Math.round(parseNum(args.length >= 2 ? args[1] : ""));
+                if (seconds < 0 || seconds > 600) {
+                    sender.sendMessage(Component.text("Kies 0 tot 600 seconden.", NamedTextColor.RED));
+                } else {
+                    spectateSeconds = seconds;
+                    saveState();
+                    sender.sendMessage(Component.text("Uitgeschakelde spelers in de main wereld kunnen nu " + seconds
+                            + " seconden spectaten.", NamedTextColor.GREEN));
+                }
+            } catch (NumberFormatException e) {
+                sender.sendMessage(Component.text("Gebruik: /lowkey spectate <seconden> (nu " + spectateSeconds + ")",
+                        NamedTextColor.GRAY));
+            }
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("losers")) {
             handleLosersCommand(sender, args);
             return true;
@@ -5834,6 +5875,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private final Set<UUID> showInvulnerable = new HashSet<>();
     private final Random finaleRandom = new Random();
 
+    // the finale world: an own world with the same seed as the main world, plus the preparation time without PvP
+    private static final String FINALE_WORLD = "lowkey_finale";
+    private boolean finaleWorldCreated;
+    private Location finaleSpawn;
+    private int finalePrepMin = 5;
+    private long finalePrepLeftMs;
+    private int finaleSaveTick;
+    private final Set<Integer> finalePrepAnnounced = new HashSet<>();
+    /** seconds an eliminated player can spectate in the main world before going to the lobby */
+    private int spectateSeconds = 60;
+
     private void loadFinaleState(YamlConfiguration s) {
         finaleTargetSet = s.getBoolean("finale.target-set", false);
         finaleTargetX = s.getDouble("finale.target-x", 0.0);
@@ -5872,6 +5924,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         origDamage = s.getDouble("finale.run.orig-damage", 0.2);
         origBuffer = s.getDouble("finale.run.orig-buffer", 5.0);
         finaleWinner = s.getString("finale.winner", null);
+        finalePrepMin = Math.max(0, Math.min(60, s.getInt("finale.prep-min", 5)));
+        finalePrepLeftMs = Math.max(0L, s.getLong("finale.prep-left-ms", 0L));
+        spectateSeconds = Math.max(0, Math.min(600, s.getInt("spectate-seconds", 60)));
     }
 
     private void saveFinaleState(YamlConfiguration s) {
@@ -5908,6 +5963,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         s.set("finale.run.orig-damage", origDamage);
         s.set("finale.run.orig-buffer", origBuffer);
         s.set("finale.winner", finaleWinner);
+        s.set("finale.prep-min", finalePrepMin);
+        s.set("finale.prep-left-ms", finalePrepLeftMs);
+        s.set("spectate-seconds", spectateSeconds);
+        s.set("finale.world-created", finaleWorldCreated);
+        writeLoc(s, "finale.world-spawn", finaleSpawn);
     }
 
     /** After a restart a running finale is put on pause: the admin decides when it continues. */
@@ -5953,8 +6013,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** The world the finale runs in: the main world, or the Verliezerseiland. */
     private World finaleWorldFor(boolean losers) {
-        World w = losers ? losersWorld() : null;
+        World w = losers ? losersWorld() : finaleMainWorld();
         return w != null ? w : gameWorld();
+    }
+
+    /** The own finale world of the main finale, or null when it does not exist (yet). */
+    private World finaleMainWorld() {
+        return finaleWorldCreated ? Bukkit.getWorld(FINALE_WORLD) : null;
+    }
+
+    boolean inFinaleWorld(Player player) {
+        World fw = finaleMainWorld();
+        return fw != null && player.getWorld().equals(fw);
     }
 
     private World finaleWorld() {
@@ -6002,8 +6072,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return aliveOnIsland();
         }
         List<Player> result = new ArrayList<>();
+        World fw = finaleMainWorld();
         for (Player p : getServer().getOnlinePlayers()) {
-            if (!inMainGroup(p.getWorld())) {
+            if (fw == null || !p.getWorld().equals(fw)) {
                 continue;
             }
             if (isEliminated(p) || isLosersOut(p)) {
@@ -6102,6 +6173,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         long now = System.currentTimeMillis();
         long delta = Math.max(0L, Math.min(now - finaleLastTickMs, 5000L));
         finaleLastTickMs = now;
+        if (finalePrepLeftMs > 0L) {
+            finalePrepTick(delta);
+            return;
+        }
         finaleElapsedMs = Math.min(runTotalMs, finaleElapsedMs + delta);
 
         long[] ph = finalePhaseAt(finaleElapsedMs);
@@ -6149,6 +6224,354 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (showInvulnerable.remove(event.getPlayer().getUniqueId())) {
             event.getPlayer().setInvulnerable(false);
         }
+        // leaving during the finale means you are out (not when the server itself shuts down)
+        Player quitter = event.getPlayer();
+        World fw = finaleMainWorld();
+        GameMode mode = quitter.getGameMode();
+        if (fw != null && !finaleLosers && !getServer().isStopping()
+                && (finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED)
+                && quitter.getWorld().equals(fw) && !isEliminated(quitter) && !isLosersOut(quitter)
+                && (mode == GameMode.SURVIVAL || mode == GameMode.ADVENTURE)) {
+            Location spot = quitter.getLocation();
+            for (ItemStack item : quitter.getInventory().getContents()) {
+                if (item != null && !item.getType().isAir()) {
+                    fw.dropItemNaturally(spot, item);
+                }
+            }
+            quitter.getInventory().clear();
+            quitter.setLevel(0);
+            quitter.setExp(0f);
+            setEliminated(quitter, true);
+            finaleWorldBroadcast(Component.text(quitter.getName() + " heeft de finale verlaten en is uitgeschakeld.",
+                    NamedTextColor.RED));
+            finaleOnElimination(quitter);
+        }
+    }
+
+    /** No PvP in the preparation time: hits, arrows and so on between players do nothing. Fall damage, lava and mobs still do. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onFinalePvp(EntityDamageByEntityEvent event) {
+        if (finalePrepLeftMs <= 0L || finaleLosers
+                || (finaleState != FinaleState.RUNNING && finaleState != FinaleState.PAUSED)) {
+            return;
+        }
+        if (!(event.getEntity() instanceof Player) || !inFinaleWorld((Player) event.getEntity())) {
+            return;
+        }
+        Entity damager = event.getDamager();
+        Player attacker = null;
+        if (damager instanceof Player) {
+            attacker = (Player) damager;
+        } else if (damager instanceof Projectile) {
+            ProjectileSource source = ((Projectile) damager).getShooter();
+            if (source instanceof Player) {
+                attacker = (Player) source;
+            }
+        } else if (damager instanceof org.bukkit.entity.TNTPrimed) {
+            Entity source = ((org.bukkit.entity.TNTPrimed) damager).getSource();
+            if (source instanceof Player) {
+                attacker = (Player) source;
+            }
+        }
+        if (attacker == null || attacker.equals(event.getEntity())) {
+            return;
+        }
+        event.setCancelled(true);
+        attacker.sendActionBar(Component.text("PvP staat nog uit.", NamedTextColor.RED));
+    }
+
+    /** Everybody who plays the main finale goes to the middle of the finale world, with their own gear. */
+    private void finaleGatherPlayers() {
+        World fw = finaleMainWorld();
+        if (fw == null) {
+            return;
+        }
+        Location base = finaleSpawn != null && finaleSpawn.getWorld() != null ? finaleSpawn : fw.getSpawnLocation();
+        Location dest = safeLocation(base.clone());
+        for (Player p : new ArrayList<>(getServer().getOnlinePlayers())) {
+            if (!inMainGroup(p.getWorld()) || isEliminated(p) || isLosersOut(p)) {
+                continue;
+            }
+            GameMode mode = p.getGameMode();
+            if (mode != GameMode.SURVIVAL && mode != GameMode.ADVENTURE) {
+                continue;
+            }
+            final UUID id = p.getUniqueId();
+            joinSettling.add(id); // no "+" and "-" message for every single player
+            getServer().getScheduler().runTaskLater(this, () -> joinSettling.remove(id), 40L);
+            p.setFallDistance(0f);
+            p.setFireTicks(0);
+            p.teleport(dest);
+        }
+    }
+
+    private void finalePrepTick(long delta) {
+        finalePrepLeftMs = Math.max(0L, finalePrepLeftMs - delta);
+        if (finalePrepLeftMs <= 0L) {
+            finalePvpOn();
+            return;
+        }
+        long leftSec = (finalePrepLeftMs + 999L) / 1000L;
+        for (int t : new int[] {180, 60, 10}) {
+            if (leftSec <= t && leftSec > t - 6 && finalePrepAnnounced.add(t)) {
+                String when = t >= 60 ? (t / 60) + (t == 60 ? " minuut" : " minuten") : t + " seconden";
+                finaleWorldBroadcast(Component.text("PvP gaat aan over " + when + ".", NamedTextColor.WHITE));
+                World fw = finaleMainWorld();
+                if (fw != null) {
+                    for (Player p : fw.getPlayers()) {
+                        p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.0f);
+                    }
+                }
+            }
+        }
+        finaleSaveTick++;
+        if (finaleSaveTick % 50 == 0) {
+            saveState();
+        }
+    }
+
+    private void finalePvpOn() {
+        finalePrepLeftMs = 0L;
+        finalePrepAnnounced.clear();
+        World fw = finaleMainWorld();
+        Title title = Title.title(
+                Component.text("PvP staat aan!", NamedTextColor.RED, TextDecoration.BOLD),
+                Component.text("De border begint te krimpen.", NamedTextColor.WHITE),
+                Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(3000), Duration.ofMillis(800)));
+        if (fw != null) {
+            for (Player p : fw.getPlayers()) {
+                p.showTitle(title);
+                p.playSound(p.getLocation(), Sound.ENTITY_ENDER_DRAGON_GROWL, 0.6f, 1.0f);
+            }
+        }
+        finaleWorldBroadcast(Component.text("PvP staat aan! De border begint te krimpen.", NamedTextColor.WHITE));
+        saveState();
+    }
+
+    /** A finale message for the players in the finale world only. */
+    private void finaleWorldBroadcast(Component text) {
+        World fw = finaleMainWorld();
+        if (fw == null) {
+            return;
+        }
+        Component line = finaleLine(text);
+        for (Player p : fw.getPlayers()) {
+            p.sendMessage(line);
+        }
+    }
+
+    /** Everybody in the finale world (admins in creative stay) goes to the lobby. */
+    private void finaleSendAllToLobby() {
+        World fw = finaleMainWorld();
+        if (fw == null) {
+            return;
+        }
+        for (Player p : new ArrayList<>(fw.getPlayers())) {
+            if (isAdmin(p) && p.getGameMode() == GameMode.CREATIVE) {
+                continue;
+            }
+            sendToLobby(p);
+        }
+    }
+
+    /** The winner show lasts about 21 seconds, after that the whole finale world goes to the lobby together. */
+    private void finaleScheduleLobby() {
+        getServer().getScheduler().runTaskLater(this, () -> {
+            if (finaleState == FinaleState.ENDED && !finaleLosers) {
+                finaleSendAllToLobby();
+            }
+        }, 480L);
+    }
+
+    // ---- the finale world itself
+
+    private World loadFinaleWorld() {
+        World existing = Bukkit.getWorld(FINALE_WORLD);
+        if (existing != null) {
+            return existing;
+        }
+        World main = gameWorld();
+        WorldCreator creator = new WorldCreator(FINALE_WORLD).environment(World.Environment.NORMAL)
+                .seed(main.getSeed()).generateStructures(main.canGenerateStructures());
+        World world = creator.createWorld();
+        if (world == null) {
+            getLogger().warning("Kon de finalewereld niet laden.");
+        } else {
+            world.setDifficulty(main.getDifficulty());
+        }
+        return world;
+    }
+
+    private void createFinaleWorld(CommandSender sender) {
+        if (finaleWorldCreated && finaleMainWorld() != null) {
+            sender.sendMessage(Component.text("De finalewereld bestaat al.", NamedTextColor.RED));
+            return;
+        }
+        World world = loadFinaleWorld();
+        if (world == null) {
+            sender.sendMessage(Component.text("De wereld kon niet gemaakt worden, kijk in de console.", NamedTextColor.RED));
+            return;
+        }
+        finaleWorldCreated = true;
+        Location base = world.getSpawnLocation();
+        int y = world.getHighestBlockYAt(base.getBlockX(), base.getBlockZ()) + 1;
+        finaleSpawn = new Location(world, base.getBlockX() + 0.5, y, base.getBlockZ() + 0.5, 0f, 0f);
+        saveState();
+        sender.sendMessage(Component.text("De finalewereld is gemaakt met dezelfde seed als de main wereld (" + world.getSeed()
+                + "). Ga erheen, bouw je muren, zet de vanilla border en zet het middelpunt met /lowkey finale wereld "
+                + "middelpunt.", NamedTextColor.GREEN));
+    }
+
+    private void teleportAdminToFinaleWorld(Player admin) {
+        World fw = finaleMainWorld();
+        if (fw == null) {
+            admin.sendMessage(Component.text("Maak eerst de finalewereld aan.", NamedTextColor.RED));
+            return;
+        }
+        Location dest = finaleSpawn != null && finaleSpawn.getWorld() != null ? finaleSpawn : fw.getSpawnLocation();
+        admin.teleport(safeLocation(dest.clone()));
+        removeLobbyItems(admin);
+    }
+
+    private void setFinaleMiddle(Player admin) {
+        if (!inFinaleWorld(admin)) {
+            admin.sendMessage(Component.text("Ga eerst in de finalewereld staan.", NamedTextColor.RED));
+            return;
+        }
+        finaleSpawn = admin.getLocation().clone();
+        saveState();
+        admin.sendMessage(Component.text("Het middelpunt van de finale staat nu hier.", NamedTextColor.GREEN));
+    }
+
+    private void deleteFinaleWorld(CommandSender sender) {
+        if (finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED) {
+            sender.sendMessage(Component.text("Stop eerst de finale.", NamedTextColor.RED));
+            return;
+        }
+        World world = finaleMainWorld();
+        File folder = world != null ? world.getWorldFolder() : new File(getServer().getWorldContainer(), FINALE_WORLD);
+        if (!finaleWorldCreated && world == null && !folder.isDirectory()) {
+            sender.sendMessage(Component.text("Er is geen finalewereld om te verwijderen.", NamedTextColor.RED));
+            return;
+        }
+        if (world != null) {
+            for (Player p : new ArrayList<>(world.getPlayers())) {
+                if (lobbySpawn != null && lobbySpawn.getWorld() != null) {
+                    sendToLobby(p);
+                } else {
+                    p.teleport(gameWorld().getSpawnLocation());
+                }
+            }
+            if (!Bukkit.unloadWorld(world, false)) {
+                sender.sendMessage(Component.text("De wereld kon niet worden afgesloten, probeer het opnieuw.",
+                        NamedTextColor.RED));
+                return;
+            }
+        }
+        boolean wiped = !folder.exists() || deleteRecursively(folder);
+        finaleWorldCreated = false;
+        finaleSpawn = null;
+        saveState();
+        sender.sendMessage(Component.text(wiped ? "De finalewereld is verwijderd."
+                : "De finalewereld is losgekoppeld, maar de map '" + folder.getName()
+                + "' kon niet helemaal gewist worden.", wiped ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
+    }
+
+    private void openFinaleWorldMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        Runnable again = () -> openFinaleWorldMenu(admin);
+        List<ActionButton> buttons = new ArrayList<>();
+        World fw = finaleMainWorld();
+        if (fw == null) {
+            buttons.add(button(iconLabel(M_LAUNCH, "Finalewereld maken", NamedTextColor.GREEN),
+                    "Maakt een nieuwe wereld met dezelfde seed als de main wereld.", 150, () -> {
+                        createFinaleWorld(admin);
+                        again.run();
+                    }));
+        } else {
+            buttons.add(button(iconLabel(M_COMPASS, "Naar de finalewereld", NamedTextColor.WHITE),
+                    "Teleporteert alleen jou naar het middelpunt.", 150, () -> teleportAdminToFinaleWorld(admin)));
+            buttons.add(button(iconLabel(M_STAR, "Middelpunt hier zetten", NamedTextColor.AQUA),
+                    "Hier komen alle spelers aan als de finale start. Je moet in de finalewereld staan.", 150, () -> {
+                        setFinaleMiddle(admin);
+                        again.run();
+                    }));
+            buttons.add(button(iconLabel(M_FIRE, "Finalewereld verwijderen", NamedTextColor.RED),
+                    "Wist de hele wereld, ook je muren.", 150, () -> confirm(admin,
+                            "Finalewereld verwijderen?",
+                            "De hele finalewereld wordt gewist, ook alles wat je gebouwd hebt.",
+                            "Spelers die erin staan gaan naar de lobby.",
+                            Component.text("Ja, verwijderen", NamedTextColor.RED),
+                            () -> {
+                                deleteFinaleWorld(admin);
+                                again.run();
+                            },
+                            again)));
+        }
+        List<Component> lines = new ArrayList<>();
+        lines.add(statusLine("Finalewereld", fw == null ? "bestaat nog niet" : "klaar",
+                fw == null ? NamedTextColor.YELLOW : NamedTextColor.GREEN));
+        if (fw != null) {
+            lines.add(statusLine("Seed", String.valueOf(fw.getSeed()), NamedTextColor.WHITE));
+            if (finaleSpawn != null) {
+                lines.add(statusLine("Middelpunt", "x " + finaleNum(finaleSpawn.getX()) + ", y " + finaleNum(finaleSpawn.getY())
+                        + ", z " + finaleNum(finaleSpawn.getZ()), NamedTextColor.WHITE));
+            }
+        }
+        showMenu(admin, "Finalewereld", joinLines(lines.toArray(new Component[0])), buttons,
+                backButton("Terug naar de finale.", () -> openFinaleMenu(admin)));
+    }
+
+    private void openFinalePrepDialog(Player admin) {
+        DialogInput prep = DialogInput.text("voorbereiding", Component.text("Voorbereiding zonder PvP (minuten, 0 tot 60)"))
+                .width(300).initial(String.valueOf(finalePrepMin)).maxLength(3).build();
+        DialogInput spec = DialogInput.text("spectaten", Component.text("Spectaten in de main wereld (seconden, 0 tot 600)"))
+                .width(300).initial(String.valueOf(spectateSeconds)).maxLength(4).build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String rawPrep = view.getText("voorbereiding");
+            final String rawSpec = view.getText("spectaten");
+            getServer().getScheduler().runTask(this, () -> {
+                try {
+                    int p = (int) Math.round(parseNum(rawPrep == null ? "" : rawPrep));
+                    int sp = (int) Math.round(parseNum(rawSpec == null ? "" : rawSpec));
+                    if (p < 0 || p > 60 || sp < 0 || sp > 600) {
+                        clicker.sendMessage(Component.text("Voorbereiding is 0 tot 60 minuten, spectaten 0 tot 600 seconden.",
+                                NamedTextColor.RED));
+                    } else {
+                        finalePrepMin = p;
+                        spectateSeconds = sp;
+                        saveState();
+                        clicker.sendMessage(Component.text("Opgeslagen: " + p + " min voorbereiding en " + sp
+                                + " s spectaten in de main wereld.", NamedTextColor.GREEN));
+                    }
+                } catch (NumberFormatException e) {
+                    clicker.sendMessage(Component.text("Geef getallen op.", NamedTextColor.RED));
+                }
+                openFinaleMenu(clicker, false);
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, "Voorbereiding en spectaten"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "De eerste minuten van de finale staat PvP uit. Spectaten geldt voor spelers die in de "
+                                        + "main wereld doodgaan. In de finale kijk je tot het einde mee.",
+                                NamedTextColor.GRAY))))
+                        .inputs(List.of(prep, spec))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_HEART, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla beide waarden op."), 150, save),
+                        backButton("Terug naar de finale.", () -> openFinaleMenu(admin, false)))));
+        admin.showDialog(dialog);
     }
 
     // ---- start, pause, resume, stop
@@ -6164,6 +6587,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         if (losers && (!losersCreated || losersWorld() == null)) {
             sender.sendMessage(Component.text("Het Verliezerseiland bestaat nog niet.", NamedTextColor.RED));
+            return;
+        }
+        if (!losers && finaleMainWorld() == null) {
+            sender.sendMessage(Component.text("De finalewereld bestaat nog niet. Maak hem met /lowkey finale wereld maken "
+                    + "of in het finalemenu.", NamedTextColor.RED));
             return;
         }
         finaleLosers = losers;
@@ -6217,13 +6645,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finaleSilentApply = true;
         finaleLastTickMs = System.currentTimeMillis();
         finaleState = FinaleState.RUNNING;
+        finalePrepAnnounced.clear();
+        finalePrepLeftMs = losers ? 0L : Math.max(0, finalePrepMin) * 60_000L;
+        if (!losers) {
+            finaleGatherPlayers();
+        }
         saveState();
 
         int alive = finaleAlivePlayers().size();
         Title title = Title.title(
                 Component.text(losers ? "De finale van het Verliezerseiland!" : "De finale is van start!",
                         finaleAccent(), TextDecoration.BOLD),
-                Component.text(losers ? "Overleef de storm!" : "Ga bovengronds!", NamedTextColor.WHITE),
+                Component.text(losers ? "Overleef de storm!" : (finalePrepLeftMs > 0L ? "Bereid je voor!" : "Ga bovengronds!"),
+                        NamedTextColor.WHITE),
                 Title.Times.times(Duration.ofMillis(400), Duration.ofMillis(3500), Duration.ofMillis(1000)));
         for (Player p : getServer().getOnlinePlayers()) {
             p.showTitle(title);
@@ -6235,9 +6669,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finaleBroadcast(Component.text(losers
                 ? "De border begint te krimpen. De laatste " + losersWinners + (losersWinners == 1 ? " speler komt"
                         : " spelers komen") + " terug in het spel!"
-                : "De border begint te krimpen, ga bovengronds!", NamedTextColor.WHITE));
+                : (finalePrepLeftMs > 0L ? "De border begint te krimpen na de voorbereidingstijd."
+                        : "De border begint te krimpen, ga bovengronds!"), NamedTextColor.WHITE));
         finaleBroadcast(Component.text("Er zijn nog " + alive + (alive == 1 ? " speler" : " spelers") + " over.",
                 NamedTextColor.GRAY));
+        if (!losers && finalePrepLeftMs > 0L) {
+            finaleWorldBroadcast(Component.text("PvP staat uit voor de eerste " + finalePrepMin
+                    + (finalePrepMin == 1 ? " minuut" : " minuten") + ". Zoek je teamgenoten en maak je inventory klaar.",
+                    NamedTextColor.WHITE));
+        }
         if (losers) {
             finaleLosersThunder();
         }
@@ -6298,13 +6738,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         border.setDamageAmount(origDamage);
         border.setDamageBuffer(origBuffer);
         finaleState = FinaleState.IDLE;
+        finalePrepLeftMs = 0L;
+        finalePrepAnnounced.clear();
+        if (!finaleLosers) {
+            finaleSendAllToLobby();
+        }
         finaleWinner = null;
         finaleElapsedMs = 0L;
         finaleDeaths.clear();
         finaleCheckPending = false;
         finaleRestartNotice = false;
         saveState();
-        sender.sendMessage(Component.text("De finale is gestopt en de border staat weer als bij de start.",
+        sender.sendMessage(Component.text("De finale is gestopt, de border staat weer als bij de start en de spelers in de finalewereld zijn naar de lobby gestuurd.",
                 NamedTextColor.GREEN));
     }
 
@@ -6520,6 +6965,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finaleFreezeBorder();
         saveState();
         winnerShow(winner, false);
+        finaleScheduleLobby();
         finaleNotifyAdmins("De finale is afgelopen. " + winner.getName() + " heeft gewonnen. Zet de border terug met "
                 + "/lowkey finale stop.", NamedTextColor.GREEN);
     }
@@ -6641,6 +7087,26 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             case "status":
                 sender.sendMessage(finaleStatusBody());
                 return;
+            case "wereld":
+            case "world":
+                handleFinaleWorldCommand(sender, args);
+                return;
+            case "voorbereiding":
+            case "prep":
+                try {
+                    int minutes = (int) Math.round(parseNum(args.length >= 3 ? args[2] : ""));
+                    if (minutes < 0 || minutes > 60) {
+                        sender.sendMessage(Component.text("Kies 0 tot 60 minuten.", NamedTextColor.RED));
+                    } else {
+                        finalePrepMin = minutes;
+                        saveState();
+                        sender.sendMessage(Component.text("De voorbereiding zonder PvP duurt nu " + minutes + " minuten.",
+                                NamedTextColor.GREEN));
+                    }
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(Component.text("Gebruik: /lowkey finale voorbereiding <minuten>", NamedTextColor.GRAY));
+                }
+                return;
             case "test":
                 if (sender instanceof Player) {
                     winnerShow((Player) sender, true);
@@ -6654,6 +7120,38 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 } else {
                     sender.sendMessage(finaleStatusBody());
                 }
+        }
+    }
+
+    private void handleFinaleWorldCommand(CommandSender sender, String[] args) {
+        String what = args.length >= 3 ? args[2].toLowerCase(Locale.ROOT) : "";
+        boolean isPlayer = sender instanceof Player;
+        switch (what) {
+            case "maken":
+            case "create":
+                createFinaleWorld(sender);
+                return;
+            case "tp":
+                if (isPlayer) {
+                    teleportAdminToFinaleWorld((Player) sender);
+                } else {
+                    sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
+                }
+                return;
+            case "middelpunt":
+                if (isPlayer) {
+                    setFinaleMiddle((Player) sender);
+                } else {
+                    sender.sendMessage(Component.text("Dit commando kan alleen in-game.", NamedTextColor.RED));
+                }
+                return;
+            case "verwijder":
+            case "delete":
+                deleteFinaleWorld(sender);
+                return;
+            default:
+                sender.sendMessage(Component.text("Gebruik: /lowkey finale wereld <maken|tp|middelpunt|verwijder>",
+                        NamedTextColor.GRAY));
         }
     }
 
@@ -6683,12 +7181,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         List<Component> lines = new ArrayList<>();
         lines.add(statusLine("Finale", finaleStateText(), finaleState == FinaleState.RUNNING ? NamedTextColor.GREEN
                 : (finaleState == FinaleState.IDLE ? NamedTextColor.YELLOW : NamedTextColor.AQUA)));
-        lines.add(statusLine("Waar", losers ? "Verliezerseiland" : "Main wereld", NamedTextColor.WHITE));
+        lines.add(statusLine("Waar", losers ? "Verliezerseiland" : "Finalewereld", NamedTextColor.WHITE));
         lines.add(statusLine("Border nu", finaleNum(border.getSize()) + " blokken", NamedTextColor.WHITE));
         lines.add(statusLine("Doel", "x " + finaleNum(cx) + ", z " + finaleNum(cz) + ", " + finaleNum(size)
                 + " blokken" + (targetSet ? "" : " (midden blijft)"), NamedTextColor.WHITE));
         lines.add(statusLine("Duur", finaleDurationMin + " min, laatste " + finaleRoundMin + " min in rondes van "
                 + finaleShrinkSec + " s krimpen en " + finalePauseSec + " s pauze", NamedTextColor.WHITE));
+        if (!losers) {
+            lines.add(statusLine("Voorbereiding", finalePrepLeftMs > 0L ? "PvP uit, nog " + clock(finalePrepLeftMs)
+                    : finalePrepMin + " min zonder PvP", NamedTextColor.WHITE));
+        }
         if (losers) {
             lines.add(statusLine("Winnaars", "de laatste " + losersWinners, NamedTextColor.WHITE));
         }
@@ -6721,7 +7223,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     "Titel, bericht en de border begint te krimpen.", 150, () -> confirm(admin,
                             "Finale starten?",
                             losers ? "De border op het Verliezerseiland begint direct te krimpen en iedereen krijgt de titel."
-                                    : "De border begint direct te krimpen naar het doel en iedereen krijgt de titel.",
+                                    : "Iedereen in de main wereld gaat naar het middelpunt van de finalewereld. Eerst "
+                                    + finalePrepMin + " min zonder PvP, daarna begint de border te krimpen.",
                             losers ? "De laatste " + losersWinners + " spelers komen terug in het spel."
                                     : "De Nether en het End gaan automatisch dicht.",
                             Component.text("Ja, starten", NamedTextColor.GREEN),
@@ -6761,6 +7264,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         buttons.add(button(iconLabel(M_COUNTDOWN, "Tijden en schade", NamedTextColor.WHITE),
                 "Duur, rondes, pauzes en de schade buiten de border (voor beide finales).", 150,
                 () -> openFinaleTimeDialog(admin)));
+        if (!losers) {
+            buttons.add(button(iconLabel(M_COMPASS, "Finalewereld", NamedTextColor.WHITE),
+                    "De aparte wereld voor de finale: maken, middelpunt, verwijderen.", 150,
+                    () -> openFinaleWorldMenu(admin)));
+            buttons.add(button(iconLabel(M_COUNTDOWN, "Voorbereiding en spectaten", NamedTextColor.WHITE),
+                    "Minuten zonder PvP en spectatietijd in de main wereld.", 150, () -> openFinalePrepDialog(admin)));
+        }
         if (losers) {
             buttons.add(button(iconLabel(M_HEART, "Aantal winnaars", NamedTextColor.WHITE),
                     "Hoeveel spelers van het eiland terugkomen in het spel.", 150,
@@ -6863,10 +7373,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
             final String sg = view.getText("grootte");
             getServer().getScheduler().runTask(this, () -> {
-                boolean rightWorld = losers ? inLosers(clicker) : inMainGroup(clicker.getWorld());
+                boolean rightWorld = losers ? inLosers(clicker)
+                        : (finaleMainWorld() != null ? inFinaleWorld(clicker) : inMainGroup(clicker.getWorld()));
                 if (!rightWorld) {
                     clicker.sendMessage(Component.text(losers ? "Ga op het Verliezerseiland staan om je positie te gebruiken."
-                            : "Ga in de main wereld staan om je positie te gebruiken.", NamedTextColor.RED));
+                            : "Ga in de finalewereld staan om je positie te gebruiken.", NamedTextColor.RED));
                 } else {
                     applyFinaleTarget(clicker, losers, String.valueOf(clicker.getLocation().getBlockX() + 0.5),
                             String.valueOf(clicker.getLocation().getBlockZ() + 0.5), sg);
@@ -7201,6 +7712,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private int worldGroup(Player player) {
         if (inLosers(player)) {
             return 2;
+        }
+        if (inFinaleWorld(player)) {
+            return 3;
         }
         return inLobby(player) ? 0 : 1;
     }
@@ -9146,6 +9660,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (losersSpawn != null && world.equals(losersSpawn.getWorld())) {
             return 2;
         }
+        World fw = finaleMainWorld();
+        if (fw != null && world.equals(fw)) {
+            return 3;
+        }
         if (lobbySpawn != null && world.equals(lobbySpawn.getWorld())) {
             return 0;
         }
@@ -9158,7 +9676,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     private static String worldGroupName(int group) {
-        return group == 0 ? "lobby" : (group == 2 ? "eiland" : "main");
+        return group == 0 ? "lobby" : (group == 2 ? "eiland" : (group == 3 ? "finale" : "main"));
     }
 
     /** "+ name" or "- name", for the people who are in that world right now (and for crew and admins, in every world). */
@@ -9417,9 +9935,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return eventOptions;
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("finale")) {
-            List<String> finaleOptions = new ArrayList<>(Arrays.asList("menu", "start", "pauze", "hervat", "stop", "status", "test"));
+            List<String> finaleOptions = new ArrayList<>(Arrays.asList("menu", "start", "pauze", "hervat", "stop", "status", "wereld", "voorbereiding", "test"));
             finaleOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
             return finaleOptions;
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("finale") && args[1].equalsIgnoreCase("wereld")) {
+            return Stream.of("maken", "tp", "middelpunt", "verwijder")
+                    .filter(o -> o.startsWith(args[2].toLowerCase(Locale.ROOT))).collect(Collectors.toList());
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("verban")) {
             return Stream.of("main", "verliezerseiland", "beide").filter(o -> o.startsWith(args[2].toLowerCase(Locale.ROOT)))
@@ -9461,6 +9983,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("losers");
             options.add("end");
             options.add("finale");
+            options.add("spectate");
             options.add("say");
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
