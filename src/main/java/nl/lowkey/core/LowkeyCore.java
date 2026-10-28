@@ -49,6 +49,7 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Display;
+import org.bukkit.entity.Interaction;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Firework;
@@ -93,6 +94,7 @@ import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerInteractAtEntityEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerEditBookEvent;
@@ -464,6 +466,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         countdownLoc = readLoc(state, "countdown-loc");
         boardLoc = readLoc(state, "board-loc");
         boardScale = state.getDouble("board-scale", 2.0);
+        tlLoc = readLoc(state, "timeline-loc");
+        tlScale = state.getDouble("timeline-scale", 1.0);
+        tlPack = state.getBoolean("timeline-pack", false);
+        for (int i = 0; i < tlEvents.size(); i++) {
+            String tlName = state.getString("timeline-event." + i + ".name");
+            String tlDate = state.getString("timeline-event." + i + ".date");
+            if (tlName != null && !tlName.isBlank()) {
+                tlEvents.get(i).name = tlName;
+            }
+            if (tlDate != null) {
+                try {
+                    tlEvents.get(i).date = LocalDate.parse(tlDate);
+                } catch (DateTimeParseException ignored) {
+                    // keep the default date
+                }
+            }
+        }
         loadWorldBans(state);
         loadPlaytime();
 
@@ -491,6 +510,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::tickCountdown, 40L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::tickPlaytime, 100L, 100L);
         getServer().getScheduler().runTaskTimer(this, this::tickBoard, 200L, 600L);
+        getServer().getScheduler().runTaskTimer(this, this::tickTimeline, 200L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::tickFinale, 20L, 2L);
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (Player p : getServer().getOnlinePlayers()) {
@@ -519,6 +539,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         removeCountdownEntity();
         removeBoardEntity();
+        removeTimelineEntities(true);
         savePlaytime();
         for (Player player : getServer().getOnlinePlayers()) {
             logout(player, false); // nobody keeps a temporary op after a restart
@@ -1887,6 +1908,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         writeLoc(state, "countdown-loc", countdownLoc);
         writeLoc(state, "board-loc", boardLoc);
         state.set("board-scale", boardScale);
+        writeLoc(state, "timeline-loc", tlLoc);
+        state.set("timeline-scale", tlScale);
+        state.set("timeline-pack", tlPack);
+        for (int i = 0; i < tlEvents.size(); i++) {
+            state.set("timeline-event." + i + ".name", tlEvents.get(i).name);
+            state.set("timeline-event." + i + ".date", tlEvents.get(i).date.toString());
+        }
         saveWorldBans(state);
         state.set("main-open", mainOpen);
         state.set("badge-style", badgeStyle);
@@ -3159,7 +3187,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         World world = where.getWorld();
         TextDisplay display = world.spawn(where, TextDisplay.class, td -> {
             td.setPersistent(false); // never saved: the plugin puts it back after a restart
-            td.setBillboard(Display.Billboard.CENTER);
+            td.setBillboard(Display.Billboard.VERTICAL);
             td.setAlignment(TextDisplay.TextAlignment.CENTER);
             td.setLineWidth(10_000);
             td.setBackgroundColor(Color.fromARGB(0, 0, 0, 0));
@@ -3375,6 +3403,541 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         ActionButton.create(iconLabel(M_DIAMOND, "Opslaan", NamedTextColor.GREEN),
                                 Component.text("Sla de grootte op."), 150, save),
                         backButton("Terug naar het leaderboard.", () -> openLeaderboardMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+
+    // ------------------------------------------------------------------ timeline hologram (lobby)
+
+    private static final String[] TL_MONTHS = {"jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"};
+
+    private static final class TlEvent {
+        String name;
+        LocalDate date;
+        final Material item;
+        final String glyph;
+
+        TlEvent(String name, LocalDate date, Material item, String glyph) {
+            this.name = name;
+            this.date = date;
+            this.item = item;
+            this.glyph = glyph;
+        }
+    }
+
+    private static List<TlEvent> tlDefaultEvents() {
+        List<TlEvent> list = new ArrayList<>();
+        list.add(new TlEvent("Server open", LocalDate.of(2026, 11, 7), Material.IRON_DOOR, "\uE0A0"));
+        list.add(new TlEvent("Verliezerseiland start", LocalDate.of(2026, 11, 11), Material.SKELETON_SKULL, "\uE0A1"));
+        list.add(new TlEvent("IJsmuur smelt", LocalDate.of(2026, 11, 13), Material.BLUE_ICE, "\uE0A2"));
+        list.add(new TlEvent("Nether open", LocalDate.of(2026, 11, 14), Material.OBSIDIAN, "\uE0A3"));
+        list.add(new TlEvent("End open", LocalDate.of(2026, 11, 15), Material.END_PORTAL_FRAME, "\uE0A4"));
+        list.add(new TlEvent("Finale Verliezerseiland", LocalDate.of(2026, 11, 18), Material.TOTEM_OF_UNDYING, "\uE0A5"));
+        list.add(new TlEvent("Hoofdfinale", LocalDate.of(2026, 11, 21), Material.GOLD_BLOCK, "\uE0A6"));
+        return list;
+    }
+
+    private final List<TlEvent> tlEvents = tlDefaultEvents();
+    private Location tlLoc;
+    private double tlScale = 1.0;
+    /** false = spinning blocks, true = the icons from the resource pack */
+    private boolean tlPack = false;
+    private final List<List<Entity>> tlEntities = new ArrayList<>();
+    private final List<Entity> tlShared = new ArrayList<>();
+    private UUID tlHitbox;
+    private LocalDate tlBuiltDay;
+    private float tlAngle = 0f;
+    /** which event (position in the date order) each player is looking at */
+    private final Map<UUID, Integer> tlPos = new HashMap<>();
+    /** which position is currently shown to each player */
+    private final Map<UUID, Integer> tlShown = new HashMap<>();
+
+    private LocalDate tlToday() {
+        return LocalDate.now(LOWKEY_ZONE);
+    }
+
+    private String tlDateText(LocalDate date) {
+        return date.getDayOfMonth() + " " + TL_MONTHS[date.getMonthValue() - 1];
+    }
+
+    private String tlScaleText() {
+        return tlScale == Math.rint(tlScale) ? String.valueOf((long) tlScale) : String.valueOf(tlScale);
+    }
+
+    /** Indexes of the events, in date order. */
+    private List<Integer> tlOrder() {
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < tlEvents.size(); i++) {
+            order.add(i);
+        }
+        order.sort(java.util.Comparator.comparing((Integer i) -> tlEvents.get(i).date));
+        return order;
+    }
+
+    /** First position that is today or later, otherwise the last one. */
+    private int tlFirstUpcoming(List<Integer> order) {
+        LocalDate today = tlToday();
+        for (int pos = 0; pos < order.size(); pos++) {
+            if (!tlEvents.get(order.get(pos)).date.isBefore(today)) {
+                return pos;
+            }
+        }
+        return order.size() - 1;
+    }
+
+    private Transformation tlSpin(float scale, float angle) {
+        return new Transformation(new Vector3f(), new AxisAngle4f(angle, 0f, 1f, 0f), new Vector3f(scale, scale, scale),
+                new AxisAngle4f());
+    }
+
+    private TextDisplay tlText(Location at, Component text, float scale, boolean hidden) {
+        return at.getWorld().spawn(at, TextDisplay.class, td -> {
+            td.setPersistent(false);
+            td.setVisibleByDefault(!hidden);
+            td.setBillboard(Display.Billboard.VERTICAL);
+            td.setAlignment(TextDisplay.TextAlignment.CENTER);
+            td.setLineWidth(10_000);
+            td.setBackgroundColor(Color.fromARGB(0, 0, 0, 0));
+            td.setShadowed(true);
+            td.setSeeThrough(false);
+            td.setBrightness(new Display.Brightness(15, 15));
+            td.setTransformation(new Transformation(new Vector3f(), new AxisAngle4f(), new Vector3f(scale, scale, scale),
+                    new AxisAngle4f()));
+            td.text(text);
+        });
+    }
+
+    private ItemDisplay tlItem(Location at, Material material, float scale) {
+        return at.getWorld().spawn(at, ItemDisplay.class, d -> {
+            d.setPersistent(false);
+            d.setVisibleByDefault(false);
+            d.setBillboard(Display.Billboard.FIXED);
+            d.setItemStack(new ItemStack(material));
+            d.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
+            d.setBrightness(new Display.Brightness(15, 15));
+            d.setTransformation(tlSpin(scale, tlAngle));
+        });
+    }
+
+    private void removeTimelineEntities(boolean releaseChunk) {
+        for (List<Entity> group : tlEntities) {
+            for (Entity e : group) {
+                if (e.isValid()) {
+                    e.remove();
+                }
+            }
+        }
+        for (Entity e : tlShared) {
+            if (e.isValid()) {
+                e.remove();
+            }
+        }
+        tlEntities.clear();
+        tlShared.clear();
+        tlHitbox = null;
+        tlShown.clear();
+        if (releaseChunk && tlLoc != null && tlLoc.getWorld() != null) {
+            tlLoc.getWorld().removePluginChunkTicket(tlLoc.getBlockX() >> 4, tlLoc.getBlockZ() >> 4, this);
+        }
+    }
+
+    /** Builds the whole hologram: per event a date, a name and an icon, plus the arrows and the click area. */
+    private void spawnTimeline() {
+        removeTimelineEntities(false);
+        if (tlLoc == null || tlLoc.getWorld() == null) {
+            return;
+        }
+        final World world = tlLoc.getWorld();
+        final double s = tlScale;
+        final Location base = tlLoc.clone();
+        world.addPluginChunkTicket(base.getBlockX() >> 4, base.getBlockZ() >> 4, this);
+        tlBuiltDay = tlToday();
+        for (TlEvent ev : tlEvents) {
+            boolean past = ev.date.isBefore(tlBuiltDay);
+            List<Entity> group = new ArrayList<>();
+            group.add(tlText(base.clone().add(0, 3.3 * s, 0),
+                    Component.text(tlDateText(ev.date), past ? NamedTextColor.GRAY : NamedTextColor.LIGHT_PURPLE,
+                            TextDecoration.BOLD), (float) (4.0 * s), true));
+            group.add(tlText(base.clone().add(0, 2.45 * s, 0),
+                    Component.text(ev.name, past ? NamedTextColor.DARK_GRAY : NamedTextColor.WHITE), (float) (1.9 * s), true));
+            if (tlPack) {
+                group.add(tlText(base.clone().add(0, 1.5 * s, 0), rawGlyph(ev.glyph), (float) (2.0 * s), true));
+            } else {
+                group.add(tlItem(base.clone().add(0, 1.45 * s, 0), ev.item, (float) (1.5 * s)));
+            }
+            tlEntities.add(group);
+        }
+        tlShared.add(tlText(base.clone().add(0, 0.45 * s, 0),
+                Component.text("<", NamedTextColor.GRAY, TextDecoration.BOLD)
+                        .append(Component.text("        "))
+                        .append(Component.text(">", NamedTextColor.GRAY, TextDecoration.BOLD)),
+                (float) (2.6 * s), false));
+        Interaction hit = world.spawn(base.clone(), Interaction.class, in -> {
+            in.setPersistent(false);
+            in.setInteractionWidth((float) (2.8 * s));
+            in.setInteractionHeight((float) (4.2 * s));
+            in.setResponsive(true);
+        });
+        tlHitbox = hit.getUniqueId();
+        tlShared.add(hit);
+    }
+
+    private boolean tlAlive() {
+        if (tlHitbox == null || tlEntities.isEmpty()) {
+            return false;
+        }
+        Entity hit = Bukkit.getEntity(tlHitbox);
+        if (hit == null || !hit.isValid()) {
+            return false;
+        }
+        for (List<Entity> group : tlEntities) {
+            for (Entity e : group) {
+                if (!e.isValid()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** Shows this player only the event he is looking at. */
+    private void tlApply(Player player) {
+        if (tlEntities.isEmpty()) {
+            return;
+        }
+        List<Integer> order = tlOrder();
+        int pos = tlPos.computeIfAbsent(player.getUniqueId(), k -> tlFirstUpcoming(order));
+        pos = Math.max(0, Math.min(order.size() - 1, pos));
+        tlPos.put(player.getUniqueId(), pos);
+        int shownIndex = order.get(pos);
+        for (int i = 0; i < tlEntities.size(); i++) {
+            for (Entity e : tlEntities.get(i)) {
+                if (!e.isValid()) {
+                    continue;
+                }
+                if (i == shownIndex) {
+                    player.showEntity(this, e);
+                } else {
+                    player.hideEntity(this, e);
+                }
+            }
+        }
+        tlShown.put(player.getUniqueId(), pos);
+    }
+
+    /** Every second: repairs the hologram, turns the blocks, rebuilds after midnight and shows players their card. */
+    private void tickTimeline() {
+        if (tlLoc == null || tlLoc.getWorld() == null) {
+            return;
+        }
+        if (!tlAlive() || (tlBuiltDay != null && !tlBuiltDay.equals(tlToday()))) {
+            spawnTimeline();
+        }
+        tlAngle = (float) ((tlAngle + Math.PI / 2) % (4 * Math.PI));
+        if (!tlPack) {
+            for (List<Entity> group : tlEntities) {
+                for (Entity e : group) {
+                    if (e instanceof ItemDisplay) {
+                        ItemDisplay d = (ItemDisplay) e;
+                        d.setInterpolationDelay(0);
+                        d.setInterpolationDuration(20);
+                        d.setTransformation(tlSpin((float) (1.5 * tlScale), tlAngle));
+                    }
+                }
+            }
+        }
+        for (Player p : tlLoc.getWorld().getPlayers()) {
+            UUID id = p.getUniqueId();
+            if (p.getLocation().distanceSquared(tlLoc) > 96.0 * 96.0) {
+                tlShown.remove(id);
+                continue;
+            }
+            Integer applied = tlShown.get(id);
+            Integer wanted = tlPos.get(id);
+            if (applied == null || (wanted != null && !wanted.equals(applied))) {
+                tlApply(p);
+            }
+        }
+    }
+
+    /** Right click on the hologram: the right half goes to the next date, the left half to the previous one. */
+    @EventHandler
+    public void onTimelineClick(PlayerInteractAtEntityEvent event) {
+        if (tlHitbox == null || !event.getRightClicked().getUniqueId().equals(tlHitbox)) {
+            return;
+        }
+        event.setCancelled(true);
+        if (event.getHand() != EquipmentSlot.HAND) {
+            return;
+        }
+        Player player = event.getPlayer();
+        Location center = event.getRightClicked().getLocation();
+        double fx = center.getX() - player.getLocation().getX();
+        double fz = center.getZ() - player.getLocation().getZ();
+        double len = Math.sqrt(fx * fx + fz * fz);
+        if (len < 0.01) {
+            return;
+        }
+        fx /= len;
+        fz /= len;
+        Vector click = event.getClickedPosition();
+        double right = click.getX() * (-fz) + click.getZ() * fx;
+        if (Math.abs(right) < 0.25 * tlScale) {
+            return;
+        }
+        tlStep(player, right > 0 ? 1 : -1);
+    }
+
+    private void tlStep(Player player, int direction) {
+        List<Integer> order = tlOrder();
+        int pos = tlPos.getOrDefault(player.getUniqueId(), tlFirstUpcoming(order));
+        pos = Math.floorMod(pos + direction, order.size());
+        tlPos.put(player.getUniqueId(), pos);
+        player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 0.6f, direction > 0 ? 1.2f : 0.9f);
+        tlApply(player);
+    }
+
+    @EventHandler
+    public void onTimelineQuit(PlayerQuitEvent event) {
+        tlPos.remove(event.getPlayer().getUniqueId());
+        tlShown.remove(event.getPlayer().getUniqueId());
+    }
+
+    private void placeTimeline(Player admin) {
+        removeTimelineEntities(true);
+        tlLoc = admin.getLocation().clone();
+        tlLoc.setPitch(0f);
+        saveState();
+        spawnTimeline();
+        admin.sendMessage(Component.text("De tijdlijn staat nu op jouw positie.", NamedTextColor.GREEN));
+    }
+
+    private void clearTimeline(CommandSender sender) {
+        if (tlLoc == null) {
+            sender.sendMessage(Component.text("Er staat geen tijdlijn.", NamedTextColor.RED));
+            return;
+        }
+        removeTimelineEntities(true);
+        tlLoc = null;
+        saveState();
+        sender.sendMessage(Component.text("De tijdlijn is verwijderd.", NamedTextColor.GREEN));
+    }
+
+    private boolean setTimelineScale(CommandSender sender, String text) {
+        double value;
+        try {
+            value = Double.parseDouble(text.trim().replace(',', '.'));
+        } catch (NumberFormatException e) {
+            sender.sendMessage(Component.text("Dat is geen getal.", NamedTextColor.RED));
+            return false;
+        }
+        if (value < 0.3 || value > 6.0) {
+            sender.sendMessage(Component.text("De grootte moet tussen 0,3 en 6 liggen.", NamedTextColor.RED));
+            return false;
+        }
+        tlScale = value;
+        saveState();
+        spawnTimeline();
+        sender.sendMessage(Component.text("De grootte van de tijdlijn is nu " + tlScaleText() + ".", NamedTextColor.GREEN));
+        return true;
+    }
+
+    private void setTimelinePack(CommandSender sender, boolean pack) {
+        tlPack = pack;
+        saveState();
+        spawnTimeline();
+        sender.sendMessage(Component.text(pack ? "De tijdlijn toont nu de icoontjes uit de resource pack."
+                : "De tijdlijn toont nu draaiende blokken.", NamedTextColor.GREEN));
+    }
+
+    private LocalDate tlParseDate(String text) {
+        String[] parts = text.trim().replace('/', '-').replace('.', '-').split("-");
+        if (parts.length < 2 || parts.length > 3) {
+            return null;
+        }
+        try {
+            int day = Integer.parseInt(parts[0].trim());
+            int month = Integer.parseInt(parts[1].trim());
+            int year = parts.length == 3 ? Integer.parseInt(parts[2].trim()) : 2026;
+            return LocalDate.of(year, month, day);
+        } catch (NumberFormatException | java.time.DateTimeException e) {
+            return null;
+        }
+    }
+
+    private void timelineCommand(CommandSender sender, String[] args) {
+        String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+        switch (sub) {
+            case "spawn":
+            case "place":
+                if (sender instanceof Player) {
+                    placeTimeline((Player) sender);
+                } else {
+                    sender.sendMessage(Component.text("Alleen een speler kan de tijdlijn plaatsen.", NamedTextColor.RED));
+                }
+                break;
+            case "remove":
+                clearTimeline(sender);
+                break;
+            case "refresh":
+                if (tlLoc == null) {
+                    sender.sendMessage(Component.text("Er staat geen tijdlijn.", NamedTextColor.RED));
+                } else {
+                    spawnTimeline();
+                    sender.sendMessage(Component.text("De tijdlijn is ververst.", NamedTextColor.GREEN));
+                }
+                break;
+            case "size":
+                if (args.length >= 3) {
+                    setTimelineScale(sender, args[2]);
+                } else {
+                    sender.sendMessage(Component.text("Gebruik: /lowkey tijdlijn size <0,3 tot 6>. Nu: " + tlScaleText(),
+                            NamedTextColor.GRAY));
+                }
+                break;
+            case "icoon":
+            case "icon":
+                if (args.length >= 3 && (args[2].equalsIgnoreCase("blok") || args[2].equalsIgnoreCase("pack"))) {
+                    setTimelinePack(sender, args[2].equalsIgnoreCase("pack"));
+                } else {
+                    sender.sendMessage(Component.text("Gebruik: /lowkey tijdlijn icoon <blok|pack>. Nu: "
+                            + (tlPack ? "pack" : "blok"), NamedTextColor.GRAY));
+                }
+                break;
+            default:
+                sender.sendMessage(Component.text("Gebruik: /lowkey tijdlijn <spawn|remove|refresh|size|icoon>",
+                        NamedTextColor.GRAY));
+                break;
+        }
+    }
+
+    private void openTimelineMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_DIAMOND, "Hier plaatsen", NamedTextColor.WHITE),
+                "Zet de tijdlijn op jouw positie. Zet hem in de lobby.", 150, () -> {
+                    placeTimeline(admin);
+                    openTimelineMenu(admin);
+                }));
+        if (tlLoc != null) {
+            buttons.add(button(iconLabel(M_DIAMOND, "Verwijderen", NamedTextColor.RED),
+                    "Haalt de tijdlijn weg. De datums blijven bewaard.", 150, () -> {
+                        clearTimeline(admin);
+                        openTimelineMenu(admin);
+                    }));
+        }
+        buttons.add(button(iconLabel(M_SIGN, tlPack ? "Icoontjes: pack" : "Icoontjes: blokken", NamedTextColor.WHITE),
+                "Wissel tussen draaiende blokken en de icoontjes uit de resource pack.", 150, () -> {
+                    setTimelinePack(admin, !tlPack);
+                    openTimelineMenu(admin);
+                }));
+        buttons.add(button(iconLabel(M_DIAMOND, "Grootte", NamedTextColor.WHITE),
+                "Pas de grootte van de tijdlijn aan.", 150, () -> openTimelineSizeDialog(admin)));
+        buttons.add(button(iconLabel(M_COUNTDOWN, "Data en namen", NamedTextColor.WHITE),
+                "Pas de datum of de naam van een gebeurtenis aan.", 150, () -> openTimelineEventsMenu(admin)));
+        Component body = joinLines(
+                statusLine("Hologram", tlLoc == null ? "niet geplaatst" : "geplaatst",
+                        tlLoc == null ? NamedTextColor.YELLOW : NamedTextColor.GREEN),
+                statusLine("Icoontjes", tlPack ? "resource pack" : "draaiende blokken", NamedTextColor.WHITE),
+                statusLine("Grootte", tlScaleText(), NamedTextColor.WHITE),
+                Component.text("Spelers klikken rechts op het hologram: rechterkant is volgende, linkerkant is vorige.",
+                        NamedTextColor.DARK_GRAY));
+        showMenu(admin, "Tijdlijn", body, buttons, backButton("Terug naar berichten.", () -> openMessagesMenu(admin)));
+    }
+
+    private void openTimelineEventsMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        for (int index : tlOrder()) {
+            final int idx = index;
+            TlEvent ev = tlEvents.get(idx);
+            buttons.add(button(iconLabel(M_COUNTDOWN, tlDateText(ev.date) + "  " + ev.name, NamedTextColor.WHITE),
+                    "Pas de naam of datum aan.", 150, () -> openTimelineEditDialog(admin, idx)));
+        }
+        showMenu(admin, "Data en namen", Component.text("Kies een gebeurtenis.", NamedTextColor.GRAY), buttons,
+                backButton("Terug naar de tijdlijn.", () -> openTimelineMenu(admin)));
+    }
+
+    private void openTimelineEditDialog(Player admin, int idx) {
+        final TlEvent ev = tlEvents.get(idx);
+        DialogInput name = DialogInput.text("naam", Component.text("Naam"))
+                .width(300).initial(ev.name).maxLength(40).build();
+        DialogInput date = DialogInput.text("datum", Component.text("Datum (dag-maand, bijvoorbeeld 7-11)"))
+                .width(300).initial(ev.date.getDayOfMonth() + "-" + ev.date.getMonthValue()).maxLength(10).build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String rawName = view.getText("naam");
+            final String rawDate = view.getText("datum");
+            getServer().getScheduler().runTask(this, () -> {
+                LocalDate parsed = tlParseDate(rawDate == null ? "" : rawDate);
+                if (parsed == null) {
+                    clicker.sendMessage(Component.text("Die datum begrijp ik niet. Gebruik dag-maand, bijvoorbeeld 7-11.",
+                            NamedTextColor.RED));
+                } else {
+                    if (rawName != null && !rawName.isBlank()) {
+                        ev.name = rawName.trim();
+                    }
+                    ev.date = parsed;
+                    saveState();
+                    if (tlLoc != null) {
+                        spawnTimeline();
+                    }
+                    clicker.sendMessage(Component.text("Opgeslagen: " + tlDateText(ev.date) + " " + ev.name + ".",
+                            NamedTextColor.GREEN));
+                }
+                openTimelineEventsMenu(clicker);
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, "Gebeurtenis aanpassen"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "De tijdlijn wordt meteen opnieuw opgebouwd.", NamedTextColor.GRAY))))
+                        .inputs(List.of(name, date))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_DIAMOND, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla deze gebeurtenis op."), 150, save),
+                        backButton("Terug naar de lijst.", () -> openTimelineEventsMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+    private void openTimelineSizeDialog(Player admin) {
+        DialogInput size = DialogInput.text("grootte", Component.text("Grootte (0,3 tot 6)"))
+                .width(300).initial(tlScaleText()).maxLength(5).build();
+        DialogAction save = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String text = view.getText("grootte");
+            getServer().getScheduler().runTask(this, () -> {
+                setTimelineScale(clicker, text == null ? "" : text);
+                openTimelineMenu(clicker);
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, "Grootte tijdlijn"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "1 is de standaardgrootte, ongeveer 4 blokken hoog.", NamedTextColor.GRAY))))
+                        .inputs(List.of(size))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_DIAMOND, "Opslaan", NamedTextColor.GREEN),
+                                Component.text("Sla de grootte op."), 150, save),
+                        backButton("Terug naar de tijdlijn.", () -> openTimelineMenu(admin)))));
         admin.showDialog(dialog);
     }
 
@@ -4596,6 +5159,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             leaderboardCommand(sender, args);
             return true;
         }
+        if (args.length >= 1 && (args[0].equalsIgnoreCase("tijdlijn") || args[0].equalsIgnoreCase("timeline"))) {
+            timelineCommand(sender, args);
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("badge")) {
             int style = args.length >= 2 ? parseBadgeStyle(args[1]) : -1;
             if (style < 0) {
@@ -5113,6 +5680,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }));
         buttons.add(button(iconLabel(M_DIAMOND, "Leaderboard", NamedTextColor.WHITE),
                 "Hologram met de top 10 speeltijd in de main wereld.", 150, () -> openLeaderboardMenu(admin)));
+        buttons.add(button(iconLabel(M_COUNTDOWN, "Tijdlijn", NamedTextColor.WHITE),
+                "Hologram in de lobby met de belangrijke data, waar spelers doorheen kunnen klikken.", 150,
+                () -> openTimelineMenu(admin)));
         buttons.add(button(iconLabel(M_SIGN, "Badge testen", NamedTextColor.WHITE),
                 "Wissel de LOWKEY badge tussen het huidige pixel badge, rood en roze.", 150, () -> openBadgeMenu(admin)));
         Component body = Component.text("Berichten naar alle spelers, met de LOWKEY badge.", NamedTextColor.GRAY);
@@ -9965,6 +10535,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("donate");
             options.add("badge");
             options.add("leaderboard");
+            options.add("tijdlijn");
             options.add("tolobby");
             options.add("verban");
             options.add("verbanopheffen");
@@ -10005,6 +10576,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("setspawn");
                 options.add("delete");
                 options.add("protect");
+            } else if (sub.equals("tijdlijn")) {
+                options.add("spawn");
+                options.add("remove");
+                options.add("refresh");
+                options.add("size");
+                options.add("icoon");
             } else if (sub.equals("leaderboard")) {
                 options.add("spawn");
                 options.add("remove");
