@@ -32,6 +32,11 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.OfflinePlayer;
+import org.bukkit.Statistic;
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
@@ -101,6 +106,9 @@ import org.bukkit.event.player.PlayerEditBookEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerToggleSneakEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
+import com.destroystokyo.paper.event.player.PlayerStopSpectatingEntityEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
@@ -408,6 +416,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     public void onEnable() {
         saveDefaultConfig();
         loadSettings();
+        initSiteLink();
         stateFile = new File(getDataFolder(), "state.yml");
         YamlConfiguration state = YamlConfiguration.loadConfiguration(stateFile);
         netherOpen = state.getBoolean("nether-open", false);
@@ -515,6 +524,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (Player p : getServer().getOnlinePlayers()) {
                 enforceTotemLimit(p);
+                evictShulkerTotems(p);
             }
         }, 40L, 10L);
         long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
@@ -530,6 +540,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        saveSiteQueue();
         finaleOnDisable();
         if (eventRunning) {
             eventCleanup();
@@ -822,9 +833,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void tickGrace() {
         long now = System.currentTimeMillis();
         graceSaveCounter++;
-        boolean saveNow = graceSaveCounter % 30 == 0;
         for (Player player : getServer().getOnlinePlayers()) {
             UUID id = player.getUniqueId();
+            // every player saves once per 30 seconds, but not all in the same second
+            boolean saveNow = (graceSaveCounter + Math.floorMod(id.hashCode(), 30)) % 30 == 0;
             Long left = graceLeft.get(id);
             if (left == null || left <= 0L) {
                 continue;
@@ -984,20 +996,21 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         boolean crewMember = isCrew(player);
         boolean out = isLosersOut(player) || (isEliminated(player) && !inLosers(player));
         boolean hasGrace = graceRemaining(player) > 0L && !inLobby(player);
-        // tab list order: crew, grace, Noord, Zuid, no team, and the dead last (alphabetical inside each group)
+        // tab list order: crew, grace Noord, grace Zuid, grace without team, Noord, Zuid, no team, and the dead last
+        // (alphabetical inside each group)
         final char sortKey;
         if (crewMember) {
             sortKey = 'a';
         } else if (out) {
-            sortKey = 'f';
+            sortKey = 'h';
         } else if (hasGrace) {
-            sortKey = 'b';
+            sortKey = side == Side.NOORD ? 'b' : (side == Side.ZUID ? 'c' : 'd');
         } else if (side == Side.NOORD) {
-            sortKey = 'c';
-        } else if (side == Side.ZUID) {
-            sortKey = 'd';
-        } else {
             sortKey = 'e';
+        } else if (side == Side.ZUID) {
+            sortKey = 'f';
+        } else {
+            sortKey = 'g';
         }
 
         // one small scoreboard team per player: gives the nametag prefix and the tab list order
@@ -1141,13 +1154,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * world only see the other main world players. Only the tab list entry is hidden, nothing else.
      */
     private void syncTabVisibility() {
+        Map<UUID, Integer> groups = new HashMap<>();
+        for (Player p : getServer().getOnlinePlayers()) {
+            groups.put(p.getUniqueId(), worldGroup(p));
+        }
         for (Player viewer : getServer().getOnlinePlayers()) {
-            int viewerGroup = worldGroup(viewer);
+            int viewerGroup = groups.get(viewer.getUniqueId());
             for (Player other : getServer().getOnlinePlayers()) {
                 if (other.equals(viewer)) {
                     continue;
                 }
-                boolean sameGroup = worldGroup(other) == viewerGroup;
+                boolean sameGroup = groups.get(other.getUniqueId()) == viewerGroup;
                 boolean listed = viewer.isListed(other);
                 if (sameGroup && !listed) {
                     viewer.listPlayer(other);
@@ -1276,7 +1293,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     public void onDeath(PlayerDeathEvent event) {
         final Player player = event.getPlayer();
 
-        // never show the vanilla death message
+        // keep the real death message for the website, but never show the vanilla one
+        final Component deathMsg = event.deathMessage();
         event.deathMessage(null);
 
         // Verliezerseiland: dying there is final. No respawn, you can only watch.
@@ -1284,6 +1302,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             final Location spot = player.getLocation().clone();
             final World world = spot.getWorld();
             setLosersOut(player, true);
+            reportDeath(player, deathMsg, "island");
             finaleOnElimination(player, true);
             Component out = Component.text()
                     .append(glyph(LOWKEY_BADGE_RED))
@@ -1375,6 +1394,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         if (eliminateOnDeath && world != null) {
             setEliminated(player, true);
+            reportDeath(player, deathMsg, "main");
             finaleOnElimination(player);
             if (!event.getKeepInventory()) {
                 for (ItemStack drop : event.getDrops()) {
@@ -2080,7 +2100,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (world == null) {
             return;
         }
+        // everybody who is not in the lobby collides normally again
+        for (Player other : getServer().getOnlinePlayers()) {
+            if (!other.getWorld().equals(world) && !other.isCollidable()) {
+                other.setCollidable(true);
+            }
+        }
         for (Player player : world.getPlayers()) {
+            if (player.isCollidable()) {
+                player.setCollidable(false); // in the lobby everybody walks through everybody
+            }
             AttributeInstance maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
             double max = maxHealth == null ? 20.0 : maxHealth.getValue();
             if (!player.isDead() && player.getHealth() < max) {
@@ -4979,6 +5008,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey mace [status|aan|uit|cooldown <minuten>|cooldownreset|give <speler>|reset|test <noord|zuid|geen>] : de ene mace van de server
      * /lowkey event <start|test [aantal]|stop|camera|teams|reset> : het team verdeling event (camera, shuffle, teams toepassen)
      * /lowkey losers <create [seed]|tp|setspawn|open|close|return <speler>|delete> : het Verliezerseiland (aparte survival wereld, rode ster)
+     * /lowkey status : TPS, geheugen, uptime en spelers per wereld
+     * /lowkey site <test|stats|queue> : koppeling met de website (deaths en stats)
+     * /lowkey check [chat] : loopt alles na voor de start (menu met snelle oplossingen)
+     * /lowkey spawnreset : wist ieders laatste positie en bed spawn
+     * /lowkey rulesreset : iedereen moet de regels opnieuw lezen
      * /lowkey menu : opent het beheerpaneel
      * /lowkey end <open|close> : opent of sluit het End (bij openen: titel + bericht voor iedereen)
      * /lowkey say <bericht> : stuurt een bericht met de LOWKEY badge naar iedereen
@@ -5028,6 +5062,38 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         if (sender instanceof Player && (args.length == 0 || (args.length == 1 && args[0].equalsIgnoreCase("menu")))) {
             openMenu((Player) sender);
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("site")) {
+            String what = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "test";
+            if (what.equals("stats")) {
+                syncStats(sender);
+            } else if (what.equals("queue")) {
+                sender.sendMessage(Component.text("Wachtrij naar de site: " + siteQueue.size() + " berichten.", NamedTextColor.YELLOW));
+            } else {
+                siteTest(sender);
+            }
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("status")) {
+            sendStatus(sender);
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("check")) {
+            if (sender instanceof Player && !(args.length >= 2 && args[1].equalsIgnoreCase("chat"))) {
+                openCheckMenu((Player) sender);
+            } else {
+                sendCheck(sender);
+            }
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("spawnreset")) {
+            resetAllSpawnpoints(sender);
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("rulesreset")) {
+            resetRulesSeen();
+            sender.sendMessage(Component.text("Iedereen moet de regels opnieuw lezen.", NamedTextColor.GREEN));
             return true;
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("graceall")) {
@@ -5537,6 +5603,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "De krimpende border en de winnaarsshow.", 150, () -> openFinaleMenu(admin)));
         buttons.add(button(iconLabel(M_HORN, "Event", NamedTextColor.WHITE),
                 "Het team event en het Verliezerseiland.", 150, () -> openEventHub(admin)));
+        buttons.add(button(iconLabel(M_SIGN, "Check", NamedTextColor.WHITE),
+                "Loopt alles na voor de server start en geeft snelle oplossingen.", 150, () -> openCheckMenu(admin)));
+        buttons.add(button(iconLabel(M_REDSTONE, "Status", NamedTextColor.WHITE),
+                "TPS, geheugen, spelers per wereld en hoe lang de server al draait.", 150, () -> openStatusMenu(admin)));
         buttons.add(button(iconLabel(M_REVIVE, "Testen en herstellen", NamedTextColor.WHITE),
                 "Reviven, resetten en alles terugzetten.", 150, () -> openRepairMenu(admin)));
         if (loggedIn.contains(admin.getUniqueId()) && !isOwner(admin)) {
@@ -6037,6 +6107,26 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         buttons.add(button(iconLabel(M_PLAYERS, "Zonder team (" + geen.size() + ")", NamedTextColor.WHITE),
                 "Spelers zonder team in Noord of Zuid zetten.", 130, () -> openNoTeamList(admin)));
         buttons.add(teamBlank(admin, 28));
+        // second last row: wipe everybody who is offline from the list (test bots and old test players)
+        int offlineCount = 0;
+        for (TeamEntry e : noord) {
+            offlineCount += e.online ? 0 : 1;
+        }
+        for (TeamEntry e : zuid) {
+            offlineCount += e.online ? 0 : 1;
+        }
+        for (TeamEntry e : geen) {
+            offlineCount += e.online ? 0 : 1;
+        }
+        final int offlineTotal = offlineCount;
+        buttons.add(teamBlank(admin, 28));
+        buttons.add(button(iconLabel(M_BARRIER, "Offline wissen (" + offlineTotal + ")", NamedTextColor.RED),
+                "Haalt alle spelers die nu offline zijn uit deze lijst (handig na tests met bots).", 130,
+                () -> confirmWipeOffline(admin, offlineTotal)));
+        buttons.add(teamBlank(admin, 28));
+        buttons.add(teamBlank(admin, 28));
+        buttons.add(teamBlank(admin, 130));
+        buttons.add(teamBlank(admin, 28));
 
         // Grace voor iedereen is the exit button of the dialog, so it always sits in the middle under everything
         ActionButton grace = button(iconLabel(M_GRACE, "Grace voor iedereen", NamedTextColor.WHITE),
@@ -6077,6 +6167,379 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         .build())
                 .type(DialogType.multiAction(buttons, grace, 6)));
         admin.showDialog(dialog);
+    }
+
+    // ---- wipe offline players from the lists
+
+    /** Crew, ops and the staff list are never wiped. */
+    private boolean isStaffId(UUID id) {
+        OfflinePlayer other = getServer().getOfflinePlayer(id);
+        String name = other.getName();
+        if (other.isOp()) {
+            return true;
+        }
+        if (name == null) {
+            return false;
+        }
+        for (String s : getConfig().getStringList("closed-access")) {
+            if (s.equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        for (String s : getConfig().getStringList("crew")) {
+            if (s.equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void confirmWipeOffline(Player admin, int count) {
+        confirm(admin,
+                "Offline spelers wissen?",
+                count + " offline spelers verdwijnen uit de teamlijst, met hun team, grace en opgeslagen inventory.",
+                "Crew en admins blijven staan. Spelers die later joinen beginnen weer van nul.",
+                Component.text("Ja, wissen", NamedTextColor.RED),
+                () -> {
+                    int wiped = wipeOfflinePlayers();
+                    admin.sendMessage(Component.text(wiped + " offline spelers zijn gewist uit de lijst.",
+                            NamedTextColor.GREEN));
+                    openTeamsMenu(admin);
+                },
+                () -> openTeamsMenu(admin));
+    }
+
+    /** Deletes the plugin file of everybody who is offline (except staff). Returns how many. */
+    private int wipeOfflinePlayers() {
+        int wiped = 0;
+        for (UUID id : allPlayerIds()) {
+            if (getServer().getPlayer(id) != null || isStaffId(id)) {
+                continue;
+            }
+            File f = playerFile(id);
+            if (f.isFile() && f.delete()) {
+                wiped++;
+            }
+        }
+        return wiped;
+    }
+
+    // ---- spawn points
+
+    /** Everybody's saved game position is wiped (also offline) and online beds and anchors are forgotten. */
+    private void resetAllSpawnpoints(CommandSender sender) {
+        int cleared = clearAllLastLocations();
+        int beds = 0;
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (isAdmin(p)) {
+                continue;
+            }
+            if (p.getRespawnLocation() != null) {
+                p.setRespawnLocation(null);
+                beds++;
+            }
+        }
+        sender.sendMessage(Component.text("Spawnpoints gereset: " + cleared + " opgeslagen posities gewist en "
+                + beds + " bed of anchor spawns van online spelers verwijderd. Iedereen komt nu op zijn team spawn.",
+                NamedTextColor.GREEN));
+    }
+
+    // ---- /lowkey status
+
+    private static String formatUptime(long millis) {
+        long minutes = millis / 60_000L;
+        long days = minutes / 1440L;
+        long hours = (minutes % 1440L) / 60L;
+        long mins = minutes % 60L;
+        return (days > 0 ? days + "d " : "") + hours + "u " + mins + "m";
+    }
+
+    private static NamedTextColor tpsColor(double tps) {
+        return tps >= 19.0 ? NamedTextColor.GREEN : (tps >= 15.0 ? NamedTextColor.YELLOW : NamedTextColor.RED);
+    }
+
+    private static String tpsText(double tps) {
+        return String.format(Locale.ROOT, "%.1f", Math.min(20.0, tps));
+    }
+
+    private List<Component> statusLines() {
+        List<Component> lines = new ArrayList<>();
+        double[] tps = getServer().getTPS();
+        double mspt = getServer().getAverageTickTime();
+        lines.add(Component.text()
+                .append(Component.text("TPS: ", NamedTextColor.GRAY))
+                .append(Component.text(tpsText(tps[0]), tpsColor(tps[0]), TextDecoration.BOLD))
+                .append(Component.text("  (5m " + tpsText(tps[1]) + ", 15m " + tpsText(tps[2]) + ")", NamedTextColor.DARK_GRAY))
+                .build());
+        lines.add(statusLine("MSPT", String.format(Locale.ROOT, "%.1f ms", mspt),
+                mspt < 40.0 ? NamedTextColor.GREEN : (mspt < 50.0 ? NamedTextColor.YELLOW : NamedTextColor.RED)));
+        Runtime rt = Runtime.getRuntime();
+        long usedMb = (rt.totalMemory() - rt.freeMemory()) / 1_048_576L;
+        long maxMb = rt.maxMemory() / 1_048_576L;
+        double pct = maxMb == 0 ? 0 : usedMb * 100.0 / maxMb;
+        lines.add(statusLine("Geheugen", usedMb + " van " + maxMb + " MB (" + Math.round(pct) + "%)",
+                pct < 80 ? NamedTextColor.GREEN : (pct < 92 ? NamedTextColor.YELLOW : NamedTextColor.RED)));
+        long uptime = System.currentTimeMillis() - java.lang.management.ManagementFactory.getRuntimeMXBean().getStartTime();
+        lines.add(statusLine("Uptime", formatUptime(uptime), NamedTextColor.WHITE));
+        int lobbyN = 0;
+        int mainN = 0;
+        int islandN = 0;
+        int finaleN = 0;
+        for (Player p : getServer().getOnlinePlayers()) {
+            int g = worldGroup(p);
+            if (g == 0) {
+                lobbyN++;
+            } else if (g == 2) {
+                islandN++;
+            } else if (g == 3) {
+                finaleN++;
+            } else {
+                mainN++;
+            }
+        }
+        lines.add(statusLine("Online", getServer().getOnlinePlayers().size() + "  (lobby " + lobbyN + ", main " + mainN
+                + ", eiland " + islandN + ", finale " + finaleN + ")", NamedTextColor.WHITE));
+        int entities = 0;
+        int chunks = 0;
+        for (World w : getServer().getWorlds()) {
+            entities += w.getEntityCount();
+            chunks += w.getLoadedChunks().length;
+        }
+        lines.add(statusLine("Wereld", getServer().getWorlds().size() + " werelden, " + chunks + " chunks, "
+                + entities + " entities", NamedTextColor.WHITE));
+        return lines;
+    }
+
+    private void sendStatus(CommandSender sender) {
+        sender.sendMessage(Component.text("Server status", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD));
+        for (Component line : statusLines()) {
+            sender.sendMessage(line);
+        }
+    }
+
+    private void openStatusMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_REDSTONE, "Vernieuwen", NamedTextColor.WHITE), "Meet alles opnieuw.", 150,
+                () -> openStatusMenu(admin)));
+        showMenu(admin, "Server status", joinLines(statusLines().toArray(new Component[0])), buttons,
+                backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+    }
+
+    // ---- /lowkey check
+
+    /** level: 0 = fine, 1 = look at it, 2 = fix it before the start. */
+    private static final class CheckItem {
+        final int level;
+        final String name;
+        final String detail;
+
+        CheckItem(int level, String name, String detail) {
+            this.level = level;
+            this.name = name;
+            this.detail = detail;
+        }
+    }
+
+    private List<CheckItem> runCheck() {
+        List<CheckItem> items = new ArrayList<>();
+
+        double tps = getServer().getTPS()[0];
+        items.add(new CheckItem(tps >= 18.0 ? 0 : (tps >= 15.0 ? 1 : 2), "TPS", tpsText(tps) + " van 20"));
+        Runtime rt = Runtime.getRuntime();
+        double ramPct = (rt.totalMemory() - rt.freeMemory()) * 100.0 / Math.max(1L, rt.maxMemory());
+        items.add(new CheckItem(ramPct < 80 ? 0 : (ramPct < 92 ? 1 : 2), "Geheugen", Math.round(ramPct) + "% in gebruik"));
+
+        items.add(lobbySpawn != null && lobbySpawn.getWorld() != null
+                ? new CheckItem(0, "Lobby", "staat klaar")
+                : new CheckItem(2, "Lobby", "bestaat nog niet (/lowkey lobby create)"));
+        items.add(spawnNoord != null && spawnNoord.getWorld() != null
+                ? new CheckItem(0, "Noord spawn", "staat")
+                : new CheckItem(2, "Noord spawn", "niet gezet (/lowkey setspawn noord)"));
+        items.add(spawnZuid != null && spawnZuid.getWorld() != null
+                ? new CheckItem(0, "Zuid spawn", "staat")
+                : new CheckItem(2, "Zuid spawn", "niet gezet (/lowkey setspawn zuid)"));
+
+        items.add(new CheckItem(0, "Main wereld seed", String.valueOf(gameWorld().getSeed())));
+        World fw = finaleMainWorld();
+        if (fw == null) {
+            items.add(new CheckItem(1, "Finalewereld", "bestaat nog niet (seed wordt " + finaleSeed() + ")"));
+        } else if (fw.getSeed() != finaleSeed()) {
+            items.add(new CheckItem(2, "Finalewereld", "seed is " + fw.getSeed() + " maar moet " + finaleSeed()
+                    + " zijn. Verwijder en maak opnieuw."));
+        } else {
+            items.add(new CheckItem(0, "Finalewereld", "seed klopt"));
+            items.add(finaleSpawn != null
+                    ? new CheckItem(0, "Finale middelpunt", "gezet")
+                    : new CheckItem(2, "Finale middelpunt", "nog niet gezet"));
+        }
+
+        items.add(serverClosed ? new CheckItem(1, "Server", "staat dicht voor spelers") : new CheckItem(0, "Server", "open"));
+        items.add(mainOpen ? new CheckItem(0, "Main wereld", "open") : new CheckItem(1, "Main wereld", "gesloten"));
+        items.add(launched ? new CheckItem(1, "Launch", "al gelanceerd") : new CheckItem(0, "Launch", "nog niet gelanceerd"));
+        items.add(netherOpen ? new CheckItem(1, "Nether", "staat al open") : new CheckItem(0, "Nether", "dicht"));
+        items.add(endOpen ? new CheckItem(1, "End", "staat al open") : new CheckItem(0, "End", "dicht"));
+        items.add(bordersDropped ? new CheckItem(2, "Grenzen", "zijn al gedropt") : new CheckItem(0, "Grenzen", "dicht"));
+        items.add(getServer().getPluginManager().isPluginEnabled("WorldGuard")
+                ? new CheckItem(0, "WorldGuard", "actief")
+                : new CheckItem(1, "WorldGuard", "niet gevonden, de ijsmuur is dan niet beschermd"));
+
+        if (!mace.isActive()) {
+            items.add(new CheckItem(1, "Mace", "staat uit"));
+        } else if (mace.isAlreadyCrafted()) {
+            items.add(new CheckItem(1, "Mace", mace.stateWord() + " (reset hem in het Mace menu voor de start)"));
+        } else {
+            items.add(new CheckItem(0, "Mace", "nog niet gecraft, klaar"));
+        }
+        items.add(rulesPages.isEmpty() ? new CheckItem(1, "Regelboekje", "nog geen regels geschreven")
+                : new CheckItem(0, "Regelboekje", rulesPages.size() + " pagina's"));
+
+        World losers = losersWorld();
+        items.add(losers == null ? new CheckItem(1, "Verliezerseiland", "bestaat nog niet")
+                : (losersOpen ? new CheckItem(1, "Verliezerseiland", "staat al open") : new CheckItem(0, "Verliezerseiland", "klaar en dicht")));
+        items.add(finaleState != FinaleState.IDLE ? new CheckItem(2, "Finale", finaleStateText())
+                : new CheckItem(0, "Finale", "staat uit"));
+        items.add(eventRunning ? new CheckItem(2, "Team event", "is nog bezig") : new CheckItem(0, "Team event", "staat uit"));
+
+        int total = 0;
+        int noTeam = 0;
+        int offline = 0;
+        int dead = 0;
+        for (TeamEntry e : collectTeamEntries()) {
+            total++;
+            if (e.side == Side.NONE && !isStaffId(e.id)) {
+                noTeam++;
+            }
+            if (!e.online) {
+                offline++;
+            }
+            if (e.dead) {
+                dead++;
+            }
+        }
+        items.add(noTeam == 0 ? new CheckItem(0, "Teams", "iedereen zit in een team")
+                : new CheckItem(1, "Teams", noTeam + " spelers zonder team"));
+        items.add(offline == 0 ? new CheckItem(0, "Spelerslijst", total + " spelers")
+                : new CheckItem(1, "Spelerslijst", offline + " offline spelers in de lijst (testdata?)"));
+        items.add(dead == 0 ? new CheckItem(0, "Dode spelers", "niemand")
+                : new CheckItem(1, "Dode spelers", dead + " staan als uitgeschakeld"));
+        int noGrace = 0;
+        for (Player p : getServer().getOnlinePlayers()) {
+            if (!isAdmin(p) && !isCrew(p) && graceRemaining(p) <= 0L) {
+                noGrace++;
+            }
+        }
+        items.add(noGrace == 0 ? new CheckItem(0, "Grace", "iedereen online heeft grace")
+                : new CheckItem(1, "Grace", noGrace + " online spelers hebben geen grace meer"));
+        if (!siteConfigured()) {
+            items.add(new CheckItem(1, "Website koppeling", "site.token staat niet in config.yml, deaths en stats gaan niet naar de site"));
+        } else if (siteLastOk == null) {
+            items.add(new CheckItem(1, "Website koppeling", "nog niet getest (/lowkey site test)"));
+        } else if (!siteLastOk) {
+            items.add(new CheckItem(2, "Website koppeling", "laatste poging mislukt: " + siteLastError));
+        } else {
+            items.add(siteQueue.isEmpty() ? new CheckItem(0, "Website koppeling", "werkt")
+                    : new CheckItem(1, "Website koppeling", "werkt, maar " + siteQueue.size() + " berichten wachten nog"));
+        }
+        return items;
+    }
+
+    private static NamedTextColor checkColor(int level) {
+        return level == 0 ? NamedTextColor.GREEN : (level == 1 ? NamedTextColor.YELLOW : NamedTextColor.RED);
+    }
+
+    private Component checkLine(CheckItem item) {
+        return Component.text()
+                .append(Component.text("\u25cf ", checkColor(item.level)))
+                .append(Component.text(item.name + ": ", NamedTextColor.GRAY))
+                .append(Component.text(item.detail, item.level == 0 ? NamedTextColor.WHITE : checkColor(item.level)))
+                .build();
+    }
+
+    private void sendCheck(CommandSender sender) {
+        List<CheckItem> items = runCheck();
+        int bad = 0;
+        int warn = 0;
+        for (CheckItem i : items) {
+            bad += i.level == 2 ? 1 : 0;
+            warn += i.level == 1 ? 1 : 0;
+        }
+        sender.sendMessage(Component.text("Check voor de start", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD));
+        for (CheckItem item : items) {
+            sender.sendMessage(checkLine(item));
+        }
+        sender.sendMessage(bad == 0 && warn == 0
+                ? Component.text("Alles staat goed, je kunt starten.", NamedTextColor.GREEN, TextDecoration.BOLD)
+                : Component.text(bad + " moeten opgelost worden, " + warn + " om naar te kijken.",
+                        bad > 0 ? NamedTextColor.RED : NamedTextColor.YELLOW, TextDecoration.BOLD));
+    }
+
+    private void openCheckMenu(Player admin) {
+        if (!admin.isOnline()) {
+            return;
+        }
+        List<CheckItem> items = runCheck();
+        int bad = 0;
+        int warn = 0;
+        List<Component> lines = new ArrayList<>();
+        for (CheckItem item : items) {
+            bad += item.level == 2 ? 1 : 0;
+            warn += item.level == 1 ? 1 : 0;
+            lines.add(checkLine(item));
+        }
+        lines.add(Component.empty());
+        lines.add(bad == 0 && warn == 0
+                ? Component.text("Alles staat goed, je kunt starten.", NamedTextColor.GREEN, TextDecoration.BOLD)
+                : Component.text(bad + " moeten opgelost worden, " + warn + " om naar te kijken.",
+                        bad > 0 ? NamedTextColor.RED : NamedTextColor.YELLOW, TextDecoration.BOLD));
+
+        Runnable again = () -> openCheckMenu(admin);
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(button(iconLabel(M_SIGN, "Opnieuw checken", NamedTextColor.WHITE), "Loopt alles nog eens na.", 150, again));
+        buttons.add(button(iconLabel(M_GRACE, "Grace voor iedereen", NamedTextColor.WHITE),
+                "Zet de grace van alle spelers terug op de standaard tijd.", 150, () -> confirm(admin,
+                        "Grace voor iedereen?",
+                        "De grace van alle spelers gaat terug naar " + (graceMillis / 60_000L) + " minuten, ook van "
+                                + "spelers die offline zijn.",
+                        "Dit geldt voor iedereen.",
+                        Component.text("Ja, voor iedereen", NamedTextColor.GREEN),
+                        () -> {
+                            resetGraceForEveryone(admin, graceMillis / 60_000L);
+                            again.run();
+                        },
+                        again)));
+        buttons.add(button(iconLabel(M_BOOK, "Regels opnieuw lezen", NamedTextColor.WHITE),
+                "Iedereen moet het regelboekje opnieuw lezen de volgende keer dat hij in de lobby is.", 150,
+                () -> confirm(admin,
+                        "Iedereen de regels opnieuw laten lezen?",
+                        "Iedereen in de lobby krijgt het boek meteen open, alle anderen zodra ze in de lobby komen.",
+                        "Spelers die al lezen zien het boek opnieuw.",
+                        Component.text("Ja, opnieuw lezen", NamedTextColor.GREEN),
+                        () -> {
+                            resetRulesSeen();
+                            admin.sendMessage(Component.text("Iedereen moet de regels opnieuw lezen.", NamedTextColor.GREEN));
+                            again.run();
+                        },
+                        again)));
+        buttons.add(button(iconLabel(M_COMPASS, "Spawnpoints resetten", NamedTextColor.WHITE),
+                "Wist ieders laatste positie en bed spawn, zodat iedereen op zijn team spawn begint.", 150,
+                () -> confirm(admin,
+                        "Spawnpoints resetten?",
+                        "Ieders laatste positie in de main wereld wordt gewist en online bed spawns verdwijnen.",
+                        "Iedereen komt na de launch op zijn team spawn.",
+                        Component.text("Ja, resetten", NamedTextColor.GREEN),
+                        () -> {
+                            resetAllSpawnpoints(admin);
+                            again.run();
+                        },
+                        again)));
+        buttons.add(button(iconLabel(M_TEAM, "Teams", NamedTextColor.WHITE),
+                "Naar de teamlijst om spelers te verplaatsen of offline spelers te wissen.", 150,
+                () -> openTeamsMenu(admin)));
+        showMenu(admin, "Check voor de start", joinLines(lines.toArray(new Component[0])), buttons,
+                backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
     }
 
     /** Players without a team: pick Noord or Zuid for each of them. */
@@ -6447,6 +6910,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // the finale world: an own world with the same seed as the main world, plus the preparation time without PvP
     private static final String FINALE_WORLD = "lowkey_finale";
+    /** The seed of the real finale map. config.yml: finale-seed overrides it. */
+    private static final long FINALE_SEED_DEFAULT = -1269089582167819796L;
+
+    private long finaleSeed() {
+        return getConfig().getLong("finale-seed", FINALE_SEED_DEFAULT);
+    }
     private boolean finaleWorldCreated;
     private Location finaleSpawn;
     private int finalePrepMin = 5;
@@ -6612,6 +7081,21 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(Component.space())
                 .append(text)
                 .build();
+    }
+
+    /** One chat message: the first line has the badge, the next lines hang under it with a small arrow. */
+    private Component finaleBlock(List<Component> lines) {
+        TextComponent.Builder block = Component.text();
+        for (int i = 0; i < lines.size(); i++) {
+            if (i == 0) {
+                block.append(finaleLine(lines.get(0)));
+            } else {
+                block.append(Component.newline());
+                block.append(Component.text("   \u203a ", NamedTextColor.DARK_GRAY));
+                block.append(lines.get(i));
+            }
+        }
+        return block.build();
     }
 
     private void finaleBroadcast(Component text) {
@@ -6962,7 +7446,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         World main = gameWorld();
         WorldCreator creator = new WorldCreator(FINALE_WORLD).environment(World.Environment.NORMAL)
-                .seed(main.getSeed()).generateStructures(main.canGenerateStructures());
+                .seed(finaleSeed()).generateStructures(main.canGenerateStructures());
         World world = creator.createWorld();
         if (world == null) {
             getLogger().warning("Kon de finalewereld niet laden.");
@@ -6987,7 +7471,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         int y = world.getHighestBlockYAt(base.getBlockX(), base.getBlockZ()) + 1;
         finaleSpawn = new Location(world, base.getBlockX() + 0.5, y, base.getBlockZ() + 0.5, 0f, 0f);
         saveState();
-        sender.sendMessage(Component.text("De finalewereld is gemaakt met dezelfde seed als de main wereld (" + world.getSeed()
+        sender.sendMessage(Component.text("De finalewereld is gemaakt met de finale seed (" + world.getSeed()
                 + "). Ga erheen, bouw je muren, zet de vanilla border en zet het middelpunt met /lowkey finale wereld "
                 + "middelpunt.", NamedTextColor.GREEN));
     }
@@ -7056,7 +7540,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         World fw = finaleMainWorld();
         if (fw == null) {
             buttons.add(button(iconLabel(M_LAUNCH, "Finalewereld maken", NamedTextColor.GREEN),
-                    "Maakt een nieuwe wereld met dezelfde seed als de main wereld.", 150, () -> {
+                    "Maakt een nieuwe wereld met de finale seed (" + finaleSeed() + ").", 150, () -> {
                         createFinaleWorld(admin);
                         again.run();
                     }));
@@ -7084,7 +7568,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         lines.add(statusLine("Finalewereld", fw == null ? "bestaat nog niet" : "klaar",
                 fw == null ? NamedTextColor.YELLOW : NamedTextColor.GREEN));
         if (fw != null) {
-            lines.add(statusLine("Seed", String.valueOf(fw.getSeed()), NamedTextColor.WHITE));
+            lines.add(statusLine("Seed", String.valueOf(fw.getSeed()),
+                    fw.getSeed() == finaleSeed() ? NamedTextColor.GREEN : NamedTextColor.RED));
+            if (fw.getSeed() != finaleSeed()) {
+                lines.add(Component.text("Fout: dit moet " + finaleSeed() + " zijn. Verwijder de wereld en maak hem "
+                        + "opnieuw.", NamedTextColor.RED));
+            }
             if (finaleSpawn != null) {
                 lines.add(statusLine("Middelpunt", "x " + finaleNum(finaleSpawn.getX()) + ", y " + finaleNum(finaleSpawn.getY())
                         + ", z " + finaleNum(finaleSpawn.getZ()), NamedTextColor.WHITE));
@@ -7234,19 +7723,32 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             p.playSound(p.getLocation(), losers ? Sound.ENTITY_WITHER_SPAWN : Sound.ENTITY_ENDER_DRAGON_GROWL,
                     losers ? 0.5f : 0.6f, losers ? 0.8f : 1.0f);
         }
-        finaleBroadcast(Component.text(losers ? "De finale van het Verliezerseiland is van start!"
-                : "De finale is van start!", finaleAccent(), TextDecoration.BOLD));
-        finaleBroadcast(Component.text(losers
+        // one neat message with a single badge, instead of four separate LOWKEY lines
+        Component headline = Component.text(losers ? "De finale van het Verliezerseiland is van start!"
+                : "De finale is van start!", finaleAccent(), TextDecoration.BOLD);
+        Component what = Component.text(losers
                 ? "De border begint te krimpen. De laatste " + losersWinners + (losersWinners == 1 ? " speler komt"
                         : " spelers komen") + " terug in het spel!"
                 : (finalePrepLeftMs > 0L ? "De border begint te krimpen na de voorbereidingstijd."
-                        : "De border begint te krimpen, ga bovengronds!"), NamedTextColor.WHITE));
-        finaleBroadcast(Component.text("Er zijn nog " + alive + (alive == 1 ? " speler" : " spelers") + " over.",
-                NamedTextColor.GRAY));
+                        : "De border begint te krimpen, ga bovengronds!"), NamedTextColor.WHITE);
+        Component left = Component.text("Er zijn nog " + alive + (alive == 1 ? " speler" : " spelers") + " over.",
+                NamedTextColor.GRAY);
+        Component pvp = null;
         if (!losers && finalePrepLeftMs > 0L) {
-            finaleWorldBroadcast(Component.text("PvP staat uit voor de eerste " + finalePrepMin
+            pvp = Component.text("PvP staat uit voor de eerste " + finalePrepMin
                     + (finalePrepMin == 1 ? " minuut" : " minuten") + ". Zoek je teamgenoten en maak je inventory klaar.",
-                    NamedTextColor.WHITE));
+                    NamedTextColor.WHITE);
+        }
+        World finaleWorldNow = losers ? null : finaleMainWorld();
+        for (Player p : getServer().getOnlinePlayers()) {
+            List<Component> lines = new ArrayList<>();
+            lines.add(headline);
+            lines.add(what);
+            lines.add(left);
+            if (pvp != null && finaleWorldNow != null && p.getWorld().equals(finaleWorldNow)) {
+                lines.add(pvp);
+            }
+            p.sendMessage(finaleBlock(lines));
         }
         if (losers) {
             finaleLosersThunder();
@@ -9244,6 +9746,21 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     // ---- the show, one step per tick
 
+    /** During the team event nobody can crouch: it would pull the camera loose and the view drops down. */
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onEventSneak(PlayerToggleSneakEvent event) {
+        if (eventRunning && event.isSneaking() && eventLocked.contains(event.getPlayer().getUniqueId())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onEventStopSpectating(PlayerStopSpectatingEntityEvent event) {
+        if (eventRunning && eventLocked.contains(event.getPlayer().getUniqueId())) {
+            event.setCancelled(true);
+        }
+    }
+
     private boolean eventAvailable(EvPlayer ep) {
         return ep.fake || getServer().getPlayer(ep.id) != null;
     }
@@ -9355,14 +9872,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         // the head and the name go into the column under the logo
         int sideIndex = noord ? 0 : 1;
         int k = eventPlaced[sideIndex]++;
-        int cols = 3;
-        int rows = (int) Math.ceil(Math.max(1, eventPlan[sideIndex]) / (double) cols);
+        int planned = Math.max(1, eventPlan[sideIndex]);
+        // more players in a team: more columns, and everything gets a bit smaller so nothing sits inside each other
+        int cols = planned <= 9 ? 3 : (planned <= 20 ? 4 : (planned <= 35 ? 5 : 6));
+        int rows = (int) Math.ceil(planned / (double) cols);
+        double cellW = Math.min(EV_CELL_W, 4.8 / cols);
         double spacing = Math.min(EV_ROW_MAX, EV_ROWS_H / Math.max(1, rows));
-        double x = (noord ? -EV_COL_X : EV_COL_X) + ((k % cols) - 1) * EV_CELL_W;
+        float fit = (float) Math.max(0.3, Math.min(1.0, Math.min(cellW / EV_CELL_W, spacing / EV_ROW_MAX)));
+        double x = (noord ? -EV_COL_X : EV_COL_X) + ((k % cols) - (cols - 1) / 2.0) * cellW;
         double y = EV_TOP_Y - (k / cols) * spacing;
         Location headAt = eventPoint(x, y);
-        spawnEventHead(headAt, eventHead(ep), EV_HEAD_SCALE);
-        spawnEventText(eventPoint(x, y - 0.62), Component.text(ep.name, color, TextDecoration.BOLD), EV_NAME_SCALE);
+        spawnEventHead(headAt, eventHead(ep), EV_HEAD_SCALE * fit);
+        spawnEventText(eventPoint(x, y - 0.62 * fit), Component.text(ep.name, color, TextDecoration.BOLD),
+                EV_NAME_SCALE * fit);
         headAt.getWorld().spawnParticle(Particle.END_ROD, headAt, 25, 0.3, 0.3, 0.3, 0.05);
 
         Component bar = Component.text("Verdeeld: " + eventDone + " van " + eventPlayers.size(), NamedTextColor.GRAY);
@@ -10220,6 +10742,374 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    // ------------------------------------------------------------------ website link (deaths and stats)
+
+    private final java.util.concurrent.CopyOnWriteArrayList<String> siteQueue = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final Gson gson = new Gson();
+    private java.net.http.HttpClient siteHttp;
+    private volatile Boolean siteLastOk = null;
+    private volatile String siteLastError = "";
+    private File siteQueueFile;
+
+    private boolean siteConfigured() {
+        return !getConfig().getString("site.token", "").isBlank();
+    }
+
+    private void initSiteLink() {
+        getConfig().addDefault("site.url", "https://lowkeysmp.lovable.app");
+        getConfig().addDefault("site.token", "");
+        getConfig().addDefault("site.stats-minutes", 5);
+        getConfig().options().copyDefaults(true);
+        saveConfig();
+        siteHttp = java.net.http.HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(8)).build();
+        siteQueueFile = new File(getDataFolder(), "site-queue.json");
+        if (siteQueueFile.isFile()) {
+            try {
+                for (com.google.gson.JsonElement e : JsonParser.parseString(java.nio.file.Files.readString(siteQueueFile.toPath())).getAsJsonArray()) {
+                    siteQueue.add(e.getAsString());
+                }
+            } catch (Exception ex) {
+                getLogger().warning("site-queue.json kon niet gelezen worden: " + ex.getMessage());
+            }
+        }
+        // retry whatever could not be sent, every minute
+        getServer().getScheduler().runTaskTimerAsynchronously(this, this::flushSiteQueue, 20L * 60, 20L * 60);
+        long period = 20L * 60 * Math.max(1, getConfig().getInt("site.stats-minutes", 5));
+        getServer().getScheduler().runTaskTimer(this, () -> syncStats(null), 20L * 90, period);
+    }
+
+    private void saveSiteQueue() {
+        if (siteQueueFile == null) {
+            return;
+        }
+        try {
+            getDataFolder().mkdirs();
+            JsonArray arr = new JsonArray();
+            siteQueue.forEach(arr::add);
+            java.nio.file.Files.writeString(siteQueueFile.toPath(), arr.toString());
+        } catch (Exception ex) {
+            getLogger().warning("site-queue.json kon niet opgeslagen worden: " + ex.getMessage());
+        }
+    }
+
+    /** Sends one json body to the website. Returns null when it worked, otherwise the reason. Runs on an async thread. */
+    private String sitePostBlocking(String json) {
+        try {
+            String base = getConfig().getString("site.url", "").replaceAll("/+$", "");
+            java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder(java.net.URI.create(base + "/api/plugin"))
+                    .timeout(java.time.Duration.ofSeconds(12))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + getConfig().getString("site.token", ""))
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(json))
+                    .build();
+            java.net.http.HttpResponse<String> res = siteHttp.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() / 100 == 2) {
+                siteLastOk = true;
+                return null;
+            }
+            siteLastOk = false;
+            siteLastError = "HTTP " + res.statusCode();
+            return siteLastError;
+        } catch (Exception ex) {
+            siteLastOk = false;
+            siteLastError = String.valueOf(ex.getMessage());
+            return siteLastError;
+        }
+    }
+
+    /** Fire and forget: failed messages wait in a queue (and in site-queue.json) until the site answers again. */
+    private void sitePost(JsonObject body) {
+        if (!siteConfigured()) {
+            return;
+        }
+        final String json = gson.toJson(body);
+        getServer().getScheduler().runTaskAsynchronously(this, () -> {
+            if (sitePostBlocking(json) != null) {
+                siteQueue.add(json);
+                saveSiteQueue();
+            }
+        });
+    }
+
+    private void flushSiteQueue() {
+        if (!siteConfigured() || siteQueue.isEmpty()) {
+            return;
+        }
+        for (String json : new ArrayList<>(siteQueue)) {
+            if (sitePostBlocking(json) != null) {
+                return; // still down, try again next minute
+            }
+            siteQueue.remove(json);
+        }
+        saveSiteQueue();
+    }
+
+    private void siteTest(CommandSender sender) {
+        if (!siteConfigured()) {
+            sender.sendMessage(Component.text("Zet eerst site.token in plugins/LowkeyCore/config.yml en doe /reload of herstart.", NamedTextColor.RED));
+            return;
+        }
+        sender.sendMessage(Component.text("Verbinding met de site testen...", NamedTextColor.GRAY));
+        getServer().getScheduler().runTaskAsynchronously(this, () -> {
+            String err = sitePostBlocking("{\"type\":\"ping\"}");
+            getServer().getScheduler().runTask(this, () -> sender.sendMessage(err == null
+                    ? Component.text("De site antwoordt, de koppeling werkt.", NamedTextColor.GREEN)
+                    : Component.text("De site antwoordt niet goed: " + err, NamedTextColor.RED)));
+        });
+    }
+
+    private static String prettyName(org.bukkit.entity.Entity e) {
+        String custom = e.getCustomName();
+        if (custom != null && !custom.isBlank()) {
+            return custom;
+        }
+        if (e instanceof Player) {
+            return e.getName();
+        }
+        String raw = e.getType().name().toLowerCase(Locale.ROOT).replace('_', ' ');
+        return Character.toUpperCase(raw.charAt(0)) + raw.substring(1);
+    }
+
+    /** The death message exactly as Minecraft shows it, in English ("Alex fell from a high place"). */
+    private String deathCause(Player player, Component msg) {
+        if (msg != null) {
+            try {
+                String text = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(msg).trim();
+                if (!text.isEmpty() && !text.startsWith("death.")) {
+                    return text;
+                }
+            } catch (Exception ignored) {
+                // use the fallback below
+            }
+        }
+        String name = player.getName();
+        org.bukkit.event.entity.EntityDamageEvent last = player.getLastDamageCause();
+        if (last instanceof org.bukkit.event.entity.EntityDamageByEntityEvent) {
+            org.bukkit.entity.Entity damager = ((org.bukkit.event.entity.EntityDamageByEntityEvent) last).getDamager();
+            if (damager instanceof org.bukkit.entity.Projectile
+                    && ((org.bukkit.entity.Projectile) damager).getShooter() instanceof org.bukkit.entity.Entity) {
+                damager = (org.bukkit.entity.Entity) ((org.bukkit.entity.Projectile) damager).getShooter();
+                return name + " was shot by " + prettyName(damager);
+            }
+            return name + " was slain by " + prettyName(damager);
+        }
+        if (last != null) {
+            switch (last.getCause().name()) {
+                case "FALL": return name + " fell from a high place";
+                case "DROWNING": return name + " drowned";
+                case "LAVA": return name + " tried to swim in lava";
+                case "FIRE": case "FIRE_TICK": case "HOT_FLOOR": return name + " burned to death";
+                case "BLOCK_EXPLOSION": case "ENTITY_EXPLOSION": return name + " blew up";
+                case "VOID": return name + " fell out of the world";
+                case "STARVATION": return name + " starved to death";
+                case "SUFFOCATION": return name + " suffocated in a wall";
+                case "CONTACT": return name + " was pricked to death";
+                case "POISON": case "MAGIC": return name + " was killed by magic";
+                case "WITHER": return name + " withered away";
+                case "LIGHTNING": return name + " was struck by lightning";
+                case "FREEZE": return name + " froze to death";
+                case "FALLING_BLOCK": return name + " was squashed by a falling block";
+                case "FLY_INTO_WALL": return name + " experienced kinetic energy";
+                default: break;
+            }
+        }
+        return name + " died";
+    }
+
+    /** A real elimination: the site gets the exact time and cause and you approve it in the beheer. */
+    private void reportDeath(Player player, Component msg, String location) {
+        if (!siteConfigured()) {
+            return;
+        }
+        JsonObject o = new JsonObject();
+        o.addProperty("type", "death");
+        o.addProperty("player", player.getName());
+        o.addProperty("uuid", player.getUniqueId().toString());
+        o.addProperty("diedAt", java.time.OffsetDateTime.now().toString());
+        o.addProperty("cause", deathCause(player, msg));
+        o.addProperty("location", location);
+        sitePost(o);
+    }
+
+    /** Playtime, kills, totem pops, jumps and kilometres walked of everybody the plugin knows, read in small batches so the server does not lag. */
+    private void syncStats(CommandSender sender) {
+        if (!siteConfigured()) {
+            if (sender != null) {
+                sender.sendMessage(Component.text("Zet eerst site.token in config.yml.", NamedTextColor.RED));
+            }
+            return;
+        }
+        final List<UUID> ids = new ArrayList<>(allPlayerIds());
+        final JsonArray players = new JsonArray();
+        if (sender != null) {
+            sender.sendMessage(Component.text("Stats van " + ids.size() + " spelers worden verstuurd...", NamedTextColor.GRAY));
+        }
+        new BukkitRunnable() {
+            int next = 0;
+
+            @Override
+            public void run() {
+                int end = Math.min(ids.size(), next + 15);
+                for (; next < end; next++) {
+                    OfflinePlayer op = getServer().getOfflinePlayer(ids.get(next));
+                    if (op.getName() == null || (!op.isOnline() && !op.hasPlayedBefore())) {
+                        continue;
+                    }
+                    try {
+                        JsonObject p = new JsonObject();
+                        p.addProperty("uuid", op.getUniqueId().toString());
+                        p.addProperty("name", op.getName());
+                        p.addProperty("playtimeSeconds", op.getStatistic(Statistic.PLAY_ONE_MINUTE) / 20L);
+                        p.addProperty("kills", op.getStatistic(Statistic.PLAYER_KILLS));
+                        p.addProperty("totemPops", op.getStatistic(Statistic.USE_ITEM, Material.TOTEM_OF_UNDYING));
+                        p.addProperty("jumps", op.getStatistic(Statistic.JUMP));
+                        // everything done on foot: walking, sprinting and sneaking, in kilometres
+                        long cm = (long) op.getStatistic(Statistic.WALK_ONE_CM) + op.getStatistic(Statistic.SPRINT_ONE_CM)
+                                + op.getStatistic(Statistic.CROUCH_ONE_CM);
+                        p.addProperty("kmWalked", Math.round(cm / 1000.0) / 100.0);
+                        players.add(p);
+                    } catch (Exception ignored) {
+                        // a broken stats file must not stop the rest
+                    }
+                }
+                if (next >= ids.size()) {
+                    cancel();
+                    for (int i = 0; i < players.size(); i += 100) {
+                        JsonArray chunk = new JsonArray();
+                        for (int j = i; j < Math.min(players.size(), i + 100); j++) {
+                            chunk.add(players.get(j));
+                        }
+                        JsonObject body = new JsonObject();
+                        body.addProperty("type", "stats");
+                        body.add("players", chunk);
+                        sitePost(body);
+                    }
+                    if (sender != null) {
+                        sender.sendMessage(Component.text(players.size() + " spelers doorgestuurd.", NamedTextColor.GREEN));
+                    }
+                }
+            }
+        }.runTaskTimer(LowkeyCore.this, 1L, 1L);
+    }
+
+    // ------------------------------------------------------------------ no totems in shulker boxes
+
+    private static boolean isShulkerView(Inventory top) {
+        return top != null && top.getType() == InventoryType.SHULKER_BOX;
+    }
+
+    private void shulkerTotemDenied(Player player) {
+        player.sendActionBar(Component.text("Je mag geen totems in shulker boxes steken.", NamedTextColor.RED));
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onShulkerTotemClick(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player)) {
+            return;
+        }
+        Player player = (Player) event.getWhoClicked();
+        if (player.getGameMode() == GameMode.CREATIVE) {
+            return;
+        }
+        Inventory top = event.getView().getTopInventory();
+        if (!isShulkerView(top) || event.getClickedInventory() == null) {
+            return;
+        }
+        boolean inTop = event.getRawSlot() >= 0 && event.getRawSlot() < top.getSize();
+        boolean deny = false;
+        switch (event.getAction()) {
+            case PLACE_ALL:
+            case PLACE_ONE:
+            case PLACE_SOME:
+            case SWAP_WITH_CURSOR:
+                deny = inTop && isTotem(event.getCursor());
+                break;
+            case MOVE_TO_OTHER_INVENTORY:
+                deny = !inTop && isTotem(event.getCurrentItem());
+                break;
+            case HOTBAR_SWAP:
+            case HOTBAR_MOVE_AND_READD:
+                if (inTop) {
+                    ItemStack other = event.getClick() == ClickType.SWAP_OFFHAND
+                            ? player.getInventory().getItemInOffHand()
+                            : (event.getHotbarButton() >= 0 ? player.getInventory().getItem(event.getHotbarButton()) : null);
+                    deny = isTotem(other);
+                }
+                break;
+            default:
+                break;
+        }
+        if (deny) {
+            event.setCancelled(true);
+            shulkerTotemDenied(player);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onShulkerTotemDrag(InventoryDragEvent event) {
+        if (!(event.getWhoClicked() instanceof Player)) {
+            return;
+        }
+        Inventory top = event.getView().getTopInventory();
+        if (!isShulkerView(top) || !isTotem(event.getOldCursor())) {
+            return;
+        }
+        for (int raw : event.getRawSlots()) {
+            if (raw < top.getSize()) {
+                event.setCancelled(true);
+                shulkerTotemDenied((Player) event.getWhoClicked());
+                return;
+            }
+        }
+    }
+
+    /** Hoppers and droppers do not put totems in shulker boxes either. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onShulkerTotemMove(InventoryMoveItemEvent event) {
+        if (event.getDestination().getType() == InventoryType.SHULKER_BOX && isTotem(event.getItem())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** A totem that is already inside a shulker box he carries comes out and drops at his feet. */
+    private void evictShulkerTotems(Player player) {
+        if (player.getGameMode() == GameMode.CREATIVE) {
+            return;
+        }
+        PlayerInventory inv = player.getInventory();
+        for (int i = 0; i < inv.getSize(); i++) {
+            ItemStack stack = inv.getItem(i);
+            if (stack == null || !stack.getType().name().endsWith("SHULKER_BOX") || !stack.hasItemMeta()) {
+                continue;
+            }
+            ItemMeta meta = stack.getItemMeta();
+            if (!(meta instanceof BlockStateMeta)) {
+                continue;
+            }
+            BlockState state = ((BlockStateMeta) meta).getBlockState();
+            if (!(state instanceof Container)) {
+                continue;
+            }
+            Inventory inner = ((Container) state).getInventory();
+            int removed = 0;
+            for (int s = 0; s < inner.getSize(); s++) {
+                ItemStack item = inner.getItem(s);
+                if (isTotem(item)) {
+                    removed += item.getAmount();
+                    inner.setItem(s, null);
+                }
+            }
+            if (removed > 0) {
+                ((BlockStateMeta) meta).setBlockState(state);
+                stack.setItemMeta(meta);
+                inv.setItem(i, stack);
+                Item dropped = player.getWorld().dropItem(player.getLocation(), new ItemStack(Material.TOTEM_OF_UNDYING, removed));
+                dropped.setPickupDelay(40);
+                shulkerTotemDenied(player);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ join / leave messages per world
 
     /** Players that just joined: the move from where they logged out to the lobby is not a "move" for the messages. */
@@ -10526,6 +11416,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("menu");
             options.add("grace");
             options.add("graceall");
+            options.add("status");
+            options.add("site");
+            options.add("check");
+            options.add("spawnreset");
+            options.add("rulesreset");
             options.add("team");
             options.add("crew");
             options.add("nether");
@@ -11377,6 +12272,19 @@ final class MaceManager implements Listener {
     }
 
     // ------------------------------------------------------------------ status
+
+    /** For /lowkey check: is the mace switched on, and was it already crafted (or destroyed)? */
+    boolean isActive() {
+        return enabled;
+    }
+
+    boolean isAlreadyCrafted() {
+        return crafted;
+    }
+
+    String stateWord() {
+        return statusWord();
+    }
 
     private String statusWord() {
         if (!crafted) {
