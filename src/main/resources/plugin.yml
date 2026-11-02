@@ -1,5 +1,5 @@
 name: LowkeyCore
-version: 0.43.0
+version: 0.45.0
 main: nl.lowkey.core.LowkeyCore
 api-version: '26.1'
 description: LowkeySMP chat tags, join/leave messages, grace period, elimination effects, server hours, donation broadcaster, lobby, server launch, the finale with a shrinking border and the one and only mace
@@ -7,7 +7,15 @@ authors: [LowkeySMP]
 commands:
   lowkey:
     description: LowkeySMP admin commando
-    usage: /lowkey grace <speler> <minuten> | /lowkey graceall [minuten] | /lowkey status | /lowkey site <test|stats|queue> | /lowkey check [chat] | /lowkey spawnreset | /lowkey rulesreset | /lowkey team <speler> <noord|zuid|geen> | /lowkey crew <speler> <aan|uit> | /lowkey nether <open|close> | /lowkey server <open|close> | /lowkey border <open|close> | /lowkey revive <speler> | /lowkey donate | /lowkey tolobby <speler> | /lowkey verban <speler> <main|verliezerseiland|beide> <lobby|volledig> | /lowkey verbanopheffen <speler> | /lowkey badge <huidig|rood|roze> | /lowkey leaderboard <spawn|remove|refresh|size|reset> | /lowkey website | /lowkey give <speler> | /lowkey seed <seed|random|cancel> | /lowkey login | /lowkey pin <pincode> | /lowkey launch [reset] | /lowkey lobby <create|tp|setspawn|delete|protect> | /lowkey setspawn <noord|zuid> | /lowkey main | /lowkey mainworld <open|close> | /lowkey countdown <spawn|remove|set|size> | /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test> | /lowkey event <start|test|stop|camera|teams|reset> | /lowkey losers <create|tp|setspawn|open|close|return|returnall|delete> | /lowkey end <open|close> | /lowkey finale <menu|start|pauze|hervat|stop|status|test> | /lowkey menu | /lowkey say <bericht>
+    usage: /lowkey grace <speler> <minuten> | /lowkey graceall [minuten] | /lowkey status | /lowkey tell <speler> <bericht> | /lowkey kijkoog <plaats|aan|uit|weg> | /lowkey site <test|stats|queue|reset confirm> | /lowkey check [chat] | /lowkey spawnreset | /lowkey rulesreset | /lowkey team <speler> <noord|zuid|geen> | /lowkey crew <speler> <aan|uit> | /lowkey nether <open|close> | /lowkey server <open|close> | /lowkey border <open|close> | /lowkey revive <speler> | /lowkey donate | /lowkey tolobby <speler> | /lowkey verban <speler> <main|verliezerseiland|beide> <lobby|volledig> | /lowkey verbanopheffen <speler> | /lowkey badge <huidig|rood|roze> | /lowkey leaderboard <spawn|remove|refresh|size|reset> | /lowkey website | /lowkey give <speler> | /lowkey seed <seed|random|cancel> | /lowkey login | /lowkey pin <pincode> | /lowkey launch [reset] | /lowkey lobby <create|tp|setspawn|delete|protect> | /lowkey setspawn <noord|zuid> | /lowkey main | /lowkey mainworld <open|close> | /lowkey countdown <spawn|remove|set|size> | /lowkey mace <status|aan|uit|cooldown|cooldownreset|give|reset|test> | /lowkey event <start|test|stop|camera|teams|reset> | /lowkey losers <create|tp|setspawn|open|close|return|returnall|delete> | /lowkey end <open|close> | /lowkey finale <menu|start|pauze|hervat|stop|status|test> | /lowkey menu | /lowkey say <bericht>
+  reply:
+    description: Antwoord op je laatste prive bericht
+    usage: /r <bericht>
+    aliases: [r]
+  spectate:
+    description: Kijk mee met de hoofdfinale als je al uitgeschakeld bent
+    usage: /spectate [leave]
+    aliases: [spec, kijken]
 permissions:
   lowkey.admin:
     description: Toegang tot /lowkey
