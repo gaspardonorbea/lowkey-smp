@@ -476,6 +476,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         boardLoc = readLoc(state, "board-loc");
         boardScale = state.getDouble("board-scale", 2.0);
         tlLoc = readLoc(state, "timeline-loc");
+        eyeLoc = readLoc(state, "eye-loc");
+        eyeOn = state.getBoolean("eye-on", false);
         tlScale = state.getDouble("timeline-scale", 1.0);
         tlPack = state.getBoolean("timeline-pack", false);
         for (int i = 0; i < tlEvents.size(); i++) {
@@ -520,6 +522,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskTimer(this, this::tickPlaytime, 100L, 100L);
         getServer().getScheduler().runTaskTimer(this, this::tickBoard, 200L, 600L);
         getServer().getScheduler().runTaskTimer(this, this::tickTimeline, 200L, 20L);
+        getServer().getScheduler().runTaskTimer(this, this::tickEye, 220L, 20L);
         getServer().getScheduler().runTaskTimer(this, this::tickFinale, 20L, 2L);
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (Player p : getServer().getOnlinePlayers()) {
@@ -1165,6 +1168,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     continue;
                 }
                 boolean sameGroup = groups.get(other.getUniqueId()) == viewerGroup;
+                // somebody who only watches the finale (/spectate) is not in the list, so the finalists see who is still alive
+                if (sameGroup && finaleViewers.containsKey(other.getUniqueId()) && !seesAll(viewer)) {
+                    sameGroup = false;
+                }
                 boolean listed = viewer.isListed(other);
                 if (sameGroup && !listed) {
                     viewer.listPlayer(other);
@@ -1213,6 +1220,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Player player = event.getPlayer();
         event.quitMessage(null);
         joinSettling.remove(player.getUniqueId());
+        finaleViewers.remove(player.getUniqueId());
+        finaleViewerMode.remove(player.getUniqueId());
         worldMessage(worldGroup(player), player, false, false, true);
 
         persist(player);
@@ -1888,7 +1897,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             target = getServer().getPlayerExact(rest[0]);
             text = rest[1];
         } else if (REPLY_COMMANDS.contains(command)) {
-            if (head.length < 2) {
+            if (head.length < 2 || anonConversations.containsKey(sender.getUniqueId())) {
                 return;
             }
             UUID partner = lastWhisperPartner.get(sender.getUniqueId());
@@ -1902,6 +1911,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         lastWhisperPartner.put(sender.getUniqueId(), target.getUniqueId());
         lastWhisperPartner.put(target.getUniqueId(), sender.getUniqueId());
+        anonConversations.remove(sender.getUniqueId());
+        anonConversations.remove(target.getUniqueId());
         Component spy = Component.text()
                 .append(Component.text("[spy] ", NamedTextColor.DARK_GRAY))
                 .append(Component.text(sender.getName() + " > " + target.getName() + ": ", NamedTextColor.GRAY))
@@ -1929,6 +1940,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         writeLoc(state, "board-loc", boardLoc);
         state.set("board-scale", boardScale);
         writeLoc(state, "timeline-loc", tlLoc);
+        writeLoc(state, "eye-loc", eyeLoc);
+        state.set("eye-on", eyeOn);
         state.set("timeline-scale", tlScale);
         state.set("timeline-pack", tlPack);
         for (int i = 0; i < tlEvents.size(); i++) {
@@ -5019,7 +5032,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      */
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!command.getName().equalsIgnoreCase("lowkey")) {
+        String cmdName = command.getName().toLowerCase(Locale.ROOT);
+        if (cmdName.equals("reply")) {
+            return handleReply(sender, args);
+        }
+        if (cmdName.equals("spectate")) {
+            return handleSpectate(sender, args);
+        }
+        if (!cmdName.equals("lowkey")) {
             return false;
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("login")) {
@@ -5064,10 +5084,24 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             openMenu((Player) sender);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("tell")) {
+            adminTell(sender, args);
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("kijkoog")) {
+            eyeCommand(sender, args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "");
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("site")) {
             String what = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "test";
             if (what.equals("stats")) {
                 syncStats(sender);
+            } else if (what.equals("reset")) {
+                if (args.length >= 3 && args[2].equalsIgnoreCase("confirm")) {
+                    resetStats(sender);
+                } else {
+                    sender.sendMessage(Component.text("Dit zet de stats van IEDEREEN terug op nul. Typ /lowkey site reset confirm om door te gaan.", NamedTextColor.RED));
+                }
             } else if (what.equals("queue")) {
                 sender.sendMessage(Component.text("Wachtrij naar de site: " + siteQueue.size() + " berichten.", NamedTextColor.YELLOW));
             } else {
@@ -5738,6 +5772,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 "Hologram met de aftelling naar de start.", 150, () -> openCountdownMenu(admin)));
         buttons.add(button(iconLabel(M_SAY, "Eigen bericht", NamedTextColor.WHITE),
                 "Stuur een bericht met de LOWKEY badge naar iedereen.", 150, () -> openSayDialog(admin)));
+        buttons.add(button(iconLabel(M_SAY, "Anoniem bericht", NamedTextColor.WHITE),
+                "Stuur een speler een privebericht alsof LowkeySMP het stuurt. Hij kan antwoorden.", 150, () -> openTellDialog(admin)));
         buttons.add(button(iconLabel(M_DONATE, "Donatiebericht", NamedTextColor.WHITE),
                 "Stuurt meteen een willekeurig donatiebericht naar iedereen.", 150, () -> {
                     broadcastRandomDonationMessage();
@@ -6538,6 +6574,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         buttons.add(button(iconLabel(M_TEAM, "Teams", NamedTextColor.WHITE),
                 "Naar de teamlijst om spelers te verplaatsen of offline spelers te wissen.", 150,
                 () -> openTeamsMenu(admin)));
+        buttons.add(button(iconLabel(M_BARRIER, "Stats resetten", NamedTextColor.RED),
+                "Zet speeltijd, kills, totem pops, sprongen en kilometers van iedereen terug op nul.", 150,
+                () -> confirm(admin,
+                        "Stats van iedereen resetten?",
+                        "Speeltijd, kills, totem pops, sprongen en kilometers beginnen weer vanaf nul en de tabel op de site wordt leeggemaakt.",
+                        "De echte Minecraft stats zelf blijven staan, alleen de teller begint opnieuw.",
+                        Component.text("Ja, resetten", NamedTextColor.RED),
+                        () -> {
+                            resetStats(admin);
+                            again.run();
+                        },
+                        again)));
         showMenu(admin, "Check voor de start", joinLines(lines.toArray(new Component[0])), buttons,
                 backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
     }
@@ -7424,6 +7472,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             if (isAdmin(p) && p.getGameMode() == GameMode.CREATIVE) {
                 continue;
             }
+            if (finaleViewers.containsKey(p.getUniqueId())) {
+                endViewing(p); // somebody who was only watching goes back to where he came from
+                continue;
+            }
             sendToLobby(p);
         }
     }
@@ -7431,8 +7483,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** The winner show lasts about 21 seconds, after that the whole finale world goes to the lobby together. */
     private void finaleScheduleLobby() {
         getServer().getScheduler().runTaskLater(this, () -> {
-            if (finaleState == FinaleState.ENDED && !finaleLosers) {
-                finaleSendAllToLobby();
+            if (finaleState == FinaleState.ENDED) {
+                if (!finaleLosers) {
+                    finaleSendAllToLobby();
+                }
+                endAllViewing();
             }
         }, 480L);
     }
@@ -7749,6 +7804,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 lines.add(pvp);
             }
             p.sendMessage(finaleBlock(lines));
+            if ((isLosersOut(p) || (isEliminated(p) && !inLosers(p))) && !p.getWorld().equals(finaleWorldFor(losers))) {
+                p.sendMessage(badgeLine(losers ? "De finale van het Verliezerseiland is begonnen. Typ /spectate om mee te kijken."
+                        : "De hoofdfinale is begonnen. Typ /spectate om mee te kijken.", NamedTextColor.WHITE));
+            }
         }
         if (losers) {
             finaleLosersThunder();
@@ -7815,6 +7874,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (!finaleLosers) {
             finaleSendAllToLobby();
         }
+        endAllViewing();
         finaleWinner = null;
         finaleElapsedMs = 0L;
         finaleDeaths.clear();
@@ -8359,6 +8419,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     }
                 }));
 
+        buttons.add(button(iconLabel(M_LOBBY, "Kijk-oog plaatsen", NamedTextColor.WHITE),
+                "Zet het oog (Wil je graag de finale spectaten?) op jouw plek in de lobby. Het blijft onzichtbaar tot je hem aanzet.", 150, () -> {
+                    eyeCommand(admin, "plaats");
+                    again.run();
+                }));
+        buttons.add(button(iconLabel(M_LOBBY, eyeOn ? "Kijk-oog uitzetten" : "Kijk-oog aanzetten", eyeOn ? NamedTextColor.RED : NamedTextColor.GREEN),
+                "Spelers die al dood zijn klikken op het oog om de finale te spectaten.", 150, () -> {
+                    eyeCommand(admin, eyeOn ? "uit" : "aan");
+                    again.run();
+                }));
         showMenu(admin, losers ? "Verliezerseiland finale" : "Finale", finaleStatusBody(), buttons,
                 losers ? backButton("Terug naar het Verliezerseiland.", () -> openLosersMenu(admin))
                         : backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
@@ -10742,6 +10812,360 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    // ------------------------------------------------------------------ the eye in the lobby
+
+    private Location eyeLoc;
+    private boolean eyeOn;
+    private final List<Entity> eyeEntities = new ArrayList<>();
+    private UUID eyeHit;
+    private float eyeAngle;
+
+    private void removeEye(boolean releaseChunk) {
+        for (Entity e : eyeEntities) {
+            if (e.isValid()) {
+                e.remove();
+            }
+        }
+        eyeEntities.clear();
+        eyeHit = null;
+        if (releaseChunk && eyeLoc != null && eyeLoc.getWorld() != null) {
+            eyeLoc.getWorld().removePluginChunkTicket(eyeLoc.getBlockX() >> 4, eyeLoc.getBlockZ() >> 4, this);
+        }
+    }
+
+    /** Nothing exists while the eye is off: it is completely invisible until the admin turns it on. */
+    private void spawnEye() {
+        removeEye(false);
+        if (!eyeOn || eyeLoc == null || eyeLoc.getWorld() == null) {
+            return;
+        }
+        final World world = eyeLoc.getWorld();
+        final Location base = eyeLoc.clone();
+        world.addPluginChunkTicket(base.getBlockX() >> 4, base.getBlockZ() >> 4, this);
+        eyeEntities.add(world.spawn(base.clone().add(0, 2.0, 0), ItemDisplay.class, d -> {
+            d.setPersistent(false);
+            d.setBillboard(Display.Billboard.FIXED);
+            d.setItemStack(new ItemStack(Material.ENDER_EYE));
+            d.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
+            d.setBrightness(new Display.Brightness(15, 15));
+            d.setTransformation(tlSpin(3.0f, eyeAngle));
+        }));
+        eyeEntities.add(tlText(base.clone().add(0, 3.7, 0),
+                Component.text("Wil je graag de finale spectaten?", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD), 1.5f, false));
+        eyeEntities.add(tlText(base.clone().add(0, 3.25, 0),
+                Component.text("Klik om mee te kijken", NamedTextColor.GRAY), 1.1f, false));
+        Interaction hit = world.spawn(base.clone().add(0, 0.5, 0), Interaction.class, in -> {
+            in.setPersistent(false);
+            in.setInteractionWidth(2.6f);
+            in.setInteractionHeight(3.4f);
+            in.setResponsive(true);
+        });
+        eyeHit = hit.getUniqueId();
+        eyeEntities.add(hit);
+    }
+
+    private void tickEye() {
+        if (!eyeOn || eyeLoc == null || eyeLoc.getWorld() == null) {
+            if (!eyeEntities.isEmpty()) {
+                removeEye(false);
+            }
+            return;
+        }
+        boolean alive = eyeHit != null && !eyeEntities.isEmpty();
+        for (Entity e : eyeEntities) {
+            alive = alive && e.isValid();
+        }
+        if (!alive) {
+            spawnEye();
+            return;
+        }
+        eyeAngle = (float) ((eyeAngle + Math.PI / 2) % (4 * Math.PI));
+        for (Entity e : eyeEntities) {
+            if (e instanceof ItemDisplay) {
+                ItemDisplay d = (ItemDisplay) e;
+                d.setInterpolationDelay(0);
+                d.setInterpolationDuration(20);
+                d.setTransformation(tlSpin(3.0f, eyeAngle));
+            }
+        }
+    }
+
+    private void eyeClicked(Player player) {
+        handleSpectate(player, new String[0]);
+    }
+
+    @EventHandler
+    public void onEyeClick(PlayerInteractAtEntityEvent event) {
+        if (eyeHit == null || !event.getRightClicked().getUniqueId().equals(eyeHit)) {
+            return;
+        }
+        event.setCancelled(true);
+        if (event.getHand() == EquipmentSlot.HAND) {
+            eyeClicked(event.getPlayer());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onEyeHit(EntityDamageByEntityEvent event) {
+        if (eyeHit == null || !event.getEntity().getUniqueId().equals(eyeHit)) {
+            return;
+        }
+        event.setCancelled(true);
+        if (event.getDamager() instanceof Player) {
+            eyeClicked((Player) event.getDamager());
+        }
+    }
+
+    private void eyeCommand(CommandSender sender, String what) {
+        switch (what) {
+            case "plaats":
+                if (!(sender instanceof Player)) {
+                    sender.sendMessage(Component.text("Dit moet in het spel, op de plek waar het oog moet komen.", NamedTextColor.RED));
+                    return;
+                }
+                removeEye(true);
+                eyeLoc = ((Player) sender).getLocation().clone();
+                eyeLoc.setPitch(0f);
+                saveState();
+                spawnEye();
+                sender.sendMessage(Component.text("Het kijk-oog staat op jouw plek" + (eyeOn ? "." : " en is nog uit. Zet hem aan als de finale begint."), NamedTextColor.GREEN));
+                return;
+            case "aan":
+                if (eyeLoc == null) {
+                    sender.sendMessage(Component.text("Plaats het oog eerst met /lowkey kijkoog plaats.", NamedTextColor.RED));
+                    return;
+                }
+                eyeOn = true;
+                saveState();
+                spawnEye();
+                sender.sendMessage(Component.text("Het kijk-oog is aan, iedereen in de lobby ziet hem.", NamedTextColor.GREEN));
+                return;
+            case "uit":
+                eyeOn = false;
+                saveState();
+                removeEye(false);
+                sender.sendMessage(Component.text("Het kijk-oog is uit en onzichtbaar.", NamedTextColor.GREEN));
+                return;
+            case "weg":
+                removeEye(true);
+                eyeLoc = null;
+                eyeOn = false;
+                saveState();
+                sender.sendMessage(Component.text("Het kijk-oog is verwijderd.", NamedTextColor.GREEN));
+                return;
+            default:
+                sender.sendMessage(Component.text("Gebruik: /lowkey kijkoog <plaats|aan|uit|weg>", NamedTextColor.RED));
+        }
+    }
+
+    // ------------------------------------------------------------------ whispers with the LOWKEY badge
+
+    private Component whisperLine(String from, String to, String text) {
+        return Component.text()
+                .append(glyph(LOWKEY_BADGE))
+                .append(Component.space())
+                .append(Component.text(from + " \u279c " + to + ": ", NamedTextColor.LIGHT_PURPLE))
+                .append(Component.text(text, NamedTextColor.WHITE))
+                .build();
+    }
+
+    /** Who is talking to the admin as "LowkeySMP": player to admin (a zero uuid means the console). */
+    private final Map<UUID, UUID> anonConversations = new HashMap<>();
+    private static final UUID ANON_CONSOLE = new UUID(0L, 0L);
+
+    /** An admin writes to a player as LowkeySMP, without his own name. The player can answer with /r. */
+    private void sendAnonTell(CommandSender sender, Player to, String rawText) {
+        String text = rawText.trim();
+        if (text.length() > 256) {
+            text = text.substring(0, 256);
+        }
+        boolean first = !anonConversations.containsKey(to.getUniqueId());
+        anonConversations.put(to.getUniqueId(), sender instanceof Player ? ((Player) sender).getUniqueId() : ANON_CONSOLE);
+        // a normal whisper partner no longer counts for /r: the newest talk wins
+        to.sendMessage(whisperLine("LowkeySMP", "Jij", text));
+        if (first) {
+            to.sendMessage(badgeLine("Je kunt antwoorden met /r <bericht>.", NamedTextColor.GRAY));
+        }
+        to.playSound(to.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, 0.7f, 1.4f);
+        sender.sendMessage(whisperLine("Jij (als LowkeySMP)", to.getName(), text));
+        getLogger().info("[tell] " + sender.getName() + " as LowkeySMP -> " + to.getName() + ": " + text);
+    }
+
+    private void adminTell(CommandSender sender, String[] args) {
+        if (args.length < 3) {
+            sender.sendMessage(Component.text("Gebruik: /lowkey tell <speler> <bericht>", NamedTextColor.RED));
+            return;
+        }
+        Player to = getServer().getPlayerExact(args[1]);
+        if (to == null) {
+            sender.sendMessage(Component.text("Die speler is niet online.", NamedTextColor.RED));
+            return;
+        }
+        sendAnonTell(sender, to, String.join(" ", Arrays.copyOfRange(args, 2, args.length)));
+    }
+
+    /** /r: answers LowkeySMP when an admin wrote to you, otherwise it answers the last normal whisper. */
+    private boolean handleReply(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage(Component.text("Alleen spelers kunnen antwoorden.", NamedTextColor.RED));
+            return true;
+        }
+        Player from = (Player) sender;
+        if (args.length < 1) {
+            from.sendMessage(Component.text("Gebruik: /r <bericht>", NamedTextColor.RED));
+            return true;
+        }
+        String text = String.join(" ", args);
+        if (text.length() > 256) {
+            text = text.substring(0, 256);
+        }
+        UUID adminId = anonConversations.get(from.getUniqueId());
+        if (adminId != null) {
+            from.sendMessage(whisperLine("Jij", "LowkeySMP", text));
+            Component line = whisperLine(from.getName(), "LowkeySMP", text);
+            Player admin = ANON_CONSOLE.equals(adminId) ? null : getServer().getPlayer(adminId);
+            if (admin != null && admin.isOnline()) {
+                admin.sendMessage(line);
+                admin.playSound(admin.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, 0.7f, 1.4f);
+            } else {
+                // the admin who wrote is not there: every admin online sees the answer
+                for (Player p : getServer().getOnlinePlayers()) {
+                    if (isAdmin(p) && !p.equals(from)) {
+                        p.sendMessage(line);
+                    }
+                }
+            }
+            getServer().getConsoleSender().sendMessage(line);
+            return true;
+        }
+        UUID partner = lastWhisperPartner.get(from.getUniqueId());
+        Player to = partner == null ? null : getServer().getPlayer(partner);
+        if (to == null) {
+            from.sendMessage(Component.text("Je hebt niemand om op te antwoorden.", NamedTextColor.RED));
+            return true;
+        }
+        from.performCommand("msg " + to.getName() + " " + text); // goes through the normal whisper rules
+        return true;
+    }
+
+    private void openTellDialog(Player admin) {
+        DialogInput who = DialogInput.text("speler", Component.text("Speler (naam)")).width(300).maxLength(16).build();
+        DialogInput msg = DialogInput.text("message", Component.text("Bericht")).width(300).maxLength(200).build();
+        DialogAction send = DialogAction.customClick((view, audience) -> {
+            if (!(audience instanceof Player)) {
+                return;
+            }
+            Player clicker = (Player) audience;
+            if (!isAdmin(clicker)) {
+                return;
+            }
+            final String name = view.getText("speler");
+            final String text = view.getText("message");
+            getServer().getScheduler().runTask(this, () -> {
+                Player to = name == null ? null : getServer().getPlayerExact(name.trim());
+                if (text == null || text.isBlank() || to == null) {
+                    clicker.sendMessage(Component.text("Kies een speler die online is en typ een bericht.", NamedTextColor.RED));
+                } else {
+                    sendAnonTell(clicker, to, text);
+                }
+                openMessagesMenu(clicker);
+            });
+        }, CLICK_OPTIONS);
+        Dialog dialog = Dialog.create(builder -> builder.empty()
+                .base(DialogBase.builder(dlgTitle(admin, "Anoniem bericht"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Het bericht komt aan alsof LowkeySMP het stuurt. De speler kan antwoorden met /r.", NamedTextColor.GRAY))))
+                        .inputs(List.of(who, msg))
+                        .build())
+                .type(DialogType.confirmation(
+                        ActionButton.create(iconLabel(M_SAY, "Versturen", NamedTextColor.GREEN),
+                                Component.text("Stuur het bericht."), 150, send),
+                        backButton("Terug naar berichten.", () -> openMessagesMenu(admin)))));
+        admin.showDialog(dialog);
+    }
+
+    // ------------------------------------------------------------------ spectating the main finale
+
+    private final Map<UUID, Location> finaleViewers = new HashMap<>();
+    private final Map<UUID, GameMode> finaleViewerMode = new HashMap<>();
+
+    private Component badgeLine(String text, NamedTextColor color) {
+        return Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space()).append(Component.text(text, color)).build();
+    }
+
+    /** /spectate: somebody who is already out can watch the running finale (main or Verliezerseiland). /spectate leave goes back. */
+    private boolean handleSpectate(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage(Component.text("Alleen spelers kunnen meekijken.", NamedTextColor.RED));
+            return true;
+        }
+        Player p = (Player) sender;
+        if (args.length >= 1 && (args[0].equalsIgnoreCase("leave") || args[0].equalsIgnoreCase("stop"))) {
+            if (!finaleViewers.containsKey(p.getUniqueId())) {
+                p.sendMessage(badgeLine("Je kijkt nu niet mee.", NamedTextColor.RED));
+            } else {
+                endViewing(p);
+            }
+            return true;
+        }
+        World fw = finaleState == FinaleState.IDLE || finaleState == FinaleState.ENDED ? null : finaleWorld();
+        if (fw == null) {
+            p.sendMessage(badgeLine("Er is nu geen finale om naar te kijken.", NamedTextColor.RED));
+            return true;
+        }
+        boolean out = isLosersOut(p) || (isEliminated(p) && !inLosers(p));
+        if (!out) {
+            p.sendMessage(badgeLine(isEliminated(p) ? "Je speelt nog op het Verliezerseiland, daar kun je niet weg." : "Alleen spelers die al uitgeschakeld zijn kunnen meekijken.", NamedTextColor.RED));
+            return true;
+        }
+        if (p.getWorld().equals(fw)) {
+            p.sendMessage(badgeLine("Je kijkt al mee.", NamedTextColor.YELLOW));
+            return true;
+        }
+        finaleViewers.put(p.getUniqueId(), p.getLocation().clone());
+        finaleViewerMode.put(p.getUniqueId(), p.getGameMode());
+        Location base;
+        if (finaleLosers) {
+            base = losersSpawn != null && losersSpawn.getWorld() != null ? losersSpawn : fw.getSpawnLocation();
+        } else {
+            base = finaleSpawn != null && finaleSpawn.getWorld() != null ? finaleSpawn : fw.getSpawnLocation();
+        }
+        p.teleport(safeLocation(base.clone()));
+        p.setGameMode(GameMode.SPECTATOR);
+        p.sendMessage(badgeLine("Je kijkt nu mee. Gebruik /spectate leave om te stoppen met kijken.", NamedTextColor.WHITE));
+        getServer().getScheduler().runTask(this, this::updateTablist);
+        return true;
+    }
+
+    private void endAllViewing() {
+        for (UUID id : new ArrayList<>(finaleViewers.keySet())) {
+            Player v = getServer().getPlayer(id);
+            if (v != null) {
+                endViewing(v);
+            } else {
+                finaleViewers.remove(id);
+                finaleViewerMode.remove(id);
+            }
+        }
+    }
+
+    /** Brings a viewer back to where he came from. */
+    private void endViewing(Player p) {
+        Location back = finaleViewers.remove(p.getUniqueId());
+        GameMode mode = finaleViewerMode.remove(p.getUniqueId());
+        if (!p.isOnline()) {
+            return;
+        }
+        if (back != null && back.getWorld() != null) {
+            p.teleport(back);
+        } else {
+            sendToLobby(p);
+        }
+        p.setGameMode(mode == null || mode == GameMode.SPECTATOR ? GameMode.ADVENTURE : mode);
+        p.sendMessage(badgeLine("Je kijkt niet meer mee.", NamedTextColor.GRAY));
+        getServer().getScheduler().runTask(this, this::updateTablist);
+    }
+
     // ------------------------------------------------------------------ website link (deaths and stats)
 
     private final java.util.concurrent.CopyOnWriteArrayList<String> siteQueue = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -10759,8 +11183,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getConfig().addDefault("site.url", "https://lowkeysmp.lovable.app");
         getConfig().addDefault("site.token", "");
         getConfig().addDefault("site.stats-minutes", 5);
+        getConfig().addDefault("site.stats-exclude", Arrays.asList("Lowkey_SMP"));
+        getConfig().addDefault("site.stats-exclude-regex", "");
         getConfig().options().copyDefaults(true);
         saveConfig();
+        loadStatsBase();
         siteHttp = java.net.http.HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(8)).build();
         siteQueueFile = new File(getDataFolder(), "site-queue.json");
         if (siteQueueFile.isFile()) {
@@ -10923,6 +11350,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         JsonObject o = new JsonObject();
         o.addProperty("type", "death");
+        o.addProperty("eventId", UUID.randomUUID().toString());
         o.addProperty("player", player.getName());
         o.addProperty("uuid", player.getUniqueId().toString());
         o.addProperty("diedAt", java.time.OffsetDateTime.now().toString());
@@ -10931,19 +11359,85 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         sitePost(o);
     }
 
-    /** Playtime, kills, totem pops, jumps and kilometres walked of everybody the plugin knows, read in small batches so the server does not lag. */
-    private void syncStats(CommandSender sender) {
-        if (!siteConfigured()) {
-            if (sender != null) {
-                sender.sendMessage(Component.text("Zet eerst site.token in config.yml.", NamedTextColor.RED));
+    private static final class StatRow {
+        final UUID id;
+        final String name;
+        final long[] raw; // playtime seconds, kills, totem pops, jumps, centimetres on foot
+
+        StatRow(UUID id, String name, long[] raw) {
+            this.id = id;
+            this.name = name;
+            this.raw = raw;
+        }
+    }
+
+    private final Map<UUID, long[]> statsBase = new HashMap<>();
+    private File statsBaseFile;
+
+    private boolean statsExcluded(String name) {
+        for (String s : getConfig().getStringList("site.stats-exclude")) {
+            if (s.equalsIgnoreCase(name)) {
+                return true;
             }
+        }
+        String rx = getConfig().getString("site.stats-exclude-regex", "");
+        return !rx.isBlank() && name.matches(rx);
+    }
+
+    private void loadStatsBase() {
+        statsBase.clear();
+        statsBaseFile = new File(getDataFolder(), "stats-baseline.yml");
+        if (!statsBaseFile.isFile()) {
             return;
         }
-        final List<UUID> ids = new ArrayList<>(allPlayerIds());
-        final JsonArray players = new JsonArray();
-        if (sender != null) {
-            sender.sendMessage(Component.text("Stats van " + ids.size() + " spelers worden verstuurd...", NamedTextColor.GRAY));
+        YamlConfiguration y = YamlConfiguration.loadConfiguration(statsBaseFile);
+        for (String key : y.getKeys(false)) {
+            List<Long> v = y.getLongList(key);
+            if (v.size() == 5) {
+                try {
+                    statsBase.put(UUID.fromString(key), new long[] {v.get(0), v.get(1), v.get(2), v.get(3), v.get(4)});
+                } catch (IllegalArgumentException ignored) {
+                    // not a uuid, skip
+                }
+            }
         }
+    }
+
+    private void saveStatsBase() {
+        YamlConfiguration y = new YamlConfiguration();
+        for (Map.Entry<UUID, long[]> e : statsBase.entrySet()) {
+            long[] v = e.getValue();
+            y.set(e.getKey().toString(), Arrays.asList(v[0], v[1], v[2], v[3], v[4]));
+        }
+        try {
+            getDataFolder().mkdirs();
+            y.save(new File(getDataFolder(), "stats-baseline.yml"));
+        } catch (Exception ex) {
+            getLogger().warning("stats-baseline.yml kon niet opgeslagen worden: " + ex.getMessage());
+        }
+    }
+
+    private JsonObject statsJson(StatRow r, boolean zero) {
+        long[] base = statsBase.get(r.id);
+        long[] v = new long[5];
+        for (int i = 0; i < 5; i++) {
+            v[i] = zero ? 0L : Math.max(0L, r.raw[i] - (base == null ? 0L : base[i]));
+        }
+        JsonObject p = new JsonObject();
+        p.addProperty("uuid", r.id.toString());
+        p.addProperty("name", r.name);
+        p.addProperty("playtimeSeconds", v[0]);
+        p.addProperty("kills", v[1]);
+        p.addProperty("totemPops", v[2]);
+        p.addProperty("jumps", v[3]);
+        p.addProperty("kmWalked", Math.round(v[4] / 1000.0) / 100.0);
+        return p;
+    }
+
+    /** Reads the real Minecraft statistics of everybody the plugin knows, in small batches so the server does not lag. */
+    private void collectStats(java.util.function.Consumer<List<StatRow>> done) {
+        final List<UUID> ids = new ArrayList<>(allPlayerIds());
+        final List<StatRow> rows = new ArrayList<>();
         new BukkitRunnable() {
             int next = 0;
 
@@ -10952,44 +11446,82 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 int end = Math.min(ids.size(), next + 15);
                 for (; next < end; next++) {
                     OfflinePlayer op = getServer().getOfflinePlayer(ids.get(next));
-                    if (op.getName() == null || (!op.isOnline() && !op.hasPlayedBefore())) {
+                    String name = op.getName();
+                    if (name == null || statsExcluded(name) || (!op.isOnline() && !op.hasPlayedBefore())) {
                         continue;
                     }
                     try {
-                        JsonObject p = new JsonObject();
-                        p.addProperty("uuid", op.getUniqueId().toString());
-                        p.addProperty("name", op.getName());
-                        p.addProperty("playtimeSeconds", op.getStatistic(Statistic.PLAY_ONE_MINUTE) / 20L);
-                        p.addProperty("kills", op.getStatistic(Statistic.PLAYER_KILLS));
-                        p.addProperty("totemPops", op.getStatistic(Statistic.USE_ITEM, Material.TOTEM_OF_UNDYING));
-                        p.addProperty("jumps", op.getStatistic(Statistic.JUMP));
-                        // everything done on foot: walking, sprinting and sneaking, in kilometres
                         long cm = (long) op.getStatistic(Statistic.WALK_ONE_CM) + op.getStatistic(Statistic.SPRINT_ONE_CM)
                                 + op.getStatistic(Statistic.CROUCH_ONE_CM);
-                        p.addProperty("kmWalked", Math.round(cm / 1000.0) / 100.0);
-                        players.add(p);
+                        rows.add(new StatRow(op.getUniqueId(), name, new long[] {
+                                op.getStatistic(Statistic.PLAY_ONE_MINUTE) / 20L,
+                                op.getStatistic(Statistic.PLAYER_KILLS),
+                                op.getStatistic(Statistic.USE_ITEM, Material.TOTEM_OF_UNDYING),
+                                op.getStatistic(Statistic.JUMP),
+                                cm}));
                     } catch (Exception ignored) {
                         // a broken stats file must not stop the rest
                     }
                 }
                 if (next >= ids.size()) {
                     cancel();
-                    for (int i = 0; i < players.size(); i += 100) {
-                        JsonArray chunk = new JsonArray();
-                        for (int j = i; j < Math.min(players.size(), i + 100); j++) {
-                            chunk.add(players.get(j));
-                        }
-                        JsonObject body = new JsonObject();
-                        body.addProperty("type", "stats");
-                        body.add("players", chunk);
-                        sitePost(body);
-                    }
-                    if (sender != null) {
-                        sender.sendMessage(Component.text(players.size() + " spelers doorgestuurd.", NamedTextColor.GREEN));
-                    }
+                    done.accept(rows);
                 }
             }
         }.runTaskTimer(LowkeyCore.this, 1L, 1L);
+    }
+
+    /** Playtime, kills, totem pops, jumps and kilometres walked since the last reset, sent to the website. */
+    private void syncStats(CommandSender sender) {
+        if (!siteConfigured()) {
+            if (sender != null) {
+                sender.sendMessage(Component.text("Zet eerst site.token in config.yml.", NamedTextColor.RED));
+            }
+            return;
+        }
+        if (sender != null) {
+            sender.sendMessage(Component.text("Stats worden verstuurd...", NamedTextColor.GRAY));
+        }
+        collectStats(rows -> {
+            JsonArray players = new JsonArray();
+            rows.forEach(r -> players.add(statsJson(r, false)));
+            for (int i = 0; i < players.size(); i += 100) {
+                JsonArray chunk = new JsonArray();
+                for (int j = i; j < Math.min(players.size(), i + 100); j++) {
+                    chunk.add(players.get(j));
+                }
+                JsonObject body = new JsonObject();
+                body.addProperty("type", "stats");
+                body.add("players", chunk);
+                sitePost(body);
+            }
+            if (sender != null) {
+                sender.sendMessage(Component.text(players.size() + " spelers doorgestuurd.", NamedTextColor.GREEN));
+            }
+        });
+    }
+
+    /** Everybody starts again from zero: the current numbers become the baseline and the website table is emptied. */
+    private void resetStats(CommandSender sender) {
+        sender.sendMessage(Component.text("Stats worden gereset...", NamedTextColor.GRAY));
+        collectStats(rows -> {
+            statsBase.clear();
+            for (StatRow r : rows) {
+                statsBase.put(r.id, r.raw.clone());
+            }
+            saveStatsBase();
+            if (siteConfigured()) {
+                JsonArray players = new JsonArray();
+                rows.forEach(r -> players.add(statsJson(r, true)));
+                JsonObject body = new JsonObject();
+                body.addProperty("type", "statsReset");
+                body.add("players", players);
+                sitePost(body);
+            }
+            sender.sendMessage(Component.text("Klaar: " + rows.size() + " spelers staan weer op nul"
+                    + (siteConfigured() ? " en de tabel op de site is leeggemaakt." : ". (Geen site.token, de site is niet bijgewerkt.)"),
+                    NamedTextColor.GREEN));
+        });
     }
 
     // ------------------------------------------------------------------ no totems in shulker boxes
@@ -11368,8 +11900,34 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     /** Typing /lowkey (and pressing space / tab) suggests every possibility. */
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (!command.getName().equalsIgnoreCase("lowkey") || !isAdmin(sender)) {
+        String cmdName = command.getName().toLowerCase(Locale.ROOT);
+        if (cmdName.equals("reply")) {
             return List.of();
+        }
+        if (cmdName.equals("spectate")) {
+            return args.length == 1 && "leave".startsWith(args[0].toLowerCase(Locale.ROOT)) ? List.of("leave") : List.of();
+        }
+        if (!cmdName.equals("lowkey") || !isAdmin(sender)) {
+            return List.of();
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("tell")) {
+            List<String> names = new ArrayList<>();
+            for (Player p : getServer().getOnlinePlayers()) {
+                if (p.getName().toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))) {
+                    names.add(p.getName());
+                }
+            }
+            return names;
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("kijkoog")) {
+            List<String> eyeOptions = new ArrayList<>(Arrays.asList("plaats", "aan", "uit", "weg"));
+            eyeOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
+            return eyeOptions;
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("site")) {
+            List<String> siteOptions = new ArrayList<>(Arrays.asList("test", "stats", "queue", "reset"));
+            siteOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
+            return siteOptions;
         }
         if (args.length >= 2 && args[0].equalsIgnoreCase("mace")) {
             return mace.tabComplete(args);
@@ -11418,6 +11976,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("graceall");
             options.add("status");
             options.add("site");
+            options.add("tell");
+            options.add("kijkoog");
             options.add("check");
             options.add("spawnreset");
             options.add("rulesreset");
