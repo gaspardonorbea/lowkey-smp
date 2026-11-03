@@ -6410,6 +6410,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             items.add(finaleSpawn != null
                     ? new CheckItem(0, "Finale middelpunt", "gezet")
                     : new CheckItem(2, "Finale middelpunt", "nog niet gezet"));
+            double fwBorder = fw.getWorldBorder().getSize();
+            items.add(fwBorder > 100_000.0
+                    ? new CheckItem(2, "Finale border", "staat op " + finaleNum(fwBorder) + " blokken (standaard). Zet hem op de startgrootte.")
+                    : new CheckItem(0, "Finale border", finaleNum(fwBorder) + " blokken"));
         }
 
         items.add(serverClosed ? new CheckItem(1, "Server", "staat dicht voor spelers") : new CheckItem(0, "Server", "open"));
@@ -7235,7 +7239,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         WorldBorder border = finaleWorld().getWorldBorder();
         int phase = (int) ph[0];
         double p = finaleProgress(ph[1]);
-        double sizeNow = runStartSize + (runEndSize - runStartSize) * p;
+        double sizeNow = Math.max(1.0, Math.min(runStartSize, runStartSize + (runEndSize - runStartSize) * p));
+        if (Double.isNaN(sizeNow) || Double.isInfinite(sizeNow)) {
+            getLogger().warning("Finale border: ongeldige grootte, overgeslagen (start " + runStartSize + ", eind " + runEndSize + ")");
+            return;
+        }
         double cxNow = runStartCx + (runEndCx - runStartCx) * p;
         double czNow = runStartCz + (runEndCz - runStartCz) * p;
         if (phase == 3) {
@@ -7255,7 +7263,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         double pEnd = finaleProgress(ph[3]);
-        double sizeEnd = runStartSize + (runEndSize - runStartSize) * pEnd;
+        double sizeEnd = Math.max(1.0, Math.min(runStartSize, runStartSize + (runEndSize - runStartSize) * pEnd));
+        getLogger().info("Finale border: fase " + phase + ", nu " + sizeNow + ", doel " + sizeEnd + " in " + ph[2] + " ms");
         border.setSize(sizeNow);
         long seconds = Math.max(1L, (ph[2] + 999L) / 1000L);
         border.setSize(sizeEnd, seconds);
@@ -7488,6 +7497,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     finaleSendAllToLobby();
                 }
                 endAllViewing();
+                eyeAuto(false);
             }
         }, 480L);
     }
@@ -7712,6 +7722,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         WorldBorder border = finaleWorld().getWorldBorder();
         double startSize = border.getSize();
         double endSize = losers ? losersTargetSize : finaleTargetSize;
+        if (Double.isNaN(startSize) || startSize > 100_000.0) {
+            sender.sendMessage(Component.text("De border van deze wereld staat op " + finaleNum(startSize) + " blokken, dat is de "
+                    + "standaardwaarde. Zet hem eerst op de startgrootte (bijvoorbeeld /worldborder set 2000 in die wereld) en start dan opnieuw.",
+                    NamedTextColor.RED));
+            return;
+        }
         boolean targetSet = losers ? losersTargetSet : finaleTargetSet;
         double targetX = losers ? losersTargetX : finaleTargetX;
         double targetZ = losers ? losersTargetZ : finaleTargetZ;
@@ -7773,7 +7789,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 Component.text(losers ? "Overleef de storm!" : (finalePrepLeftMs > 0L ? "Bereid je voor!" : "Ga bovengronds!"),
                         NamedTextColor.WHITE),
                 Title.Times.times(Duration.ofMillis(400), Duration.ofMillis(3500), Duration.ofMillis(1000)));
+        final World finaleWorldNow = finaleWorldFor(losers);
         for (Player p : getServer().getOnlinePlayers()) {
+            if (!p.getWorld().equals(finaleWorldNow)) {
+                continue; // everybody else only gets the short message below
+            }
             p.showTitle(title);
             p.playSound(p.getLocation(), losers ? Sound.ENTITY_WITHER_SPAWN : Sound.ENTITY_ENDER_DRAGON_GROWL,
                     losers ? 0.5f : 0.6f, losers ? 0.8f : 1.0f);
@@ -7794,21 +7814,23 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     + (finalePrepMin == 1 ? " minuut" : " minuten") + ". Zoek je teamgenoten en maak je inventory klaar.",
                     NamedTextColor.WHITE);
         }
-        World finaleWorldNow = losers ? null : finaleMainWorld();
         for (Player p : getServer().getOnlinePlayers()) {
-            List<Component> lines = new ArrayList<>();
-            lines.add(headline);
-            lines.add(what);
-            lines.add(left);
-            if (pvp != null && finaleWorldNow != null && p.getWorld().equals(finaleWorldNow)) {
-                lines.add(pvp);
-            }
-            p.sendMessage(finaleBlock(lines));
-            if ((isLosersOut(p) || (isEliminated(p) && !inLosers(p))) && !p.getWorld().equals(finaleWorldFor(losers))) {
-                p.sendMessage(badgeLine(losers ? "De finale van het Verliezerseiland is begonnen. Typ /spectate om mee te kijken."
-                        : "De hoofdfinale is begonnen. Typ /spectate om mee te kijken.", NamedTextColor.WHITE));
+            if (p.getWorld().equals(finaleWorldNow)) {
+                List<Component> lines = new ArrayList<>();
+                lines.add(headline);
+                lines.add(what);
+                lines.add(left);
+                if (pvp != null) {
+                    lines.add(pvp);
+                }
+                p.sendMessage(finaleBlock(lines));
+            } else if (isLosersOut(p) || (isEliminated(p) && !inLosers(p))) {
+                p.sendMessage(badgeLine("De finale is begonnen! Druk op het grote oog of doe /spectate om mee te kijken.", NamedTextColor.WHITE));
+            } else {
+                p.sendMessage(badgeLine("De finale is begonnen!", NamedTextColor.WHITE));
             }
         }
+        eyeAuto(true);
         if (losers) {
             finaleLosersThunder();
         }
@@ -7875,6 +7897,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             finaleSendAllToLobby();
         }
         endAllViewing();
+        eyeAuto(false);
         finaleWinner = null;
         finaleElapsedMs = 0L;
         finaleDeaths.clear();
@@ -10887,6 +10910,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 d.setInterpolationDuration(20);
                 d.setTransformation(tlSpin(3.0f, eyeAngle));
             }
+        }
+    }
+
+    /** The eye switches itself on when a finale starts and off when it ends (it can still be toggled by hand). */
+    private void eyeAuto(boolean on) {
+        if (eyeLoc == null) {
+            return;
+        }
+        eyeOn = on;
+        saveState();
+        if (on) {
+            spawnEye();
+        } else {
+            removeEye(false);
         }
     }
 
