@@ -477,6 +477,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         boardScale = state.getDouble("board-scale", 2.0);
         tlLoc = readLoc(state, "timeline-loc");
         eyeLoc = readLoc(state, "eye-loc");
+        autoTeam = state.getBoolean("auto-team", false);
         eyeOn = state.getBoolean("eye-on", false);
         tlScale = state.getDouble("timeline-scale", 1.0);
         tlPack = state.getBoolean("timeline-pack", false);
@@ -1197,6 +1198,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }, 8L);
         getServer().getScheduler().runTaskLater(this, () -> joinSettling.remove(player.getUniqueId()), 60L);
         startTracking(player, true);
+        getServer().getScheduler().runTaskLater(this, () -> autoTeamJoin(player), 40L);
         getServer().getScheduler().runTask(this, this::updateTablist);
         if (lobbySpawn != null) {
             // everybody starts in the lobby
@@ -1308,6 +1310,18 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         // Verliezerseiland: dying there is final. No respawn, you can only watch.
         if (inLosers(player)) {
+            final boolean islandFinale = islandFinaleRunning(player);
+            // own grace on the island: a normal death and respawn on the island
+            if (!islandFinale && graceRemaining(player) > 0L) {
+                getServer().sendMessage(Component.text()
+                        .append(glyph(LOWKEY_BADGE_RED))
+                        .append(Component.space())
+                        .append(Component.text(player.getName(), NamedTextColor.WHITE))
+                        .append(Component.text(" is doodgegaan.", NamedTextColor.RED))
+                        .build());
+                islandGraceRespawn.add(player.getUniqueId());
+                return;
+            }
             final Location spot = player.getLocation().clone();
             final World world = spot.getWorld();
             setLosersOut(player, true);
@@ -1319,9 +1333,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     .append(Component.text(player.getName(), NamedTextColor.WHITE))
                     .append(Component.text(" is definitief uitgeschakeld!", NamedTextColor.RED))
                     .build();
-            for (Player other : player.getWorld().getPlayers()) {
-                other.sendMessage(out);
-            }
+            getServer().sendMessage(out); // every world sees it
+            playDeathSound();
             bloodBurst(spot.clone().add(0, 1, 0));
             event.setCancelled(true);
             event.setReviveHealth(20.0);
@@ -1357,12 +1370,31 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 player.teleport(safe);
                 player.setGameMode(GameMode.SPECTATOR);
-                player.sendMessage(Component.text()
-                        .append(glyph(LOWKEY_BADGE))
-                        .append(Component.space())
-                        .append(Component.text("Je bent definitief uitgeschakeld. Je kunt nog meekijken.",
-                                NamedTextColor.RED))
-                        .build());
+                if (islandFinale) {
+                    // the finale is running: keep watching until it is over, then everybody goes to the lobby
+                    player.sendMessage(Component.text()
+                            .append(glyph(LOWKEY_BADGE))
+                            .append(Component.space())
+                            .append(Component.text("Je bent definitief uitgeschakeld. Je kunt nog meekijken tot het einde van de finale.",
+                                    NamedTextColor.RED))
+                            .build());
+                } else {
+                    player.sendMessage(spectateMessage());
+                    getServer().getScheduler().runTaskLater(this, () -> {
+                        if (!player.isOnline() || !isLosersOut(player) || !inLosers(player)) {
+                            return;
+                        }
+                        if (lobbySpawn != null && lobbySpawn.getWorld() != null) {
+                            sendToLobby(player);
+                        } else {
+                            player.kick(Component.text()
+                                    .append(glyph(LOWKEY_BADGE))
+                                    .append(Component.space())
+                                    .append(Component.text("Je bent uitgeschakeld. Bedankt voor het spelen!", NamedTextColor.RED))
+                                    .build());
+                        }
+                    }, Math.max(1L, spectateSeconds * 20L));
+                }
                 player.showTitle(Title.title(
                         glyph(TITLE_GLYPH),
                         Component.empty(),
@@ -1394,6 +1426,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(Component.text(player.getName(), NamedTextColor.WHITE))
                 .append(Component.text(eliminatedSuffix, NamedTextColor.RED))
                 .build());
+        playDeathSound();
 
         bloodBurst(spot.clone().add(0, 1, 0));
 
@@ -1528,6 +1561,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void clearEliminated(Player target) {
         setEliminated(target, false);
         setLosersOut(target, false);
+        YamlConfiguration graceData = loadPlayerData(target.getUniqueId());
+        if (graceData.contains("identity.island-grace-given")) {
+            graceData.set("identity.island-grace-given", null);
+            savePlayerData(target.getUniqueId(), graceData);
+        }
         removeLosersItems(target);
         refreshTags(target);
         if (inLobby(target)) {
@@ -1942,6 +1980,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         writeLoc(state, "timeline-loc", tlLoc);
         writeLoc(state, "eye-loc", eyeLoc);
         state.set("eye-on", eyeOn);
+        state.set("auto-team", autoTeam);
         state.set("timeline-scale", tlScale);
         state.set("timeline-pack", tlPack);
         for (int i = 0; i < tlEvents.size(); i++) {
@@ -2675,10 +2714,28 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         List<Player> arrived = new ArrayList<>();
         int moved = 0;
+        int crewWatching = 0;
         List<String> noTeam = new ArrayList<>();
         for (Player player : new ArrayList<>(getServer().getOnlinePlayers())) {
             if (isEliminated(player)) {
                 continue;
+            }
+            // crew without a team watches: spectator at the spawn of a random team
+            if (isCrew(player) && getSide(player) == Side.NONE) {
+                final Side pick = Math.random() < 0.5 ? Side.NOORD : Side.ZUID;
+                Location crewSpawn = teamSpawn(pick);
+                if (crewSpawn != null) {
+                    player.setGameMode(GameMode.SPECTATOR);
+                    player.teleport(safeLocation(crewSpawn.clone()));
+                    getServer().getScheduler().runTaskLater(this, () -> {
+                        if (player.isOnline()) {
+                            player.setGameMode(GameMode.SPECTATOR); // nothing may switch it back after the world change
+                        }
+                    }, 10L);
+                    player.sendMessage(badgeLine("Je kijkt als crew mee bij " + (pick == Side.NOORD ? "Noord" : "Zuid") + " (spectator).", NamedTextColor.WHITE));
+                    crewWatching++;
+                    continue;
+                }
             }
             if (getSide(player) == Side.NONE) {
                 noTeam.add(player.getName());
@@ -2697,7 +2754,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         welcomeTitle(arrived);
         String extra = noTeam.isEmpty() ? "" : " Zonder team (blijven in de lobby): " + String.join(", ", noTeam) + ".";
         admin.sendMessage(Component.text("De server is gelanceerd! " + moved
-                + " spelers zijn naar hun team spawn gestuurd." + extra, NamedTextColor.GREEN));
+                + " spelers zijn naar hun team spawn gestuurd en " + crewWatching + " crew kijkt mee als spectator." + extra,
+                NamedTextColor.GREEN));
     }
 
     /** Undoes the launch (for testing): the lobby item says "nog niet open" again. Nobody is moved. */
@@ -2803,6 +2861,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     @EventHandler
     public void onRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
+        if (islandGraceRespawn.remove(player.getUniqueId())) {
+            if (!event.isBedSpawn() && !event.isAnchorSpawn() && losersSpawn != null && losersSpawn.getWorld() != null) {
+                event.setRespawnLocation(losersSpawn);
+            }
+            return;
+        }
         if (event.isBedSpawn() || event.isAnchorSpawn() || isEliminated(player)) {
             return;
         }
@@ -5088,6 +5152,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             adminTell(sender, args);
             return true;
         }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("autoteam")) {
+            String what = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "status";
+            if (what.equals("aan")) {
+                setAutoTeam(true);
+            } else if (what.equals("uit")) {
+                setAutoTeam(false);
+            }
+            sender.sendMessage(Component.text("Auto team staat " + (autoTeam ? "aan: spelers die joinen zonder team krijgen zelf een team."
+                    : "uit."), autoTeam ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
+            return true;
+        }
         if (args.length >= 1 && args[0].equalsIgnoreCase("kijkoog")) {
             eyeCommand(sender, args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "");
             return true;
@@ -6161,7 +6236,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 () -> confirmWipeOffline(admin, offlineTotal)));
         buttons.add(teamBlank(admin, 28));
         buttons.add(teamBlank(admin, 28));
-        buttons.add(teamBlank(admin, 130));
+        buttons.add(button(iconLabel(M_TEAM, autoTeam ? "Auto team: aan" : "Auto team: uit", autoTeam ? NamedTextColor.GREEN : NamedTextColor.RED),
+                "Spelers die joinen zonder team krijgen zelf een team (het kleinste). Gaat vanzelf aan na een team event.", 130, () -> {
+                    setAutoTeam(!autoTeam);
+                    openTeamsMenu(admin);
+                }));
         buttons.add(teamBlank(admin, 28));
 
         // Grace voor iedereen is the exit button of the dialog, so it always sits in the middle under everything
@@ -6459,6 +6538,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 dead++;
             }
         }
+        items.add(new CheckItem(autoTeam ? 0 : 1, "Auto team", autoTeam ? "aan, nieuwe spelers krijgen zelf een team"
+                : "uit (gaat vanzelf aan na het team event)"));
         items.add(noTeam == 0 ? new CheckItem(0, "Teams", "iedereen zit in een team")
                 : new CheckItem(1, "Teams", noTeam + " spelers zonder team"));
         items.add(offline == 0 ? new CheckItem(0, "Spelerslijst", total + " spelers")
@@ -7495,6 +7576,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             if (finaleState == FinaleState.ENDED) {
                 if (!finaleLosers) {
                     finaleSendAllToLobby();
+                } else {
+                    finaleSendOutToLobby();
                 }
                 endAllViewing();
                 eyeAuto(false);
@@ -7790,6 +7873,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         NamedTextColor.WHITE),
                 Title.Times.times(Duration.ofMillis(400), Duration.ofMillis(3500), Duration.ofMillis(1000)));
         final World finaleWorldNow = finaleWorldFor(losers);
+        if (finaleWorldNow != null) {
+            finaleWorldNow.setTime(6000L); // it is noon when the finale starts, in both finales
+        }
         for (Player p : getServer().getOnlinePlayers()) {
             if (!p.getWorld().equals(finaleWorldNow)) {
                 continue; // everybody else only gets the short message below
@@ -7831,6 +7917,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
         }
         eyeAuto(true);
+        if (losers && finaleWorldNow != null) {
+            for (Player p : finaleWorldNow.getPlayers()) {
+                if (graceRemaining(p) > 0L) {
+                    setGrace(p, 0L); // grace ends when the island finale starts
+                }
+            }
+        }
         if (losers) {
             finaleLosersThunder();
         }
@@ -7895,6 +7988,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finalePrepAnnounced.clear();
         if (!finaleLosers) {
             finaleSendAllToLobby();
+        } else {
+            finaleSendOutToLobby();
         }
         endAllViewing();
         eyeAuto(false);
@@ -8976,7 +9071,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         player.setHealth(maxHealth == null ? 20.0 : maxHealth.getValue());
         player.setFoodLevel(20);
         player.setFallDistance(0f);
+        final boolean newGrace = grantIslandGrace(player);
         player.teleport(losersSpawn);
+        if (newGrace) {
+            getServer().getScheduler().runTaskLater(this, () -> {
+                long left = graceRemaining(player);
+                if (player.isOnline() && left > 0L) {
+                    player.sendMessage(graceMessage(left));
+                }
+            }, 40L);
+        }
     }
 
     /** Gives the red star to everybody who is eliminated and waiting in the lobby. */
@@ -9992,6 +10096,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void eventStartOutro() {
         eventPhase = 3;
         eventTick = 0;
+        if (!eventTest) {
+            // everybody who joins after the team event gets a team by himself
+            setAutoTeam(true);
+            for (Player p : getServer().getOnlinePlayers()) {
+                if (isAdmin(p)) {
+                    p.sendMessage(badgeLine("Auto team staat nu aan: nieuwe spelers krijgen zelf een team. Uitzetten kan met /lowkey autoteam uit.", NamedTextColor.GRAY));
+                }
+            }
+        }
         if (eventCenterHead != null && eventCenterHead.isValid()) {
             eventCenterHead.remove();
         }
@@ -10832,6 +10945,100 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (gain > 0 && countTotems(player) + gain > limit) {
             event.setCancelled(true);
             totemDenied(player);
+        }
+    }
+
+    // ------------------------------------------------------------------ auto team for late joiners
+
+    private boolean autoTeam;
+
+    private void setAutoTeam(boolean on) {
+        autoTeam = on;
+        saveState();
+    }
+
+    /** Somebody joins without a team while auto team is on: he goes to the smaller team (random when equal). */
+    private void autoTeamJoin(Player player) {
+        if (!autoTeam || !player.isOnline() || isCrew(player) || isEliminated(player) || isLosersOut(player)
+                || getSide(player) != Side.NONE) {
+            return;
+        }
+        int noord = 0;
+        int zuid = 0;
+        for (TeamEntry e : collectTeamEntries()) {
+            if (e.dead || e.id.equals(player.getUniqueId())) {
+                continue;
+            }
+            if (e.side == Side.NOORD) {
+                noord++;
+            } else if (e.side == Side.ZUID) {
+                zuid++;
+            }
+        }
+        final Side side = noord < zuid ? Side.NOORD : (zuid < noord ? Side.ZUID : (Math.random() < 0.5 ? Side.NOORD : Side.ZUID));
+        setSide(player, side);
+        final String name = side == Side.NOORD ? "NOORD" : "ZUID";
+        final TextColor color = TextColor.color(side.rgb);
+        player.showTitle(Title.title(Component.text("Jij bent:", NamedTextColor.WHITE, TextDecoration.BOLD), Component.empty(),
+                Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(1400), Duration.ofMillis(200))));
+        getServer().getScheduler().runTaskLater(this, () -> {
+            if (!player.isOnline()) {
+                return;
+            }
+            player.showTitle(Title.title(Component.text(name, color, TextDecoration.BOLD), Component.empty(),
+                    Title.Times.times(Duration.ofMillis(200), Duration.ofMillis(3000), Duration.ofMillis(800))));
+            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, side == Side.NOORD ? 0.75f : 1.3f);
+            player.sendMessage(badgeLine("Je zit in team " + (side == Side.NOORD ? "Noord" : "Zuid") + ".", NamedTextColor.WHITE));
+        }, 36L);
+    }
+
+    // ------------------------------------------------------------------ death sound and island grace
+
+    /** A low wither sound for everybody on the server, in every world, when somebody is eliminated. */
+    private void playDeathSound() {
+        for (Player p : getServer().getOnlinePlayers()) {
+            p.playSound(p.getLocation(), Sound.ENTITY_WITHER_SPAWN, 0.6f, 0.7f);
+        }
+    }
+
+    private final Set<UUID> islandGraceRespawn = new HashSet<>();
+
+    private long islandGraceMillis() {
+        return Math.max(0L, getConfig().getLong("losers-grace-minutes", 120L)) * 60_000L;
+    }
+
+    /** The first time somebody enters the Verliezerseiland he gets his own grace there (default 2 hours). */
+    private boolean grantIslandGrace(Player player) {
+        long millis = islandGraceMillis();
+        if (millis <= 0L || isCrew(player)) {
+            return false;
+        }
+        YamlConfiguration data = loadPlayerData(player.getUniqueId());
+        if (data.getBoolean("identity.island-grace-given", false)) {
+            return false;
+        }
+        data.set("identity.island-grace-given", true);
+        savePlayerData(player.getUniqueId(), data);
+        setGrace(player, millis);
+        return true;
+    }
+
+    /** True while the finale of the island runs and this player is in that world. */
+    private boolean islandFinaleRunning(Player player) {
+        return finaleLosers && finaleState != FinaleState.IDLE && finaleState != FinaleState.ENDED
+                && player.getWorld().equals(finaleWorld());
+    }
+
+    /** After the island finale everybody who is out and still in the island world goes to the lobby. */
+    private void finaleSendOutToLobby() {
+        World lw = losersWorld();
+        if (lw == null) {
+            return;
+        }
+        for (Player p : new ArrayList<>(lw.getPlayers())) {
+            if (isLosersOut(p)) {
+                sendToLobby(p);
+            }
         }
     }
 
@@ -11956,6 +12163,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             }
             return names;
         }
+        if (args.length == 2 && args[0].equalsIgnoreCase("autoteam")) {
+            List<String> teamOptions = new ArrayList<>(Arrays.asList("aan", "uit", "status"));
+            teamOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
+            return teamOptions;
+        }
         if (args.length == 2 && args[0].equalsIgnoreCase("kijkoog")) {
             List<String> eyeOptions = new ArrayList<>(Arrays.asList("plaats", "aan", "uit", "weg"));
             eyeOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
@@ -12014,6 +12226,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("status");
             options.add("site");
             options.add("tell");
+            options.add("autoteam");
             options.add("kijkoog");
             options.add("check");
             options.add("spawnreset");
