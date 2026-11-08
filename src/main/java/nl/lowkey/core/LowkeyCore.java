@@ -756,7 +756,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     private void setSide(Player player, Side side) {
-        getSide(player); // makes sure the identity is loaded
+        Side before = getSide(player); // makes sure the identity is loaded
         storedSide.put(player.getUniqueId(), side);
         PersistentDataContainer data = player.getPersistentDataContainer();
         if (side == Side.NONE) {
@@ -766,6 +766,34 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         saveIdentity(player);
         refreshTags(player);
+        if (before != Side.NONE && side != Side.NONE && before != side) {
+            teamSwitched(player, side);
+        }
+    }
+
+    /**
+     * A player who already had a team moves to the other one: everything that still points at the old team is dropped
+     * (bed or anchor spawn and the saved last position), and somebody who is playing in the main world right now is
+     * sent to the spawn of the new team.
+     */
+    private void teamSwitched(Player player, Side side) {
+        player.setRespawnLocation(null);
+        YamlConfiguration data = loadPlayerData(player.getUniqueId());
+        if (data.contains("last")) {
+            data.set("last", null);
+            savePlayerData(player.getUniqueId(), data);
+        }
+        Location spawn = teamSpawn(side);
+        if (spawn == null || spawn.getWorld() == null || !launched
+                || isEliminated(player) || isLosersOut(player)
+                || inLobby(player) || inLosers(player) || inFinaleWorld(player)
+                || !inMainGroup(player.getWorld())) {
+            return;
+        }
+        player.setFallDistance(0f);
+        teleportSafely(player, spawn);
+        player.sendMessage(badgeLine("Je zit nu in team " + (side == Side.NOORD ? "Noord" : "Zuid")
+                + " en bent naar de spawn van je nieuwe team gestuurd.", NamedTextColor.WHITE));
     }
 
     // ------------------------------------------------------------------ grace period
@@ -10149,8 +10177,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         YamlConfiguration data = loadPlayerData(id);
+        Side before = Side.fromId(data.getString("identity.side"));
         data.set("identity.migrated", true);
         data.set("identity.side", side == Side.NONE ? null : side.id);
+        if (before != null && before != Side.NONE && side != Side.NONE && before != side) {
+            data.set("last", null); // his old position lies in the other team's area
+        }
         savePlayerData(id, data);
     }
 
