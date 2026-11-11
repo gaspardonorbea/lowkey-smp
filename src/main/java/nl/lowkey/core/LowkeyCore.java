@@ -1332,6 +1332,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     public void onDeath(PlayerDeathEvent event) {
         final Player player = event.getPlayer();
 
+        countKill(player);
+
         // keep the real death message for the website, but never show the vanilla one
         final Component deathMsg = event.deathMessage();
         event.deathMessage(null);
@@ -1587,6 +1589,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * for testing. Does not touch team, grace, location or inventory.
      */
     private void clearEliminated(Player target) {
+        forgetIslandSpot(target.getUniqueId());
         setEliminated(target, false);
         setLosersOut(target, false);
         YamlConfiguration graceData = loadPlayerData(target.getUniqueId());
@@ -2521,6 +2524,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         UUID id = player.getUniqueId();
         boolean eliminated = isEliminated(player);
 
+        if (eliminated && inLosers(player) && !isLosersOut(player)) {
+            // alive on the Verliezerseiland: remember the spot, so the red star brings him back exactly there
+            YamlConfiguration islandData = loadPlayerData(id);
+            writeLoc(islandData, "losers-last", player.getLocation());
+            islandData.set("losers-last-world", player.getWorld().getUID().toString());
+            savePlayerData(id, islandData);
+        }
+
         if (!eliminated) {
             YamlConfiguration data = loadPlayerData(id);
             if (!inLobby(player) && !inLosers(player) && data.getBoolean("entered", false)) {
@@ -2860,6 +2871,50 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 NamedTextColor.GREEN));
     }
 
+    /**
+     * Diagnostics for "I was teleported a few blocks": logs every small teleport that a plugin or command caused,
+     * together with the code that asked for it, so the console shows which plugin does it.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTeleportDebug(PlayerTeleportEvent event) {
+        PlayerTeleportEvent.TeleportCause cause = event.getCause();
+        if (cause != PlayerTeleportEvent.TeleportCause.PLUGIN && cause != PlayerTeleportEvent.TeleportCause.UNKNOWN) {
+            return;
+        }
+        Location from = event.getFrom();
+        Location to = event.getTo();
+        if (to == null || from.getWorld() == null || !from.getWorld().equals(to.getWorld())) {
+            return;
+        }
+        double distance = from.distance(to);
+        if (distance < 2.0 || distance > 60.0) {
+            return;
+        }
+        StringBuilder callers = new StringBuilder();
+        int shown = 0;
+        for (StackTraceElement frame : new Throwable().getStackTrace()) {
+            String cls = frame.getClassName();
+            if (cls.startsWith("java.") || cls.startsWith("jdk.") || cls.startsWith("org.bukkit.")
+                    || cls.startsWith("io.papermc.") || cls.startsWith("net.minecraft.")
+                    || cls.startsWith("org.spigotmc.") || cls.startsWith("com.destroystokyo.")
+                    || cls.startsWith("ca.spottedleaf.") || cls.startsWith("co.aikar.")
+                    || frame.getMethodName().equals("onTeleportDebug")) {
+                continue;
+            }
+            if (shown > 0) {
+                callers.append(" <- ");
+            }
+            callers.append(cls).append('.').append(frame.getMethodName()).append(':').append(frame.getLineNumber());
+            if (++shown >= 3) {
+                break;
+            }
+        }
+        getLogger().info(String.format("[tp-debug] %s %s %.1f blocks in %s (%d,%d,%d -> %d,%d,%d) via %s",
+                event.getPlayer().getName(), cause.name(), distance, from.getWorld().getName(),
+                from.getBlockX(), from.getBlockY(), from.getBlockZ(), to.getBlockX(), to.getBlockY(), to.getBlockZ(),
+                shown == 0 ? "?" : callers.toString()));
+    }
+
     /** Grace badge shows in the main world only, so the tags are rebuilt whenever someone changes world. */
     @EventHandler
     public void onWorldChange(PlayerChangedWorldEvent event) {
@@ -2875,6 +2930,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         refreshTags(player);
         updateTablist();
+        // whoever arrives in the main world (by any route, e.g. back from the island) gets his last position remembered
+        if (inMainGroup(player.getWorld()) && !inLobby(player) && !inLosers(player)) {
+            YamlConfiguration enteredData = loadPlayerData(player.getUniqueId());
+            if (!enteredData.getBoolean("entered", false)) {
+                enteredData.set("entered", true);
+                savePlayerData(player.getUniqueId(), enteredData);
+            }
+        }
         // coming from the lobby into the game: this is where the grace message belongs
         boolean fromLobby = lobbySpawn != null && event.getFrom().equals(lobbySpawn.getWorld());
         if (fromLobby && !inLobby(player) && !isEliminated(player)) {
@@ -5193,6 +5256,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("kijkoog")) {
             eyeCommand(sender, args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "");
+            return true;
+        }
+        if (args.length >= 1 && args[0].equalsIgnoreCase("kills")) {
+            killsCommand(sender, args);
             return true;
         }
         if (args.length >= 1 && args[0].equalsIgnoreCase("site")) {
@@ -8831,6 +8898,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         losersOpen = false;
         losersEnded = false;
         saveState();
+        clearIslandGraceFlags();
         sender.sendMessage(Component.text("Alle schakelaars staan weer als aan het begin: niet gelanceerd, main wereld "
                 + "open, Nether, End en grenzen dicht, Verliezerseiland dicht. Niemand is verplaatst en "
                 + "geen team is veranderd.", NamedTextColor.GREEN));
@@ -9100,7 +9168,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         player.setFoodLevel(20);
         player.setFallDistance(0f);
         final boolean newGrace = grantIslandGrace(player);
-        player.teleport(losersSpawn);
+        Location islandSpot = takeIslandSpot(player);
+        if (islandSpot != null) {
+            teleportSafely(player, islandSpot);
+        } else {
+            player.teleport(losersSpawn);
+        }
         if (newGrace) {
             getServer().getScheduler().runTaskLater(this, () -> {
                 long left = graceRemaining(player);
@@ -9108,6 +9181,36 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     player.sendMessage(graceMessage(left));
                 }
             }, 40L);
+        }
+    }
+
+    /**
+     * The spot where this player stood on the island the last time he left it (lobby or disconnect), or null when
+     * there is none or it belongs to an island that no longer exists. The saved spot is used up by this call.
+     */
+    private Location takeIslandSpot(Player player) {
+        UUID id = player.getUniqueId();
+        YamlConfiguration data = loadPlayerData(id);
+        Location spot = readLoc(data, "losers-last");
+        String worldId = data.getString("losers-last-world");
+        World island = losersSpawn == null ? null : losersSpawn.getWorld();
+        boolean valid = spot != null && spot.getWorld() != null && island != null && spot.getWorld().equals(island)
+                && island.getUID().toString().equals(worldId);
+        if (data.contains("losers-last") || data.contains("losers-last-world")) {
+            data.set("losers-last", null);
+            data.set("losers-last-world", null);
+            savePlayerData(id, data);
+        }
+        return valid ? spot : null;
+    }
+
+    /** Forgets the saved island spot of a player (he is alive in the main world again). */
+    private void forgetIslandSpot(UUID id) {
+        YamlConfiguration data = loadPlayerData(id);
+        if (data.contains("losers-last") || data.contains("losers-last-world")) {
+            data.set("losers-last", null);
+            data.set("losers-last-world", null);
+            savePlayerData(id, data);
         }
     }
 
@@ -9213,6 +9316,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** Puts a loser back into the real game: alive again, at the spawn of his team. */
     private void sendBackAlive(Player target) {
+        forgetIslandSpot(target.getUniqueId());
         setEliminated(target, false);
         setLosersOut(target, false);
         removeLosersItems(target);
@@ -11697,7 +11801,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         long[] base = statsBase.get(r.id);
         long[] v = new long[5];
         for (int i = 0; i < 5; i++) {
-            v[i] = zero ? 0L : Math.max(0L, r.raw[i] - (base == null ? 0L : base[i]));
+            v[i] = zero ? 0L : (i == 1 ? r.raw[i] : Math.max(0L, r.raw[i] - (base == null ? 0L : base[i])));
         }
         JsonObject p = new JsonObject();
         p.addProperty("uuid", r.id.toString());
@@ -11731,7 +11835,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                                 + op.getStatistic(Statistic.CROUCH_ONE_CM);
                         rows.add(new StatRow(op.getUniqueId(), name, new long[] {
                                 op.getStatistic(Statistic.PLAY_ONE_MINUTE) / 20L,
-                                op.getStatistic(Statistic.PLAYER_KILLS),
+                                loadPlayerData(op.getUniqueId()).getInt("stats.kills", 0),
                                 op.getStatistic(Statistic.USE_ITEM, Material.TOTEM_OF_UNDYING),
                                 op.getStatistic(Statistic.JUMP),
                                 cm}));
@@ -11781,6 +11885,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void resetStats(CommandSender sender) {
         sender.sendMessage(Component.text("Stats worden gereset...", NamedTextColor.GRAY));
         collectStats(rows -> {
+            for (UUID killId : allPlayerIds()) {
+                YamlConfiguration killData = loadPlayerData(killId);
+                if (killData.contains("stats.kills")) {
+                    killData.set("stats.kills", null);
+                    savePlayerData(killId, killData);
+                }
+            }
             statsBase.clear();
             for (StatRow r : rows) {
                 statsBase.put(r.id, r.raw.clone());
@@ -11798,6 +11909,112 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     + (siteConfigured() ? " en de tabel op de site is leeggemaakt." : ". (Geen site.token, de site is niet bijgewerkt.)"),
                     NamedTextColor.GREEN));
         });
+    }
+
+    // ------------------------------------------------------------------ kills for the website
+
+    /**
+     * A kill only counts for the website when neither the killer nor the victim has grace left. The kills are counted
+     * here (players/<uuid>.yml, stats.kills) and not taken from the Minecraft statistic, because that one also counts
+     * every kill made in grace and cannot be corrected.
+     */
+    private void countKill(Player victim) {
+        Player killer = victim.getKiller();
+        if (killer == null || killer.equals(victim) || inLobby(victim)) {
+            return;
+        }
+        if (graceRemaining(killer) > 0L || graceRemaining(victim) > 0L) {
+            return;
+        }
+        YamlConfiguration data = loadPlayerData(killer.getUniqueId());
+        data.set("stats.kills", data.getInt("stats.kills", 0) + 1);
+        savePlayerData(killer.getUniqueId(), data);
+    }
+
+    /** /lowkey kills <speler> [aantal]: shows or sets the kills that go to the website, also for offline players. */
+    private void killsCommand(CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage(Component.text("Gebruik: /lowkey kills <speler> [aantal]  (zonder aantal zie je de kills, "
+                    + "met aantal zet je ze, 0 wist ze)", NamedTextColor.GRAY));
+            return;
+        }
+        UUID id = null;
+        String name = args[1];
+        Player online = getServer().getPlayerExact(args[1]);
+        if (online != null) {
+            id = online.getUniqueId();
+            name = online.getName();
+        } else {
+            for (UUID known : allPlayerIds()) {
+                String known_name = getServer().getOfflinePlayer(known).getName();
+                if (known_name != null && known_name.equalsIgnoreCase(args[1])) {
+                    id = known;
+                    name = known_name;
+                    break;
+                }
+            }
+        }
+        if (id == null) {
+            sender.sendMessage(Component.text("Die speler ken ik niet.", NamedTextColor.RED));
+            return;
+        }
+        YamlConfiguration data = loadPlayerData(id);
+        if (args.length == 2) {
+            sender.sendMessage(Component.text(name + " heeft " + data.getInt("stats.kills", 0)
+                    + " kills (zonder kills in grace).", NamedTextColor.GRAY));
+            return;
+        }
+        int amount;
+        try {
+            amount = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            amount = -1;
+        }
+        if (amount < 0 || amount > 100000) {
+            sender.sendMessage(Component.text("Geef een aantal van 0 of hoger.", NamedTextColor.RED));
+            return;
+        }
+        data.set("stats.kills", amount == 0 ? null : amount);
+        savePlayerData(id, data);
+        sender.sendMessage(Component.text(name + " heeft nu " + amount + " kills. De site wordt bijgewerkt.",
+                NamedTextColor.GREEN));
+        syncStats(null);
+    }
+
+    /** The island grace is handed out once per player; this makes it available again for everybody (after tests). */
+    private void clearIslandGraceFlags() {
+        for (UUID id : allPlayerIds()) {
+            YamlConfiguration data = loadPlayerData(id);
+            if (data.contains("identity.island-grace-given")) {
+                data.set("identity.island-grace-given", null);
+                savePlayerData(id, data);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ advancements stay in their own world
+
+    /**
+     * The vanilla advancement message goes to everybody on the server. Now only the players in the same world group
+     * (main, Verliezerseiland, finale) see it, and nobody in the lobby gets any.
+     */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onAdvancementDone(org.bukkit.event.player.PlayerAdvancementDoneEvent event) {
+        Component message = event.message();
+        if (message == null) {
+            return;
+        }
+        event.message(null);
+        int group = worldGroup(event.getPlayer());
+        if (group == 0) {
+            return;
+        }
+        for (Player viewer : getServer().getOnlinePlayers()) {
+            if (worldGroup(viewer) == group) {
+                viewer.sendMessage(message);
+            }
+        }
+        getServer().getConsoleSender().sendMessage(message);
     }
 
     // ------------------------------------------------------------------ no totems in shulker boxes
@@ -12066,6 +12283,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void launchCleanSlate() {
         clearAllLastLocations();
         resetPlaytimeData(); // the leaderboard starts at zero with the official launch
+        clearIslandGraceFlags();
         for (UUID id : allPlayerIds()) {
             if (getServer().getPlayer(id) != null) {
                 continue;
@@ -12257,6 +12475,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             options.add("graceall");
             options.add("status");
             options.add("site");
+            options.add("kills");
             options.add("tell");
             options.add("autoteam");
             options.add("kijkoog");
@@ -12300,7 +12519,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     options.add(ban.name);
                 }
             } else if (sub.equals("grace") || sub.equals("team") || sub.equals("revive") || sub.equals("crew")
-                    || sub.equals("give") || sub.equals("tolobby") || sub.equals("verban")) {
+                    || sub.equals("give") || sub.equals("tolobby") || sub.equals("verban") || sub.equals("kills")) {
                 for (Player player : getServer().getOnlinePlayers()) {
                     options.add(player.getName());
                 }
