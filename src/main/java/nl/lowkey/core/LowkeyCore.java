@@ -2532,9 +2532,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             savePlayerData(id, islandData);
         }
 
-        if (!eliminated) {
+        {
+            // everybody's real inventory is put away first, also the ones who are alive on the Verliezerseiland: the
+            // stars and the rules book overwrite slots 5, 6 and 9 in the lobby, so nothing may stay in the inventory
             YamlConfiguration data = loadPlayerData(id);
-            if (!inLobby(player) && !inLosers(player) && data.getBoolean("entered", false)) {
+            if (!eliminated && !inLobby(player) && !inLosers(player) && data.getBoolean("entered", false)) {
                 writeLoc(data, "last", player.getLocation());
             }
             if (!data.getBoolean("stashed", false)) {
@@ -9158,14 +9160,17 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 || isBannedFromLosers(player) || losersSpawn == null || losersSpawn.getWorld() == null) {
             return;
         }
-        removeLobbyItems(player);
-        removeLosersItems(player);
+        // the real inventory comes back (and the lobby items go); health and food are what they were when he left
+        final boolean hadStash = loadPlayerData(player.getUniqueId()).getBoolean("stashed", false);
+        restoreInventory(player);
         if (!isBypass(player)) {
             player.setGameMode(GameMode.SURVIVAL);
         }
-        AttributeInstance maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
-        player.setHealth(maxHealth == null ? 20.0 : maxHealth.getValue());
-        player.setFoodLevel(20);
+        if (!hadStash) {
+            AttributeInstance maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
+            player.setHealth(maxHealth == null ? 20.0 : maxHealth.getValue());
+            player.setFoodLevel(20);
+        }
         player.setFallDistance(0f);
         final boolean newGrace = grantIslandGrace(player);
         Location islandSpot = takeIslandSpot(player);
@@ -9319,8 +9324,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         forgetIslandSpot(target.getUniqueId());
         setEliminated(target, false);
         setLosersOut(target, false);
-        removeLosersItems(target);
-        removeLobbyItems(target);
+        restoreInventory(target); // his own things come back, the stars go
         Location dest = teamSpawn(getSide(target));
         if (dest == null || dest.getWorld() == null) {
             dest = gameWorld().getSpawnLocation();
