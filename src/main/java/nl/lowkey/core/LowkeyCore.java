@@ -9160,7 +9160,91 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     boolean inLosers(Player player) {
-        return losersSpawn != null && losersSpawn.getWorld() != null && player.getWorld().equals(losersSpawn.getWorld());
+        return losersSpawn != null && losersSpawn.getWorld() != null && isLosersWorld(player.getWorld());
+    }
+
+    /** The island itself plus its own Nether and End: they never connect to the main world. */
+    private boolean isLosersWorld(World world) {
+        if (world == null) {
+            return false;
+        }
+        String name = world.getName();
+        return name.equals(LOSERS_WORLD) || name.equals(LOSERS_WORLD + "_nether") || name.equals(LOSERS_WORLD + "_the_end");
+    }
+
+    /** The Nether or End that belongs to the island; it is created the first time somebody goes through a portal. */
+    private World losersDimension(World.Environment environment) {
+        String name = environment == World.Environment.NETHER ? LOSERS_WORLD + "_nether" : LOSERS_WORLD + "_the_end";
+        World world = Bukkit.getWorld(name);
+        if (world == null) {
+            world = new WorldCreator(name).environment(environment).createWorld();
+        }
+        return world;
+    }
+
+    /**
+     * Portals on the island stay on the island: the overworld connects to the island's own Nether and End, and they
+     * lead back to the island. Without this a portal would send the player to the main Nether, where he could walk
+     * back into the main world.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onLosersPortal(PlayerPortalEvent event) {
+        Player player = event.getPlayer();
+        World from = player.getWorld();
+        if (losersSpawn == null || losersSpawn.getWorld() == null || !isLosersWorld(from)) {
+            return;
+        }
+        PlayerTeleportEvent.TeleportCause cause = event.getCause();
+        if (cause != PlayerTeleportEvent.TeleportCause.NETHER_PORTAL
+                && cause != PlayerTeleportEvent.TeleportCause.END_PORTAL) {
+            return;
+        }
+        if (finaleLosers && (finaleState == FinaleState.RUNNING || finaleState == FinaleState.PAUSED)) {
+            event.setCancelled(true);
+            player.sendActionBar(Component.text("Tijdens de finale kun je niet door een portaal.", NamedTextColor.RED));
+            return;
+        }
+        Location origin = event.getFrom();
+        World island = losersSpawn.getWorld();
+        World.Environment here = from.getEnvironment();
+        if (cause == PlayerTeleportEvent.TeleportCause.NETHER_PORTAL) {
+            if (here == World.Environment.NORMAL) {
+                World nether = losersDimension(World.Environment.NETHER);
+                if (nether == null) {
+                    event.setCancelled(true);
+                    return;
+                }
+                double y = Math.max(10.0, Math.min(120.0, origin.getY()));
+                event.setCanCreatePortal(true);
+                event.setTo(new Location(nether, origin.getX() / 8.0, y, origin.getZ() / 8.0,
+                        origin.getYaw(), origin.getPitch()));
+            } else if (here == World.Environment.NETHER) {
+                event.setCanCreatePortal(true);
+                event.setTo(new Location(island, origin.getX() * 8.0, origin.getY(), origin.getZ() * 8.0,
+                        origin.getYaw(), origin.getPitch()));
+            }
+            return;
+        }
+        // end portal
+        if (here == World.Environment.NORMAL) {
+            World end = losersDimension(World.Environment.THE_END);
+            if (end == null) {
+                event.setCancelled(true);
+                return;
+            }
+            end.getChunkAt(6, 0); // the platform chunk has to exist before blocks can be set
+            for (int x = 98; x <= 102; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    end.getBlockAt(x, 48, z).setType(Material.OBSIDIAN, false);
+                    for (int y = 49; y <= 51; y++) {
+                        end.getBlockAt(x, y, z).setType(Material.AIR, false);
+                    }
+                }
+            }
+            event.setTo(new Location(end, 100.5, 49.0, 0.5, 90f, 0f));
+        } else if (here == World.Environment.THE_END) {
+            event.setTo(losersSpawn.clone());
+        }
     }
 
     /** Lobby, main world and Verliezerseiland each have their own tab list, chat and private messages. */
@@ -9300,9 +9384,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         YamlConfiguration data = loadPlayerData(id);
         Location spot = readLoc(data, "losers-last");
         String worldId = data.getString("losers-last-world");
-        World island = losersSpawn == null ? null : losersSpawn.getWorld();
-        boolean valid = spot != null && spot.getWorld() != null && island != null && spot.getWorld().equals(island)
-                && island.getUID().toString().equals(worldId);
+        boolean valid = spot != null && spot.getWorld() != null && losersSpawn != null && isLosersWorld(spot.getWorld())
+                && spot.getWorld().getUID().toString().equals(worldId);
         if (data.contains("losers-last") || data.contains("losers-last-world")) {
             data.set("losers-last", null);
             data.set("losers-last-world", null);
@@ -9555,21 +9638,35 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             sender.sendMessage(Component.text("Er is geen Verliezerseiland om te verwijderen.", NamedTextColor.RED));
             return;
         }
-        if (world != null) {
-            for (Player p : new ArrayList<>(world.getPlayers())) {
+        List<World> dimensions = new ArrayList<>();
+        for (World loaded : Bukkit.getWorlds()) {
+            if (isLosersWorld(loaded)) {
+                dimensions.add(loaded);
+            }
+        }
+        for (World dimension : dimensions) {
+            for (Player p : new ArrayList<>(dimension.getPlayers())) {
                 if (lobbySpawn != null && lobbySpawn.getWorld() != null) {
                     sendToLobby(p);
                 } else {
                     p.teleport(gameWorld().getSpawnLocation());
                 }
             }
-            if (!Bukkit.unloadWorld(world, false)) {
+        }
+        for (World dimension : dimensions) {
+            if (!Bukkit.unloadWorld(dimension, false)) {
                 sender.sendMessage(Component.text("De wereld kon niet worden afgesloten, probeer het opnieuw.",
                         NamedTextColor.RED));
                 return;
             }
         }
         boolean wiped = !folder.exists() || deleteRecursively(folder);
+        for (String suffix : new String[] {"_nether", "_the_end"}) {
+            File extra = new File(getServer().getWorldContainer(), LOSERS_WORLD + suffix);
+            if (extra.exists() && !deleteRecursively(extra)) {
+                wiped = false;
+            }
+        }
         losersCreated = false;
         losersOpen = false;
         losersSpawn = null;
@@ -11848,7 +11945,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private static final class StatRow {
         final UUID id;
         final String name;
-        final long[] raw; // playtime seconds, kills, totem pops, jumps, centimetres on foot
+        final long[] raw; // playtime seconds, kills, totem pops, jumps, centimetres on foot, blocks broken, blocks placed, mobs killed
 
         StatRow(UUID id, String name, long[] raw) {
             this.id = id;
@@ -11879,9 +11976,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         YamlConfiguration y = YamlConfiguration.loadConfiguration(statsBaseFile);
         for (String key : y.getKeys(false)) {
             List<Long> v = y.getLongList(key);
-            if (v.size() == 5) {
+            if (v.size() == 5 || v.size() == 8) {
                 try {
-                    statsBase.put(UUID.fromString(key), new long[] {v.get(0), v.get(1), v.get(2), v.get(3), v.get(4)});
+                    long[] base = new long[STAT_COUNT];
+                    for (int i = 0; i < v.size(); i++) {
+                        base[i] = v.get(i);
+                    }
+                    statsBase.put(UUID.fromString(key), base);
                 } catch (IllegalArgumentException ignored) {
                     // not a uuid, skip
                 }
@@ -11893,7 +11994,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         YamlConfiguration y = new YamlConfiguration();
         for (Map.Entry<UUID, long[]> e : statsBase.entrySet()) {
             long[] v = e.getValue();
-            y.set(e.getKey().toString(), Arrays.asList(v[0], v[1], v[2], v[3], v[4]));
+            y.set(e.getKey().toString(), Arrays.asList(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]));
         }
         try {
             getDataFolder().mkdirs();
@@ -11903,10 +12004,81 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
+    private static final int STAT_COUNT = 8;
+
+    /** The stats.json of a player (Minecraft saves it in the main world folder), or null when there is none. */
+    private JsonObject readStatsFile(UUID id) {
+        World main = gameWorld();
+        if (main == null) {
+            return null;
+        }
+        for (String folder : new String[] {"stats", "players/stats"}) {
+            File f = new File(main.getWorldFolder(), folder + "/" + id + ".json");
+            if (f.isFile()) {
+                try (java.io.Reader reader = java.nio.file.Files.newBufferedReader(f.toPath(),
+                        java.nio.charset.StandardCharsets.UTF_8)) {
+                    JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
+                    return root.has("stats") ? root.getAsJsonObject("stats") : root;
+                } catch (Exception ex) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Blocks broken ("minecraft:mined") or blocks placed ("minecraft:used", only items that are blocks). Online players
+     * are read from the live statistics, everybody else from the stats file, so one sync stays light on the server.
+     */
+    private long blockStat(OfflinePlayer op, String category) {
+        long total = 0L;
+        Player online = op.getPlayer();
+        if (online != null) {
+            Statistic stat = category.equals("minecraft:mined") ? Statistic.MINE_BLOCK : Statistic.USE_ITEM;
+            for (Material m : Material.values()) {
+                if (m.isLegacy() || !m.isBlock() || !m.isItem()) {
+                    continue;
+                }
+                try {
+                    total += online.getStatistic(stat, m);
+                } catch (IllegalArgumentException ignored) {
+                    // not a countable material for this statistic
+                }
+            }
+            return total;
+        }
+        JsonObject stats = readStatsFile(op.getUniqueId());
+        if (stats == null || !stats.has(category) || !stats.get(category).isJsonObject()) {
+            return 0L;
+        }
+        for (Map.Entry<String, com.google.gson.JsonElement> entry : stats.getAsJsonObject(category).entrySet()) {
+            Material m = Material.matchMaterial(entry.getKey());
+            if (m != null && m.isBlock() && m.isItem()) {
+                total += entry.getValue().getAsLong();
+            }
+        }
+        return total;
+    }
+
+    /** Mobs killed (Minecraft's own mob kill counter). */
+    private long mobKillStat(OfflinePlayer op) {
+        Player online = op.getPlayer();
+        if (online != null) {
+            return online.getStatistic(Statistic.MOB_KILLS);
+        }
+        JsonObject stats = readStatsFile(op.getUniqueId());
+        if (stats == null || !stats.has("minecraft:custom") || !stats.get("minecraft:custom").isJsonObject()) {
+            return 0L;
+        }
+        JsonObject custom = stats.getAsJsonObject("minecraft:custom");
+        return custom.has("minecraft:mob_kills") ? custom.get("minecraft:mob_kills").getAsLong() : 0L;
+    }
+
     private JsonObject statsJson(StatRow r, boolean zero) {
         long[] base = statsBase.get(r.id);
-        long[] v = new long[5];
-        for (int i = 0; i < 5; i++) {
+        long[] v = new long[STAT_COUNT];
+        for (int i = 0; i < STAT_COUNT; i++) {
             v[i] = zero ? 0L : (i == 1 ? r.raw[i] : Math.max(0L, r.raw[i] - (base == null ? 0L : base[i])));
         }
         JsonObject p = new JsonObject();
@@ -11917,6 +12089,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         p.addProperty("totemPops", v[2]);
         p.addProperty("jumps", v[3]);
         p.addProperty("kmWalked", Math.round(v[4] / 1000.0) / 100.0);
+        p.addProperty("blocksBroken", v[5]);
+        p.addProperty("blocksPlaced", v[6]);
+        p.addProperty("mobsKilled", v[7]);
         return p;
     }
 
@@ -11944,7 +12119,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                                 loadPlayerData(op.getUniqueId()).getInt("stats.kills", 0),
                                 op.getStatistic(Statistic.USE_ITEM, Material.TOTEM_OF_UNDYING),
                                 op.getStatistic(Statistic.JUMP),
-                                cm}));
+                                cm,
+                                blockStat(op, "minecraft:mined"),
+                                blockStat(op, "minecraft:used"),
+                                mobKillStat(op)}));
                     } catch (Exception ignored) {
                         // a broken stats file must not stop the rest
                     }
@@ -11957,7 +12135,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }.runTaskTimer(LowkeyCore.this, 1L, 1L);
     }
 
-    /** Playtime, kills, totem pops, jumps and kilometres walked since the last reset, sent to the website. */
+    /** Playtime, kills, totem pops, jumps, kilometres walked, blocks broken, blocks placed and mobs killed since the last reset, sent to the website. */
     private void syncStats(CommandSender sender) {
         if (!siteConfigured()) {
             if (sender != null) {
