@@ -1230,7 +1230,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         getServer().getScheduler().runTask(this, this::updateTablist);
         if (lobbySpawn != null) {
             // everybody starts in the lobby
-            getServer().getScheduler().runTask(this, () -> sendToLobby(player));
+            getServer().getScheduler().runTask(this, () -> {
+                sendToLobby(player);
+                if (hoursLocked(player)) {
+                    player.sendMessage(Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
+                            .append(hoursClosedMessage()).build());
+                }
+            });
         } else if (playerFile(player.getUniqueId()).exists()) {
             // the lobby was deleted while this player was away: give the real inventory back
             getServer().getScheduler().runTask(this, () -> {
@@ -1661,15 +1667,19 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, closedMessage());
             return;
         }
-        if (!hoursOpen && !crew.contains(event.getName().toLowerCase(Locale.ROOT))) {
-            event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, hoursClosedMessage());
-        }
+        // outside the opening hours everybody may still come in, but only into the lobby (see hoursLocked)
     }
 
     // ------------------------------------------------------------------ server hours (09:00 - 00:00, crew always welcome)
 
     private Component hoursClosedMessage() {
-        return Component.text("De server is open van 09:00 tot 00:00. Kom later terug", NamedTextColor.RED);
+        return Component.text("Het spel is open van 09:00 tot 00:00. Tot dan kun je alleen in de lobby zijn.",
+                NamedTextColor.RED);
+    }
+
+    /** True outside the opening hours for everybody except crew: the lobby stays open, the game and the island do not. */
+    private boolean hoursLocked(Player player) {
+        return !hoursOpen && !isCrew(player);
     }
 
     private Component closingWarningMessage(int minutesLeft) {
@@ -1677,7 +1687,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return Component.text()
                 .append(glyph(LOWKEY_BADGE))
                 .append(Component.space())
-                .append(Component.text("De server sluit over ", NamedTextColor.RED))
+                .append(Component.text("Het spel sluit over ", NamedTextColor.RED))
                 .append(Component.text(minutesLeft + " " + unit, NamedTextColor.WHITE, TextDecoration.BOLD))
                 .append(Component.text(".", NamedTextColor.RED))
                 .build();
@@ -1702,7 +1712,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             if (!hoursOpen) {
                 for (Player player : new ArrayList<>(getServer().getOnlinePlayers())) {
                     if (!isCrew(player)) {
-                        player.kick(hoursClosedMessage());
+                        if (!inLobby(player)) {
+                            sendToLobby(player);
+                        }
+                        player.sendMessage(Component.text()
+                                .append(glyph(LOWKEY_BADGE))
+                                .append(Component.space())
+                                .append(hoursClosedMessage())
+                                .build());
                     }
                 }
             }
@@ -1864,7 +1881,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         Component line2;
         if (!hoursOpen) {
-            line2 = centerMotdLine(new MotdPart("Gesloten - open om 09:00", NamedTextColor.RED, false));
+            line2 = centerMotdLine(new MotdPart("Alleen lobby - spel open om 09:00", NamedTextColor.RED, false));
         } else if (serverClosed) {
             line2 = centerMotdLine(new MotdPart("Tijdelijk gesloten voor onderhoud", NamedTextColor.RED, false));
         } else {
@@ -2722,6 +2739,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 || !mainOpen || getSide(player) == Side.NONE || isBannedFromMain(player)) {
             return;
         }
+        if (hoursLocked(player)) {
+            player.sendMessage(Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
+                    .append(hoursClosedMessage()).build());
+            return;
+        }
         enterGame(player, false, false);
     }
 
@@ -3298,7 +3320,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    /** Every 5 seconds: everybody who is in the main world gets that time added (not the lobby, not the Verliezerseiland). */
+    /** Every 5 seconds: everybody who is in the main world or on the Verliezerseiland gets that time added (not the lobby). */
     private void tickPlaytime() {
         long now = System.currentTimeMillis();
         boolean skipCrew = getConfig().getBoolean("leaderboard.skip-crew", true);
@@ -3308,7 +3330,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             if (last == null) {
                 continue;
             }
-            boolean counts = !inLobby(player) && !inLosers(player) && !isEliminated(player)
+            boolean counts = !inLobby(player) && (inLosers(player) || !isEliminated(player))
                     && !(skipCrew && isCrew(player));
             if (!counts) {
                 continue;
@@ -3512,6 +3534,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             + boardScaleText(), NamedTextColor.GRAY));
                 }
                 break;
+            case "add":
+                addPlaytime(sender, args);
+                break;
             case "reset":
                 if (args.length >= 3 && args[2].equalsIgnoreCase("confirm")) {
                     int n = resetPlaytimeData();
@@ -3525,6 +3550,71 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 sender.sendMessage(boardComponent());
                 break;
         }
+    }
+
+    /** /lowkey leaderboard add <speler> <tijd> : voegt speeltijd toe (4, 4h, 90m, 1,5h) of haalt hem weg (-2h). */
+    private void addPlaytime(CommandSender sender, String[] args) {
+        if (args.length < 4) {
+            sender.sendMessage(Component.text("Gebruik: /lowkey leaderboard add <speler> <tijd>, bijvoorbeeld 4h of 90m.",
+                    NamedTextColor.YELLOW));
+            return;
+        }
+        String name = args[2];
+        UUID id = null;
+        Player online = getServer().getPlayerExact(name);
+        if (online != null) {
+            id = online.getUniqueId();
+            name = online.getName();
+        } else {
+            for (Map.Entry<UUID, String> entry : playNames.entrySet()) {
+                if (entry.getValue().equalsIgnoreCase(name)) {
+                    id = entry.getKey();
+                    name = entry.getValue();
+                    break;
+                }
+            }
+            if (id == null) {
+                OfflinePlayer cached = getServer().getOfflinePlayerIfCached(name);
+                if (cached != null) {
+                    id = cached.getUniqueId();
+                    if (cached.getName() != null) {
+                        name = cached.getName();
+                    }
+                }
+            }
+        }
+        if (id == null) {
+            sender.sendMessage(Component.text("Ik ken geen speler met de naam " + name
+                    + ". De speler moet al eens online zijn geweest.", NamedTextColor.RED));
+            return;
+        }
+        String raw = args[3].toLowerCase(Locale.ROOT).replace(',', '.');
+        double factor = 3_600_000.0; // hours unless it says minutes
+        if (raw.endsWith("m")) {
+            factor = 60_000.0;
+            raw = raw.substring(0, raw.length() - 1);
+        } else if (raw.endsWith("h") || raw.endsWith("u")) {
+            raw = raw.substring(0, raw.length() - 1);
+        }
+        double amount;
+        try {
+            amount = Double.parseDouble(raw);
+        } catch (NumberFormatException e) {
+            sender.sendMessage(Component.text("Dat is geen tijd. Gebruik bijvoorbeeld 4h of 90m.", NamedTextColor.RED));
+            return;
+        }
+        long delta = Math.round(amount * factor);
+        if (delta == 0L || Math.abs(delta) > 1000L * 3_600_000L) {
+            sender.sendMessage(Component.text("Kies een tijd tussen 1 minuut en 1000 uur.", NamedTextColor.RED));
+            return;
+        }
+        long total = Math.max(0L, playMillis.getOrDefault(id, 0L) + delta);
+        playMillis.put(id, total);
+        playNames.put(id, name);
+        savePlaytime();
+        tickBoard();
+        sender.sendMessage(Component.text(name + " heeft nu " + playtimeText(total)
+                + " speeltijd (dag:uur:minuut).", NamedTextColor.GREEN));
     }
 
     private void openLeaderboardMenu(Player admin) {
@@ -3571,7 +3661,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 statusLine("Grootte", boardScaleText(), NamedTextColor.WHITE),
                 statusLine("Spelers met speeltijd", String.valueOf(playMillis.size()), NamedTextColor.WHITE),
                 first,
-                Component.text("Telt alleen tijd in de main wereld, niet in de lobby en niet van crew.", NamedTextColor.DARK_GRAY));
+                Component.text("Telt tijd in de main wereld en op het Verliezerseiland, niet in de lobby en niet van crew.", NamedTextColor.DARK_GRAY));
         showMenu(admin, "Leaderboard", body, buttons, backButton("Terug naar berichten.", () -> openMessagesMenu(admin)));
     }
 
@@ -5162,7 +5252,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
      * /lowkey tolobby <speler> : haalt een speler uit zijn wereld en stuurt hem naar de lobby
      * /lowkey verban <speler> <main|verliezerseiland|beide> <lobby|volledig> : verbant van die wereld(en), met of zonder de lobby
      * /lowkey verbanopheffen <speler> : heft een verbanning weer op
-     * /lowkey leaderboard [spawn|remove|refresh|size <getal>|reset confirm] : hologram met de top 10 speeltijd in de main wereld (dag:uur:minuut)
+     * /lowkey leaderboard [spawn|remove|refresh|size <getal>|add <speler> <tijd>|reset confirm] : hologram met de top 10 speeltijd in de main wereld en op het Verliezerseiland (dag:uur:minuut)
      * /lowkey badge <huidig|rood|roze> : wisselt de LOWKEY badge overal tussen het pixel badge, het rode en het roze logo (voor testen)
      * /lowkey launch : vraagt bevestiging, stuurt dan iedereen met een team naar zijn team spawn (confirm = meteen)
      * /lowkey launch reset : zet de launch terug (voor testen), niemand wordt verplaatst
@@ -6085,7 +6175,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     () -> {
                         setBordersDropped(false);
                         admin.sendMessage(Component.text("De grenzen zijn dicht. Zet de WorldGuard flags van "
-                                + BORDER_REGION + " zelf weer terug.", NamedTextColor.YELLOW));
+                                + BORDER_REGION + " zelf weer terug en haal build weg met /region flag " + BORDER_REGION
+                                + " build.", NamedTextColor.YELLOW));
                         again.run();
                     }));
         } else {
@@ -6125,7 +6216,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         confirm(admin,
                 "Grenzen droppen?",
                 "Dit haalt de WorldGuard flags van " + BORDER_REGION + " weg (" + String.join(", ", BORDER_FLAGS)
-                        + ") en Noord en Zuid krijgen weer een gedeelde chat.",
+                        + ") en zet build op allow, zodat er gebouwd kan worden. Noord en Zuid krijgen weer een gedeelde chat.",
                 "Je kunt de grenzen later weer dichtzetten, de flags zet je dan zelf terug.",
                 Component.text("Ja, droppen", NamedTextColor.GREEN),
                 () -> {
@@ -6142,14 +6233,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             for (String flag : BORDER_FLAGS) {
                 admin.performCommand("region flag -w " + world + " " + BORDER_REGION + " " + flag);
             }
+            // WorldGuard keeps every region closed for non-members by itself, flags or not, so building has to be allowed
+            admin.performCommand("region flag -w " + world + " " + BORDER_REGION + " build allow");
             admin.performCommand("region info -w " + world + " " + BORDER_REGION);
-            admin.sendMessage(Component.text("De flags van " + BORDER_REGION + " zijn weggehaald. Controleer hierboven of "
-                    + "er geen flags meer staan.", NamedTextColor.GREEN));
+            admin.sendMessage(Component.text("De flags van " + BORDER_REGION + " zijn weggehaald en bouwen is toegestaan "
+                    + "(build allow). Controleer hierboven of dat klopt.", NamedTextColor.GREEN));
         } else {
             admin.sendMessage(Component.text("WorldGuard is niet gevonden. Doe deze commands zelf (klik om ze in je "
                     + "chatbalk te zetten):", NamedTextColor.YELLOW));
+            List<String> commands = new ArrayList<>();
             for (String flag : BORDER_FLAGS) {
-                String cmd = "/region flag -w " + world + " " + BORDER_REGION + " " + flag;
+                commands.add("/region flag -w " + world + " " + BORDER_REGION + " " + flag);
+            }
+            commands.add("/region flag -w " + world + " " + BORDER_REGION + " build allow");
+            for (String cmd : commands) {
                 admin.sendMessage(Component.text(cmd, NamedTextColor.AQUA)
                         .clickEvent(ClickEvent.suggestCommand(cmd))
                         .hoverEvent(HoverEvent.showText(Component.text("Klik om in je chatbalk te zetten",
@@ -9158,6 +9255,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void teleportToLosers(Player player) {
         if (!player.isOnline() || !inLobby(player) || !isEliminated(player) || !losersOpen || isLosersOut(player)
                 || isBannedFromLosers(player) || losersSpawn == null || losersSpawn.getWorld() == null) {
+            return;
+        }
+        if (hoursLocked(player)) {
+            player.sendMessage(Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
+                    .append(hoursClosedMessage()).build());
             return;
         }
         // the real inventory comes back (and the lobby items go); health and food are what they were when he left
@@ -12547,6 +12649,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 options.add("remove");
                 options.add("refresh");
                 options.add("size");
+                options.add("add");
                 options.add("reset");
             } else if (sub.equals("badge")) {
                 options.add("huidig");
