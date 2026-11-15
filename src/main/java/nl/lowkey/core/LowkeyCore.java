@@ -531,7 +531,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 evictShulkerTotems(p);
             }
         }, 40L, 10L);
-        long donationIntervalTicks = 15L * 60L * 20L; // 15 minutes
+        // donation messages: every 45 minutes (3 times less often than before), config.yml: donation-interval-minutes
+        long donationIntervalTicks = Math.max(1L, getConfig().getLong("donation-interval-minutes", 45L)) * 60L * 20L;
         getServer().getScheduler().runTaskTimer(this, this::broadcastRandomDonationMessage,
                 donationIntervalTicks, donationIntervalTicks);
         long websiteMinutes = getConfig().getLong("website-interval-minutes", 20L);
@@ -638,13 +639,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void applyBadgeStyle(CommandSender admin, int style) {
         badgeStyle = style;
         saveState();
-        admin.sendMessage(Component.text()
+        lowkeyMsg(admin, Component.text()
                 .append(glyph(LOWKEY_BADGE)).append(Component.space())
                 .append(Component.text("Badge staat nu op ", NamedTextColor.GRAY))
                 .append(Component.text(badgeStyleName(style), NamedTextColor.WHITE, TextDecoration.BOLD))
                 .append(Component.text(". Zo zie je hem in gewone berichten.", NamedTextColor.GRAY))
                 .build());
-        admin.sendMessage(Component.text()
+        lowkeyMsg(admin, Component.text()
                 .append(glyph(LOWKEY_BADGE_RED)).append(Component.space())
                 .append(Component.text("En zo in doodsberichten en Nether berichten.", NamedTextColor.RED))
                 .build());
@@ -792,7 +793,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         player.setFallDistance(0f);
         teleportSafely(player, spawn);
-        player.sendMessage(badgeLine("Je zit nu in team " + (side == Side.NOORD ? "Noord" : "Zuid")
+        lowkeyMsg(player, badgeLine("Je zit nu in team " + (side == Side.NOORD ? "Noord" : "Zuid")
                 + " en bent naar de spawn van je nieuwe team gestuurd.", NamedTextColor.WHITE));
     }
 
@@ -834,7 +835,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 long remaining = graceRemaining(player);
                 // everybody joins in the lobby: the message comes when they enter the main world instead
                 if (player.isOnline() && remaining > 0 && !inLobby(player)) {
-                    player.sendMessage(graceMessage(remaining));
+                    lowkeyMsg(player, graceMessage(remaining));
                 }
             }, 60L);
         }
@@ -886,7 +887,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             if (remaining <= 0L) {
                 saveIdentity(player);
                 refreshTags(player); // yellow icon disappears
-                player.sendMessage(graceEndedMessage());
+                lowkeyMsg(player, graceEndedMessage());
             } else if (saveNow) {
                 saveIdentity(player);
             }
@@ -904,7 +905,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         saveIdentity(player);
         refreshTags(player);
         if (millis > 0L && !inLobby(player)) {
-            player.sendMessage(graceMessage(millis));
+            lowkeyMsg(player, graceMessage(millis));
         }
     }
 
@@ -964,7 +965,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (level < warned) {
             graceWarned.put(id, level);
             long minutes = Math.max(1L, (remaining + 59_999L) / 60_000L);
-            player.sendMessage(Component.text()
+            lowkeyMsg(player, Component.text()
                     .append(glyph(LOWKEY_BADGE))
                     .append(Component.space())
                     .append(Component.text("Je hebt nog maar ", NamedTextColor.RED))
@@ -1233,7 +1234,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             getServer().getScheduler().runTask(this, () -> {
                 sendToLobby(player);
                 if (hoursLocked(player)) {
-                    player.sendMessage(Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
+                    lowkeyMsg(player, Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
                             .append(hoursClosedMessage()).build());
                 }
             });
@@ -1258,6 +1259,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         joinSettling.remove(player.getUniqueId());
         finaleViewers.remove(player.getUniqueId());
         finaleViewerMode.remove(player.getUniqueId());
+        lastDing.remove(player.getUniqueId());
         worldMessage(worldGroup(player), player, false, false, true);
 
         persist(player);
@@ -1349,7 +1351,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             final boolean islandFinale = islandFinaleRunning(player);
             // own grace on the island: a normal death and respawn on the island
             if (!islandFinale && graceRemaining(player) > 0L) {
-                getServer().sendMessage(Component.text()
+                lowkeyBroadcast(Component.text()
                         .append(glyph(LOWKEY_BADGE_RED))
                         .append(Component.space())
                         .append(Component.text(player.getName(), NamedTextColor.WHITE))
@@ -1369,7 +1371,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     .append(Component.text(player.getName(), NamedTextColor.WHITE))
                     .append(Component.text(" is definitief uitgeschakeld!", NamedTextColor.RED))
                     .build();
-            getServer().sendMessage(out); // every world sees it
+            lowkeyBroadcast(out); // every world sees it
             playDeathSound();
             bloodBurst(spot.clone().add(0, 1, 0));
             event.setCancelled(true);
@@ -1408,14 +1410,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 player.setGameMode(GameMode.SPECTATOR);
                 if (islandFinale) {
                     // the finale is running: keep watching until it is over, then everybody goes to the lobby
-                    player.sendMessage(Component.text()
+                    lowkeyMsg(player, Component.text()
                             .append(glyph(LOWKEY_BADGE))
                             .append(Component.space())
                             .append(Component.text("Je bent definitief uitgeschakeld. Je kunt nog meekijken tot het einde van de finale.",
                                     NamedTextColor.RED))
                             .build());
                 } else {
-                    player.sendMessage(spectateMessage());
+                    lowkeyMsg(player, spectateMessage());
                     getServer().getScheduler().runTaskLater(this, () -> {
                         if (!player.isOnline() || !isLosersOut(player) || !inLosers(player)) {
                             return;
@@ -1441,7 +1443,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
         // GRACE: a completely normal death and respawn, only with our own message
         if (graceRemaining(player) > 0L && !inFinaleWorld(player)) {
-            getServer().sendMessage(Component.text()
+            lowkeyBroadcast(Component.text()
                     .append(glyph(LOWKEY_BADGE_RED))
                     .append(Component.space())
                     .append(Component.text(player.getName(), NamedTextColor.WHITE))
@@ -1456,7 +1458,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         // in the finale world you spectate until the finale is over, then you go to the lobby with everybody
         final boolean finaleDeath = world != null && world.equals(finaleMainWorld()) && finaleState != FinaleState.IDLE;
 
-        getServer().sendMessage(Component.text()
+        lowkeyBroadcast(Component.text()
                 .append(glyph(LOWKEY_BADGE_RED))
                 .append(Component.space())
                 .append(Component.text(player.getName(), NamedTextColor.WHITE))
@@ -1509,7 +1511,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 }
                 player.teleport(safe);
                 player.setGameMode(GameMode.SPECTATOR);
-                player.sendMessage(finaleDeath ? finaleSpectateMessage() : spectateMessage());
+                lowkeyMsg(player, finaleDeath ? finaleSpectateMessage() : spectateMessage());
                 // some time to spectate, then to the lobby (for good). Without a lobby: off the server.
                 // In the finale world there is no timer: the finale sends everybody to the lobby at the end.
                 if (!finaleDeath) getServer().getScheduler().runTaskLater(this, () -> {
@@ -1715,7 +1717,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                         if (!inLobby(player)) {
                             sendToLobby(player);
                         }
-                        player.sendMessage(Component.text()
+                        lowkeyMsg(player, Component.text()
                                 .append(glyph(LOWKEY_BADGE))
                                 .append(Component.space())
                                 .append(hoursClosedMessage())
@@ -1732,9 +1734,42 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (minutesToClose == 10 || minutesToClose == 3 || minutesToClose == 1) {
             Component warning = closingWarningMessage(minutesToClose);
             for (Player player : getServer().getOnlinePlayers()) {
-                player.sendMessage(warning);
+                lowkeyMsg(player, warning);
             }
         }
+    }
+
+    // ------------------------------------------------------------------ ding on every LOWKEY message
+
+    private final Map<UUID, Long> lastDing = new ConcurrentHashMap<>();
+
+    /** Sends a LOWKEY message and plays a soft "ding" for the player (config.yml: message-ding: false turns it off). */
+    private void lowkeyMsg(CommandSender to, Component message) {
+        to.sendMessage(message);
+        if (to instanceof Player) {
+            ding((Player) to);
+        }
+    }
+
+    /** A LOWKEY message for everybody on the server, with the ding. */
+    private void lowkeyBroadcast(Component message) {
+        getServer().sendMessage(message);
+        for (Player online : getServer().getOnlinePlayers()) {
+            ding(online);
+        }
+    }
+
+    private void ding(Player player) {
+        if (!getConfig().getBoolean("message-ding", true) || !player.isOnline()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Long last = lastDing.get(player.getUniqueId());
+        if (last != null && now - last < 400L) {
+            return; // a message of several lines only dings once
+        }
+        lastDing.put(player.getUniqueId(), now);
+        player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, 0.6f, 1.6f);
     }
 
     // ------------------------------------------------------------------ donation broadcaster
@@ -1755,24 +1790,24 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(Component.text(text, NamedTextColor.WHITE))
                 .build();
         if (only != null) {
-            only.sendMessage(message);
+            lowkeyMsg(only, message);
         } else {
             for (Player player : getServer().getOnlinePlayers()) {
-                player.sendMessage(message);
+                lowkeyMsg(player, message);
             }
         }
     }
 
     // ------------------------------------------------------------------ website broadcaster
 
-    private static final String DEFAULT_WEBSITE_URL = "https://lowkeysmp.lovable.app";
+    private static final String DEFAULT_WEBSITE_URL = "https://lowkeysmp.be";
     private static final List<String> WEBSITE_MESSAGES = List.of(
-            "Heb je de LowkeySMP website al gezien?",
-            "Bekijk de website van LowkeySMP:",
-            "Kijk eens rond op de LowkeySMP website:",
-            "LowkeySMP heeft een website, ga er eens langs:",
-            "Meer over LowkeySMP vind je op de website:",
-            "Nog niet op de website geweest? Klik hier:"
+            "De oude LowkeySMP website is stuk gegaan, daarom hebben we een nieuwe:",
+            "Onze oude site was kapot, dus we hebben een gloednieuwe website:",
+            "De oude website ligt eruit, maar de nieuwe staat online:",
+            "De oude LowkeySMP site is stuk gegaan. Bekijk de nieuwe:",
+            "Let op: de oude site werkt niet meer. Gebruik vanaf nu de nieuwe website:",
+            "Nieuwe website, want de oude is stuk gegaan:"
     );
 
     private void broadcastWebsiteMessage() {
@@ -1800,7 +1835,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .append(link)
                 .build();
         for (Player player : getServer().getOnlinePlayers()) {
-            player.sendMessage(message);
+            lowkeyMsg(player, message);
         }
     }
 
@@ -1926,7 +1961,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         if (worldGroup(sender) != worldGroup(target)) {
             event.setCancelled(true);
-            sender.sendMessage(Component.text()
+            lowkeyMsg(sender, Component.text()
                     .append(glyph(LOWKEY_BADGE))
                     .append(Component.space())
                     .append(Component.text("Je kunt alleen priv\u00E9berichten sturen naar spelers in dezelfde wereld.",
@@ -1943,7 +1978,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         event.setCancelled(true);
-        sender.sendMessage(Component.text()
+        lowkeyMsg(sender, Component.text()
                 .append(glyph(LOWKEY_BADGE))
                 .append(Component.space())
                 .append(Component.text("Je kunt geen priv\u00E9bericht sturen naar een speler van het andere team.",
@@ -2078,7 +2113,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(3000), Duration.ofMillis(1000)));
 
         for (Player player : getServer().getOnlinePlayers()) {
-            player.sendMessage(chat);
+            lowkeyMsg(player, chat);
             if (open) {
                 player.showTitle(title);
                 player.playSound(player.getLocation(), Sound.BLOCK_END_PORTAL_SPAWN, 0.6f, 1.0f);
@@ -2114,7 +2149,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Long last = netherNotice.get(player.getUniqueId());
         if (last == null || now - last > 3000L) {
             netherNotice.put(player.getUniqueId(), now);
-            player.sendMessage(Component.text()
+            lowkeyMsg(player, Component.text()
                     .append(glyph(LOWKEY_BADGE_RED))
                     .append(Component.space())
                     .append(Component.text("De Nether is nog ", NamedTextColor.RED))
@@ -2510,7 +2545,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         giver.sendMessage(Component.text(target.getName() + " heeft de LowkeySMP nether star gekregen.",
                 NamedTextColor.GREEN));
         if (!giver.equals(target)) {
-            target.sendMessage(Component.text()
+            lowkeyMsg(target, Component.text()
                     .append(glyph(LOWKEY_BADGE))
                     .append(Component.space())
                     .append(Component.text("Je hebt de LowkeySMP nether star gekregen.", NamedTextColor.LIGHT_PURPLE))
@@ -2669,7 +2704,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             dest = gameWorld().getSpawnLocation();
         }
         if (dest == null) {
-            player.sendMessage(Component.text()
+            lowkeyMsg(player, Component.text()
                     .append(glyph(LOWKEY_BADGE))
                     .append(Component.space())
                     .append(Component.text("Het spawnpunt van jouw team is nog niet ingesteld.", NamedTextColor.RED))
@@ -2714,7 +2749,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         if (getSide(player) == Side.NONE) {
-            player.sendMessage(Component.text()
+            lowkeyMsg(player, Component.text()
                     .append(glyph(LOWKEY_BADGE))
                     .append(Component.space())
                     .append(Component.text("Je zit nog niet in een team!", NamedTextColor.RED))
@@ -2740,7 +2775,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         if (hoursLocked(player)) {
-            player.sendMessage(Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
+            lowkeyMsg(player, Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
                     .append(hoursClosedMessage()).build());
             return;
         }
@@ -2795,14 +2830,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             player.setGameMode(GameMode.SPECTATOR); // nothing may switch it back after the world change
                         }
                     }, 10L);
-                    player.sendMessage(badgeLine("Je kijkt als crew mee bij " + (pick == Side.NOORD ? "Noord" : "Zuid") + " (spectator).", NamedTextColor.WHITE));
+                    lowkeyMsg(player, badgeLine("Je kijkt als crew mee bij " + (pick == Side.NOORD ? "Noord" : "Zuid") + " (spectator).", NamedTextColor.WHITE));
                     crewWatching++;
                     continue;
                 }
             }
             if (getSide(player) == Side.NONE) {
                 noTeam.add(player.getName());
-                player.sendMessage(Component.text()
+                lowkeyMsg(player, Component.text()
                         .append(glyph(LOWKEY_BADGE))
                         .append(Component.space())
                         .append(Component.text("Je zit nog niet in een team!", NamedTextColor.RED))
@@ -2857,7 +2892,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             data.set("entered", true); // so the last position in the main world is remembered
             savePlayerData(player.getUniqueId(), data);
             sendToLobby(player);
-            player.sendMessage(Component.text()
+            lowkeyMsg(player, Component.text()
                     .append(glyph(LOWKEY_BADGE))
                     .append(Component.space())
                     .append(Component.text("De main wereld is tijdelijk gesloten. Je kunt chillen in de lobby.",
@@ -2880,7 +2915,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (launched) {
             for (Player player : getServer().getOnlinePlayers()) {
                 if (inLobby(player) && !isEliminated(player)) {
-                    player.sendMessage(Component.text()
+                    lowkeyMsg(player, Component.text()
                             .append(glyph(LOWKEY_BADGE))
                             .append(Component.space())
                             .append(Component.text("De main wereld is weer open! Gebruik het LowkeySMP item om terug te gaan.",
@@ -2967,7 +3002,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (fromLobby && !inLobby(player) && !isEliminated(player)) {
             long remaining = graceRemaining(player);
             if (remaining > 0L) {
-                player.sendMessage(graceMessage(remaining));
+                lowkeyMsg(player, graceMessage(remaining));
             }
         }
     }
@@ -3074,7 +3109,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return false;
         }
         sendToLobby(target);
-        target.sendMessage(lowkeyLine("Een admin heeft je naar de lobby gestuurd.", NamedTextColor.RED));
+        lowkeyMsg(target, lowkeyLine("Een admin heeft je naar de lobby gestuurd.", NamedTextColor.RED));
         sender.sendMessage(Component.text(target.getName() + " is naar de lobby gestuurd.", NamedTextColor.GREEN));
         return true;
     }
@@ -3102,7 +3137,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if ((ban.main && inMain) || (ban.losers && inLosers(target))) {
             kickToLobby(sender, target);
         }
-        target.sendMessage(lowkeyLine("Je mag niet meer meedoen aan: " + banText(ban) + ".", NamedTextColor.RED));
+        lowkeyMsg(target, lowkeyLine("Je mag niet meer meedoen aan: " + banText(ban) + ".", NamedTextColor.RED));
         sender.sendMessage(Component.text(target.getName() + " is verbannen van: " + banText(ban)
                 + ". De lobby blijft toegestaan.", NamedTextColor.GREEN));
     }
@@ -3260,7 +3295,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 Component.text("Verliezerseiland gewonnen!", NamedTextColor.RED, TextDecoration.BOLD),
                 Component.text(joined, NamedTextColor.WHITE),
                 Title.Times.times(Duration.ofMillis(500), Duration.ofMillis(7000), Duration.ofMillis(1500))));
-        admin.sendMessage(finaleLine(Component.text()
+        lowkeyMsg(admin, finaleLine(Component.text()
                 .append(Component.text(joined, NamedTextColor.WHITE, TextDecoration.BOLD))
                 .append(Component.text(" komen terug in het spel!", NamedTextColor.RED))
                 .append(Component.text(" (test)", NamedTextColor.GRAY))
@@ -4563,7 +4598,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Player player = event.getPlayer();
         if (isLocked(player)) {
             event.setCancelled(true);
-            player.sendMessage(Component.text()
+            lowkeyMsg(player, Component.text()
                     .append(glyph(LOWKEY_BADGE))
                     .append(Component.space())
                     .append(Component.text("Je mag hier geen items droppen!", NamedTextColor.RED))
@@ -5364,6 +5399,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 } else {
                     sender.sendMessage(Component.text("Dit zet de stats van IEDEREEN terug op nul. Typ /lowkey site reset confirm om door te gaan.", NamedTextColor.RED));
                 }
+            } else if (what.equals("deaths")) {
+                siteDeathsCommand(sender, args.length >= 3 && args[2].equalsIgnoreCase("resend"));
             } else if (what.equals("queue")) {
                 sender.sendMessage(Component.text("Wachtrij naar de site: " + siteQueue.size() + " berichten.", NamedTextColor.YELLOW));
             } else {
@@ -6712,8 +6749,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         World losers = losersWorld();
         items.add(losers == null ? new CheckItem(1, "Verliezerseiland", "bestaat nog niet")
                 : (losersOpen ? new CheckItem(1, "Verliezerseiland", "staat al open") : new CheckItem(0, "Verliezerseiland", "klaar en dicht")));
-        items.add(finaleState != FinaleState.IDLE ? new CheckItem(2, "Finale", finaleStateText())
+        items.add(finaleState != FinaleState.IDLE
+                ? new CheckItem(2, "Finale", finaleStateText() + " (" + (finaleLosers ? "Verliezerseiland" : "main wereld") + ")")
                 : new CheckItem(0, "Finale", "staat uit"));
+        addFinaleChecks(items, false);
+        addFinaleChecks(items, true);
         items.add(eventRunning ? new CheckItem(2, "Team event", "is nog bezig") : new CheckItem(0, "Team event", "staat uit"));
 
         int total = 0;
@@ -6759,6 +6799,60 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     : new CheckItem(1, "Website koppeling", "werkt, maar " + siteQueue.size() + " berichten wachten nog"));
         }
         return items;
+    }
+
+    /** The big check of one finale (main or Verliezerseiland): world, border, target, times, damage and winners. */
+    private void addFinaleChecks(List<CheckItem> items, boolean losers) {
+        final String who = losers ? "Eiland finale" : "Main finale";
+        World w = losers ? losersWorld() : finaleMainWorld();
+        if (w == null) {
+            items.add(new CheckItem(1, who, losers ? "het Verliezerseiland bestaat nog niet" : "de finalewereld bestaat nog niet"));
+            return;
+        }
+        double border = w.getWorldBorder().getSize();
+        double endSize = fEndSize(losers);
+        boolean targetSet = losers ? losersTargetSet : finaleTargetSet;
+        if (border > 100_000.0) {
+            items.add(new CheckItem(2, who + " border", "staat op " + finaleNum(border)
+                    + " blokken (standaard). Zet hem op de startgrootte."));
+        } else if (endSize >= border) {
+            items.add(new CheckItem(2, who + " border", "eindgrootte (" + finaleNum(endSize) + ") is niet kleiner dan de border ("
+                    + finaleNum(border) + "), de finale kan zo niet starten"));
+        } else {
+            items.add(new CheckItem(0, who + " border", "nu " + finaleNum(border) + ", wordt " + finaleNum(endSize) + " blokken"));
+        }
+        items.add(targetSet ? new CheckItem(0, who + " doel", "midden gezet")
+                : new CheckItem(1, who + " doel", "geen eigen midden gezet, de border krimpt naar het midden dat hij nu heeft"));
+        long shrink = fShrink(losers) * 1000L;
+        long cycle = shrink + fPause(losers) * 1000L;
+        long total = fDuration(losers) * 60_000L;
+        int rounds = cycle <= 0L ? 0 : (int) (Math.min(fRound(losers) * 60_000L, total) / cycle);
+        if (fRound(losers) > 0 && rounds == 0) {
+            items.add(new CheckItem(1, who + " tijden", "er past geen hele ronde in de rondetijd, dus geen rondes"));
+        } else {
+            items.add(new CheckItem(0, who + " tijden", fDuration(losers) + " min, " + rounds + " rondes van "
+                    + fShrink(losers) + " s krimpen en " + fPause(losers) + " s pauze"));
+        }
+        items.add(fDamage(losers) <= 0.0
+                ? new CheckItem(1, who + " schade", "staat op 0, buiten de border gebeurt er niets")
+                : new CheckItem(0, who + " schade", finaleNum(fDamage(losers)) + " per blok per seconde, veilig tot "
+                        + finaleNum(fBuffer(losers)) + " blokken"));
+        if (losers) {
+            items.add(losersSpawn != null && losersSpawn.getWorld() != null
+                    ? new CheckItem(0, "Eiland spawn", "gezet")
+                    : new CheckItem(1, "Eiland spawn", "niet gezet"));
+            int alive = aliveOnIsland().size();
+            items.add(alive <= Math.max(1, losersWinners)
+                    ? new CheckItem(1, "Eiland winnaars", losersWinners + " winnaars maar " + alive + " levend op het eiland")
+                    : new CheckItem(0, "Eiland winnaars", "de laatste " + losersWinners + " van " + alive + " winnen"));
+            if (losersEnded) {
+                items.add(new CheckItem(1, "Verliezerseiland", "is al afgelopen"));
+            }
+        } else {
+            items.add(finalePrepMin >= 0
+                    ? new CheckItem(0, "Main finale voorbereiding", finalePrepMin + " min zonder PvP")
+                    : new CheckItem(1, "Main finale voorbereiding", "ongeldig"));
+        }
     }
 
     private static NamedTextColor checkColor(int level) {
@@ -7095,7 +7189,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 Component.empty(),
                 Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(3000), Duration.ofMillis(1000)));
         for (Player player : getServer().getOnlinePlayers()) {
-            player.sendMessage(chat);
+            lowkeyMsg(player, chat);
             if (open) {
                 player.showTitle(title);
                 player.playSound(player.getLocation(), Sound.ENTITY_ENDER_DRAGON_GROWL, 0.5f, 1.0f);
@@ -7118,7 +7212,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Long last = netherNotice.get(player.getUniqueId());
         if (last == null || now - last > 3000L) {
             netherNotice.put(player.getUniqueId(), now);
-            player.sendMessage(Component.text()
+            lowkeyMsg(player, Component.text()
                     .append(glyph(LOWKEY_BADGE_RED))
                     .append(Component.space())
                     .append(Component.text("Het End is nog ", NamedTextColor.RED))
@@ -7196,6 +7290,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private int finalePauseSec = 30;
     private double finaleDamage = 1.0;
     private double finaleBuffer = 2.0;
+    // the Verliezerseiland finale has its own times and damage: changing one finale never touches the other
+    private int loserDurationMin = 10;
+    private int loserRoundMin = 3;
+    private int loserShrinkSec = 30;
+    private int loserPauseSec = 30;
+    private double loserDamage = 1.0;
+    private double loserBuffer = 2.0;
     private boolean finaleCloseDims = true;
     private boolean finaleAutoTie = true;
     // the finale can also run on the Verliezerseiland: own target, and the last few players win
@@ -7263,6 +7364,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         finalePauseSec = s.getInt("finale.pause-sec", 30);
         finaleDamage = s.getDouble("finale.damage", 1.0);
         finaleBuffer = s.getDouble("finale.buffer", 2.0);
+        // first start after the update: the island finale begins with the same values the main finale had
+        loserDurationMin = s.getInt("finale.losers-duration-min", finaleDurationMin);
+        loserRoundMin = s.getInt("finale.losers-round-min", finaleRoundMin);
+        loserShrinkSec = s.getInt("finale.losers-shrink-sec", finaleShrinkSec);
+        loserPauseSec = s.getInt("finale.losers-pause-sec", finalePauseSec);
+        loserDamage = s.getDouble("finale.losers-damage", finaleDamage);
+        loserBuffer = s.getDouble("finale.losers-buffer", finaleBuffer);
         finaleCloseDims = true;
         finaleAutoTie = true;
         finaleLosers = s.getBoolean("finale.losers", false);
@@ -7306,6 +7414,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         s.set("finale.pause-sec", finalePauseSec);
         s.set("finale.damage", finaleDamage);
         s.set("finale.buffer", finaleBuffer);
+        s.set("finale.losers-duration-min", loserDurationMin);
+        s.set("finale.losers-round-min", loserRoundMin);
+        s.set("finale.losers-shrink-sec", loserShrinkSec);
+        s.set("finale.losers-pause-sec", loserPauseSec);
+        s.set("finale.losers-damage", loserDamage);
+        s.set("finale.losers-buffer", loserBuffer);
         s.set("finale.close-dimensions", finaleCloseDims);
         s.set("finale.auto-tie", finaleAutoTie);
         s.set("finale.losers", finaleLosers);
@@ -7377,6 +7491,15 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return String.format(Locale.ROOT, "%02d:%02d", s / 60L, s % 60L);
     }
 
+    // settings per finale: false = main finale, true = Verliezerseiland finale
+    private int fDuration(boolean losers) { return losers ? loserDurationMin : finaleDurationMin; }
+    private int fRound(boolean losers) { return losers ? loserRoundMin : finaleRoundMin; }
+    private int fShrink(boolean losers) { return losers ? loserShrinkSec : finaleShrinkSec; }
+    private int fPause(boolean losers) { return losers ? loserPauseSec : finalePauseSec; }
+    private double fDamage(boolean losers) { return losers ? loserDamage : finaleDamage; }
+    private double fBuffer(boolean losers) { return losers ? loserBuffer : finaleBuffer; }
+    private double fEndSize(boolean losers) { return losers ? losersTargetSize : finaleTargetSize; }
+
     /** The world the finale runs in: the main world, or the Verliezerseiland. */
     private World finaleWorldFor(boolean losers) {
         World w = losers ? losersWorld() : finaleMainWorld();
@@ -7428,14 +7551,14 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void finaleBroadcast(Component text) {
         Component line = finaleLine(text);
         for (Player p : getServer().getOnlinePlayers()) {
-            p.sendMessage(line);
+            lowkeyMsg(p, line);
         }
     }
 
     private void finaleNotifyAdmins(String text, TextColor color) {
         for (Player p : getServer().getOnlinePlayers()) {
             if (isAdmin(p)) {
-                p.sendMessage(finaleLine(Component.text(text, color)));
+                lowkeyMsg(p, finaleLine(Component.text(text, color)));
             }
         }
     }
@@ -7599,7 +7722,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return;
             }
             if (finaleRestartNotice && finaleState == FinaleState.PAUSED && isAdmin(player)) {
-                player.sendMessage(finaleLine(Component.text("De finale stond aan toen de server herstartte en staat nu "
+                lowkeyMsg(player, finaleLine(Component.text("De finale stond aan toen de server herstartte en staat nu "
                         + "op pauze. Open /lowkey finale om hem te hervatten.", NamedTextColor.YELLOW)));
             }
         }, 40L);
@@ -7742,7 +7865,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         Component line = finaleLine(text);
         for (Player p : fw.getPlayers()) {
-            p.sendMessage(line);
+            lowkeyMsg(p, line);
         }
     }
 
@@ -7995,8 +8118,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     + "of in het finalemenu.", NamedTextColor.RED));
             return;
         }
-        finaleLosers = losers;
-        WorldBorder border = finaleWorld().getWorldBorder();
+        WorldBorder border = finaleWorldFor(losers).getWorldBorder();
         double startSize = border.getSize();
         double endSize = losers ? losersTargetSize : finaleTargetSize;
         if (Double.isNaN(startSize) || startSize > 100_000.0) {
@@ -8013,11 +8135,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     + "huidige border (" + finaleNum(startSize) + "). Pas het doel aan.", NamedTextColor.RED));
             return;
         }
-        long total = finaleDurationMin * 60_000L;
-        long shrink = finaleShrinkSec * 1000L;
-        long pause = finalePauseSec * 1000L;
+        finaleLosers = losers; // from here on this finale is the one that runs
+        if (losers) {
+            int aliveNow = aliveOnIsland().size();
+            if (sender != null && aliveNow <= Math.max(1, losersWinners)) {
+                sender.sendMessage(Component.text("Let op: er zijn maar " + aliveNow + " levende spelers op het eiland en er komen er "
+                        + losersWinners + " terug. De finale eindigt pas bij de volgende dood. Verlaag eventueel het aantal winnaars.",
+                        NamedTextColor.YELLOW));
+            }
+        }
+        long total = fDuration(losers) * 60_000L;
+        long shrink = fShrink(losers) * 1000L;
+        long pause = fPause(losers) * 1000L;
         long cycle = shrink + pause;
-        int rounds = cycle <= 0L ? 0 : (int) (Math.min(finaleRoundMin * 60_000L, total) / cycle);
+        int rounds = cycle <= 0L ? 0 : (int) (Math.min(fRound(losers) * 60_000L, total) / cycle);
         runStartCx = border.getCenter().getX();
         runStartCz = border.getCenter().getZ();
         runStartSize = startSize;
@@ -8030,8 +8161,8 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         runRounds = rounds;
         origDamage = border.getDamageAmount();
         origBuffer = border.getDamageBuffer();
-        border.setDamageAmount(finaleDamage);
-        border.setDamageBuffer(finaleBuffer);
+        border.setDamageAmount(fDamage(losers));
+        border.setDamageBuffer(fBuffer(losers));
 
         if (!losers && finaleCloseDims) {
             if (netherOpen) {
@@ -8103,11 +8234,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 if (pvp != null) {
                     lines.add(pvp);
                 }
-                p.sendMessage(finaleBlock(lines));
+                lowkeyMsg(p, finaleBlock(lines));
             } else if (isLosersOut(p) || (isEliminated(p) && !inLosers(p))) {
-                p.sendMessage(badgeLine("De finale is begonnen! Druk op het grote oog of doe /spectate om mee te kijken.", NamedTextColor.WHITE));
+                lowkeyMsg(p, badgeLine("De finale is begonnen! Druk op het grote oog of doe /spectate om mee te kijken.", NamedTextColor.WHITE));
             } else {
-                p.sendMessage(badgeLine("De finale is begonnen!", NamedTextColor.WHITE));
+                lowkeyMsg(p, badgeLine("De finale is begonnen!", NamedTextColor.WHITE));
             }
         }
         eyeAuto(true);
@@ -8361,7 +8492,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             if (!isAdmin(admin)) {
                 continue;
             }
-            admin.sendMessage(finaleLine(Component.text("Gelijkspel in de finale. Kies de winnaar in het menu.",
+            lowkeyMsg(admin, finaleLine(Component.text("Gelijkspel in de finale. Kies de winnaar in het menu.",
                     NamedTextColor.YELLOW)));
             List<ActionButton> buttons = new ArrayList<>();
             for (Player c : choices) {
@@ -8440,7 +8571,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build());
         for (Player p : audience) {
             p.showTitle(title);
-            p.sendMessage(chat);
+            lowkeyMsg(p, chat);
             p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
         }
 
@@ -8514,6 +8645,11 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private void handleFinaleCommand(CommandSender sender, String[] args) {
         String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "menu";
         switch (sub) {
+            case "eiland":
+            case "verliezerseiland":
+            case "losers":
+                handleIslandFinaleCommand(sender, args);
+                return;
             case "start":
                 finaleStart(sender);
                 return;
@@ -8560,9 +8696,47 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return;
             default:
                 if (sender instanceof Player) {
-                    openFinaleMenu((Player) sender);
+                    // the menu of the finale that is running, otherwise the main one
+                    openFinaleMenu((Player) sender, finaleState != FinaleState.IDLE && finaleLosers);
                 } else {
                     sender.sendMessage(finaleStatusBody());
+                }
+        }
+    }
+
+    /** /lowkey finale eiland <menu|start|status|pauze|hervat|stop> : the finale of the Verliezerseiland, separate from the main finale. */
+    private void handleIslandFinaleCommand(CommandSender sender, String[] args) {
+        String what = args.length >= 3 ? args[2].toLowerCase(Locale.ROOT) : "menu";
+        switch (what) {
+            case "start":
+                finaleStart(sender, true);
+                return;
+            case "status":
+                sender.sendMessage(finaleStatusBody(true));
+                return;
+            case "pauze":
+            case "pause":
+            case "hervat":
+            case "resume":
+            case "stop":
+                if (finaleState != FinaleState.IDLE && !finaleLosers) {
+                    sender.sendMessage(Component.text("De finale van het Verliezerseiland is niet bezig, de main finale wel. "
+                            + "Gebruik /lowkey finale " + what + " voor die.", NamedTextColor.RED));
+                    return;
+                }
+                if (what.equals("stop")) {
+                    finaleStop(sender);
+                } else if (what.startsWith("p")) {
+                    finalePause(sender);
+                } else {
+                    finaleResume(sender);
+                }
+                return;
+            default:
+                if (sender instanceof Player) {
+                    openFinaleMenu((Player) sender, true);
+                } else {
+                    sender.sendMessage(finaleStatusBody(true));
                 }
         }
     }
@@ -8615,22 +8789,81 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     }
 
     private Component finaleStatusBody() {
+        return finaleStatusBody(finaleLosers);
+    }
+
+    private static String minutesText(double minutes) {
+        return finaleNum(Math.round(minutes * 10.0) / 10.0) + " min";
+    }
+
+    /** The plain-language timeline of a finale: what the border does and when. */
+    private List<Component> finaleScheduleLines(boolean losers, double startSize) {
+        long total;
+        long shrink;
+        long pause;
+        int rounds;
+        double endSize;
+        if (finaleState != FinaleState.IDLE && finaleLosers == losers) {
+            total = runTotalMs;
+            shrink = runShrinkMs;
+            pause = runPauseMs;
+            rounds = runRounds;
+            endSize = runEndSize;
+        } else {
+            total = fDuration(losers) * 60_000L;
+            shrink = fShrink(losers) * 1000L;
+            pause = fPause(losers) * 1000L;
+            long cycle = shrink + pause;
+            rounds = cycle <= 0L ? 0 : (int) (Math.min(fRound(losers) * 60_000L, total) / cycle);
+            endSize = fEndSize(losers);
+        }
+        long cont = Math.max(0L, total - (long) rounds * (shrink + pause));
+        long shrinkTotal = cont + (long) rounds * shrink;
+        List<Component> lines = new ArrayList<>();
+        lines.add(statusLine("Totale duur", minutesText(total / 60000.0), NamedTextColor.WHITE));
+        lines.add(statusLine("Eerst rustig krimpen", minutesText(cont / 60000.0) + " (rode border, zonder stops)",
+                NamedTextColor.WHITE));
+        if (rounds > 0) {
+            lines.add(statusLine("Daarna rondes", rounds + " x " + (shrink / 1000L) + " s krimpen (rood), dan "
+                    + (pause / 1000L) + " s stil (blauw)", NamedTextColor.WHITE));
+        } else {
+            lines.add(statusLine("Daarna rondes", "geen (er past geen hele ronde in de rondetijd)", NamedTextColor.GRAY));
+        }
+        if (shrinkTotal > 0L && startSize > endSize && startSize <= 100_000.0) {
+            double perMin = (startSize - endSize) / (shrinkTotal / 60000.0);
+            lines.add(statusLine("Snelheid", "ongeveer " + finaleNum(perMin) + " blokken per minuut dat hij krimpt",
+                    NamedTextColor.WHITE));
+        }
+        return lines;
+    }
+
+    private Component finaleStatusBody(boolean losers) {
+        if (finaleState != FinaleState.IDLE && finaleLosers != losers) {
+            return joinLines(
+                    statusLine("Let op", "de finale van " + (finaleLosers ? "het Verliezerseiland" : "de main wereld")
+                            + " is bezig", NamedTextColor.RED),
+                    Component.text("Stop of beeindig die eerst, dan kun je deze finale starten.", NamedTextColor.GRAY));
+        }
         boolean active = finaleState != FinaleState.IDLE;
-        boolean losers = finaleLosers;
         boolean targetSet = losers ? losersTargetSet : finaleTargetSet;
-        WorldBorder border = finaleWorld().getWorldBorder();
+        World world = finaleWorldFor(losers);
+        WorldBorder border = world.getWorldBorder();
         double cx = targetSet ? (losers ? losersTargetX : finaleTargetX) : border.getCenter().getX();
         double cz = targetSet ? (losers ? losersTargetZ : finaleTargetZ) : border.getCenter().getZ();
-        double size = losers ? losersTargetSize : finaleTargetSize;
+        double size = fEndSize(losers);
         List<Component> lines = new ArrayList<>();
         lines.add(statusLine("Finale", finaleStateText(), finaleState == FinaleState.RUNNING ? NamedTextColor.GREEN
                 : (finaleState == FinaleState.IDLE ? NamedTextColor.YELLOW : NamedTextColor.AQUA)));
         lines.add(statusLine("Waar", losers ? "Verliezerseiland" : "Finalewereld", NamedTextColor.WHITE));
-        lines.add(statusLine("Border nu", finaleNum(border.getSize()) + " blokken", NamedTextColor.WHITE));
-        lines.add(statusLine("Doel", "x " + finaleNum(cx) + ", z " + finaleNum(cz) + ", " + finaleNum(size)
-                + " blokken" + (targetSet ? "" : " (midden blijft)"), NamedTextColor.WHITE));
-        lines.add(statusLine("Duur", finaleDurationMin + " min, laatste " + finaleRoundMin + " min in rondes van "
-                + finaleShrinkSec + " s krimpen en " + finalePauseSec + " s pauze", NamedTextColor.WHITE));
+        double now = border.getSize();
+        lines.add(statusLine("Border nu", finaleNum(now) + " blokken" + (now > 100_000.0
+                ? " (standaard, zet hem eerst op de startgrootte)" : ""),
+                now > 100_000.0 ? NamedTextColor.RED : NamedTextColor.WHITE));
+        lines.add(statusLine("Wordt", finaleNum(size) + " blokken, midden x " + finaleNum(cx) + " z " + finaleNum(cz)
+                + (targetSet ? "" : " (midden blijft)"), NamedTextColor.WHITE));
+        lines.addAll(finaleScheduleLines(losers, now));
+        lines.add(statusLine("Schade", finaleNum(fDamage(losers)) + " per seconde per blok buiten de border, veilig tot "
+                + finaleNum(fBuffer(losers)) + " blokken erbuiten", NamedTextColor.WHITE));
         if (!losers) {
             lines.add(statusLine("Voorbereiding", finalePrepLeftMs > 0L ? "PvP uit, nog " + clock(finalePrepLeftMs)
                     : finalePrepMin + " min zonder PvP", NamedTextColor.WHITE));
@@ -8642,9 +8875,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             lines.add(statusLine("Tijd over", clock(Math.max(0L, runTotalMs - finaleElapsedMs)), NamedTextColor.WHITE));
         }
         if (finaleState == FinaleState.ENDED && finaleWinner != null) {
-            lines.add(statusLine("Winnaar", finaleWinner, finaleAccent()));
+            lines.add(statusLine("Winnaar", finaleWinner, losers ? NamedTextColor.RED : NamedTextColor.LIGHT_PURPLE));
         }
-        lines.add(statusLine("Spelers over", String.valueOf(finaleAlivePlayers().size()), NamedTextColor.WHITE));
+        int alive = losers ? aliveOnIsland().size() : (active && !finaleLosers ? finaleAlivePlayers().size() : 0);
+        lines.add(statusLine("Spelers over", String.valueOf(alive), NamedTextColor.WHITE));
         return joinLines(lines.toArray(new Component[0]));
     }
 
@@ -8652,7 +8886,10 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         openFinaleMenu(admin, false);
     }
 
-    /** The finale screen for the main world (losers = false) or for the Verliezerseiland. */
+    /**
+     * The finale screen for the main world (losers = false) or for the Verliezerseiland (losers = true). The two are
+     * completely separate: own times, own target, own start button. Every sub screen comes back to the same one.
+     */
     private void openFinaleMenu(Player admin, boolean losers) {
         if (!admin.isOnline()) {
             return;
@@ -8660,13 +8897,29 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         if (finaleState == FinaleState.IDLE) {
             finaleLosers = losers; // decides which world the status shows
         }
+        final Runnable parent = losers ? () -> openLosersMenu(admin) : () -> openMenu(admin);
+        final ActionButton backToParent = losers ? backButton("Terug naar het Verliezerseiland.", parent)
+                : backButton("Terug naar het hoofdmenu.", parent);
+        final String title = losers ? "Verliezerseiland finale" : "Main finale";
+        if (finaleState != FinaleState.IDLE && finaleLosers != losers) {
+            // the other finale is running: nothing here can start, pause or stop it by accident
+            List<ActionButton> only = new ArrayList<>();
+            only.add(button(iconLabel(M_STAR, finaleLosers ? "Naar de finale van het eiland" : "Naar de main finale",
+                    NamedTextColor.WHITE), "Open het menu van de finale die nu bezig is.", 150,
+                    () -> openFinaleMenu(admin, finaleLosers)));
+            showMenu(admin, title, finaleStatusBody(losers), only, backToParent);
+            return;
+        }
         Runnable again = () -> openFinaleMenu(admin, losers);
         List<ActionButton> buttons = new ArrayList<>();
         if (finaleState == FinaleState.IDLE) {
-            buttons.add(button(iconLabel(M_LAUNCH, "Finale starten", NamedTextColor.GREEN),
-                    "Titel, bericht en de border begint te krimpen.", 150, () -> confirm(admin,
-                            "Finale starten?",
-                            losers ? "De border op het Verliezerseiland begint direct te krimpen en iedereen krijgt de titel."
+            buttons.add(button(iconLabel(M_LAUNCH, losers ? "Eiland finale starten" : "Main finale starten", NamedTextColor.GREEN),
+                    losers ? "Alleen op het Verliezerseiland. De main wereld merkt hier niets van."
+                            : "Alleen in de main wereld. Het Verliezerseiland merkt hier niets van.", 150, () -> confirm(admin,
+                            losers ? "Finale van het Verliezerseiland starten?" : "Main finale starten?",
+                            losers ? "De border op het Verliezerseiland begint direct te krimpen vanaf zijn huidige grootte ("
+                                    + finaleNum(finaleWorldFor(true).getWorldBorder().getSize()) + " blokken). Niemand in de "
+                                    + "main wereld wordt verplaatst."
                                     : "Iedereen in de main wereld gaat naar het middelpunt van de finalewereld. Eerst "
                                     + finalePrepMin + " min zonder PvP, daarna begint de border te krimpen.",
                             losers ? "De laatste " + losersWinners + " spelers komen terug in het spel."
@@ -8704,10 +8957,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                             again)));
         }
         buttons.add(button(iconLabel(M_COMPASS, "Doel en grootte", NamedTextColor.WHITE),
-                "Midden, eindgrootte en je eigen positie als doel.", 150, () -> openFinaleTargetDialog(admin, losers)));
-        buttons.add(button(iconLabel(M_COUNTDOWN, "Tijden en schade", NamedTextColor.WHITE),
-                "Duur, rondes, pauzes en de schade buiten de border (voor beide finales).", 150,
-                () -> openFinaleTimeDialog(admin)));
+                "Waar de border naartoe krimpt en hoe klein hij wordt. Alleen voor " + (losers ? "het eiland." : "de main finale."),
+                150, () -> openFinaleTargetDialog(admin, losers)));
+        buttons.add(button(iconLabel(M_COUNTDOWN, "Duur, rondes en schade", NamedTextColor.WHITE),
+                "Hoe lang de finale duurt, hoe de border krimpt en hoeveel schade je buiten de border krijgt. Met uitleg. "
+                        + "Alleen voor " + (losers ? "het eiland." : "de main finale."), 150,
+                () -> openFinaleTimeDialog(admin, losers)));
         if (!losers) {
             buttons.add(button(iconLabel(M_COMPASS, "Finalewereld", NamedTextColor.WHITE),
                     "De aparte wereld voor de finale: maken, middelpunt, verwijderen.", 150,
@@ -8741,9 +8996,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                     eyeCommand(admin, eyeOn ? "uit" : "aan");
                     again.run();
                 }));
-        showMenu(admin, losers ? "Verliezerseiland finale" : "Finale", finaleStatusBody(), buttons,
-                losers ? backButton("Terug naar het Verliezerseiland.", () -> openLosersMenu(admin))
-                        : backButton("Terug naar het hoofdmenu.", () -> openMenu(admin)));
+        showMenu(admin, title, finaleStatusBody(losers), buttons, backToParent);
     }
 
     private void openLosersWinnersDialog(Player admin) {
@@ -8886,19 +9139,20 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
     }
 
-    private void openFinaleTimeDialog(Player admin) {
-        DialogInput duration = DialogInput.text("duur", Component.text("Totale duur (minuten)"))
-                .width(300).initial(String.valueOf(finaleDurationMin)).maxLength(3).build();
-        DialogInput rounds = DialogInput.text("ronde", Component.text("Laatste minuten in rondes"))
-                .width(300).initial(String.valueOf(finaleRoundMin)).maxLength(3).build();
-        DialogInput shrink = DialogInput.text("krimp", Component.text("Krimpen per ronde (seconden)"))
-                .width(300).initial(String.valueOf(finaleShrinkSec)).maxLength(4).build();
-        DialogInput pause = DialogInput.text("pauze", Component.text("Pauze per ronde (seconden)"))
-                .width(300).initial(String.valueOf(finalePauseSec)).maxLength(4).build();
-        DialogInput damage = DialogInput.text("schade", Component.text("Schade per blok per seconde buiten de border"))
-                .width(300).initial(finaleNum(finaleDamage)).maxLength(6).build();
+    private void openFinaleTimeDialog(Player admin, boolean losers) {
+        final String who = losers ? "het Verliezerseiland" : "de main wereld";
+        DialogInput duration = DialogInput.text("duur", Component.text("Hoe lang duurt de hele finale? (minuten)"))
+                .width(300).initial(String.valueOf(fDuration(losers))).maxLength(3).build();
+        DialogInput rounds = DialogInput.text("ronde", Component.text("De laatste hoeveel minuten krimpt de border in rondes?"))
+                .width(300).initial(String.valueOf(fRound(losers))).maxLength(3).build();
+        DialogInput shrink = DialogInput.text("krimp", Component.text("Per ronde: hoe lang krimpt de border? (seconden)"))
+                .width(300).initial(String.valueOf(fShrink(losers))).maxLength(4).build();
+        DialogInput pause = DialogInput.text("pauze", Component.text("Per ronde: hoe lang staat de border stil? (seconden)"))
+                .width(300).initial(String.valueOf(fPause(losers))).maxLength(4).build();
+        DialogInput damage = DialogInput.text("schade", Component.text("Schade per seconde per blok buiten de border"))
+                .width(300).initial(finaleNum(fDamage(losers))).maxLength(6).build();
         DialogInput buffer = DialogInput.text("buffer", Component.text("Veilige afstand buiten de border (blokken)"))
-                .width(300).initial(finaleNum(finaleBuffer)).maxLength(6).build();
+                .width(300).initial(finaleNum(fBuffer(losers))).maxLength(6).build();
         DialogAction save = DialogAction.customClick((view, audience) -> {
             if (!(audience instanceof Player)) {
                 return;
@@ -8914,25 +9168,38 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             final String sc = view.getText("schade");
             final String sb = view.getText("buffer");
             getServer().getScheduler().runTask(this, () -> {
-                applyFinaleTimes(clicker, sd, sr, sk, sp, sc, sb);
-                openFinaleMenu(clicker);
+                applyFinaleTimes(clicker, losers, sd, sr, sk, sp, sc, sb);
+                openFinaleMenu(clicker, losers);
             });
         }, CLICK_OPTIONS);
+        double now = finaleWorldFor(losers).getWorldBorder().getSize();
+        List<Component> overview = finaleScheduleLines(losers, now);
+        Component example = joinLines(overview.toArray(new Component[0]));
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(dlgTitle(admin, "Finale tijden"))
-                        .body(List.of(DialogBody.plainMessage(Component.text(
-                                "In de laatste minuten krimpt de border in rondes met pauzes ertussen. Geldt voor de "
-                                        + "volgende start.", NamedTextColor.GRAY))))
+                .base(DialogBase.builder(dlgTitle(admin, losers ? "Eiland finale: duur en schade" : "Main finale: duur en schade"))
+                        .body(List.of(
+                                DialogBody.plainMessage(Component.text(
+                                        "Dit geldt alleen voor " + who + ". De border begint op zijn grootte van dat moment ("
+                                                + (now > 100_000.0 ? "nog de standaard, zet hem eerst" : finaleNum(now) + " blokken")
+                                                + ") en krimpt naar de eindgrootte uit 'Doel en grootte'.", NamedTextColor.GRAY)),
+                                DialogBody.plainMessage(Component.text(
+                                        "Zo werkt het: de finale begint met rustig krimpen. In de laatste minuten (rondes) krimpt "
+                                                + "de border steeds even (rood) en staat dan even stil (blauw).", NamedTextColor.GRAY)),
+                                DialogBody.plainMessage(Component.text(
+                                        "Schade: 1 is een half hartje per seconde voor elk blok dat je buiten de border staat. "
+                                                + "Binnen de veilige afstand krijg je geen schade.", NamedTextColor.GRAY)),
+                                DialogBody.plainMessage(Component.text("Nu ingesteld:", NamedTextColor.WHITE)),
+                                DialogBody.plainMessage(example)))
                         .inputs(List.of(duration, rounds, shrink, pause, damage, buffer))
                         .build())
                 .type(DialogType.confirmation(
                         ActionButton.create(iconLabel(M_COUNTDOWN, "Opslaan", NamedTextColor.GREEN),
-                                Component.text("Sla de tijden op."), 150, save),
-                        backButton("Terug naar de finale.", () -> openFinaleMenu(admin)))));
+                                Component.text("Sla de tijden op voor " + who + "."), 150, save),
+                        backButton("Terug naar de finale.", () -> openFinaleMenu(admin, losers)))));
         admin.showDialog(dialog);
     }
 
-    private void applyFinaleTimes(Player admin, String sd, String sr, String sk, String sp, String sc, String sb) {
+    private void applyFinaleTimes(Player admin, boolean losers, String sd, String sr, String sk, String sp, String sc, String sb) {
         try {
             int duration = (int) Math.round(parseNum(sd == null ? "" : sd));
             int rounds = (int) Math.round(parseNum(sr == null ? "" : sr));
@@ -8958,14 +9225,29 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 admin.sendMessage(Component.text("Schade: 0 tot 100. Veilige afstand: 0 tot 1000.", NamedTextColor.RED));
                 return;
             }
-            finaleDurationMin = duration;
-            finaleRoundMin = rounds;
-            finaleShrinkSec = shrink;
-            finalePauseSec = pause;
-            finaleDamage = damage;
-            finaleBuffer = buffer;
+            if (losers) {
+                loserDurationMin = duration;
+                loserRoundMin = rounds;
+                loserShrinkSec = shrink;
+                loserPauseSec = pause;
+                loserDamage = damage;
+                loserBuffer = buffer;
+            } else {
+                finaleDurationMin = duration;
+                finaleRoundMin = rounds;
+                finaleShrinkSec = shrink;
+                finalePauseSec = pause;
+                finaleDamage = damage;
+                finaleBuffer = buffer;
+            }
             saveState();
-            admin.sendMessage(Component.text("De tijden zijn opgeslagen.", NamedTextColor.GREEN));
+            admin.sendMessage(Component.text("De tijden voor " + (losers ? "het Verliezerseiland" : "de main wereld")
+                    + " zijn opgeslagen.", NamedTextColor.GREEN));
+            long cycle = (shrink + pause) * 1000L;
+            if (rounds > 0 && (cycle <= 0L || rounds * 60_000L / cycle == 0L)) {
+                admin.sendMessage(Component.text("Let op: er past geen hele ronde (" + shrink + " s + " + pause
+                        + " s) in " + rounds + " minuten, dus er komen geen rondes.", NamedTextColor.YELLOW));
+            }
         } catch (NumberFormatException e) {
             admin.sendMessage(Component.text("Geef getallen op.", NamedTextColor.RED));
         }
@@ -9342,7 +9624,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return;
         }
         if (hoursLocked(player)) {
-            player.sendMessage(Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
+            lowkeyMsg(player, Component.text().append(glyph(LOWKEY_BADGE)).append(Component.space())
                     .append(hoursClosedMessage()).build());
             return;
         }
@@ -9369,7 +9651,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             getServer().getScheduler().runTaskLater(this, () -> {
                 long left = graceRemaining(player);
                 if (player.isOnline() && left > 0L) {
-                    player.sendMessage(graceMessage(left));
+                    lowkeyMsg(player, graceMessage(left));
                 }
             }, 40L);
         }
@@ -9478,7 +9760,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         int told = 0;
         for (Player p : getServer().getOnlinePlayers()) {
             if (isEliminated(p)) {
-                p.sendMessage(Component.text()
+                lowkeyMsg(p, Component.text()
                         .append(glyph(LOWKEY_BADGE_RED))
                         .append(Component.space())
                         .append(Component.text("Het Verliezerseiland is open! Gebruik de rode ster in je hotbar.",
@@ -9523,7 +9805,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         target.setFallDistance(0f);
         target.teleport(dest);
         refreshTags(target);
-        target.sendMessage(Component.text()
+        lowkeyMsg(target, Component.text()
                 .append(glyph(LOWKEY_BADGE))
                 .append(Component.space())
                 .append(Component.text("Je bent terug in het spel!", NamedTextColor.GREEN))
@@ -9574,7 +9856,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 .build();
         for (Player p : getServer().getOnlinePlayers()) {
             if (isEliminated(p)) {
-                p.sendMessage(message);
+                lowkeyMsg(p, message);
             }
         }
         sender.sendMessage(Component.text(winners.size() + " spelers zijn terug in de main wereld gezet. Het eiland is "
@@ -10436,7 +10718,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             setAutoTeam(true);
             for (Player p : getServer().getOnlinePlayers()) {
                 if (isAdmin(p)) {
-                    p.sendMessage(badgeLine("Auto team staat nu aan: nieuwe spelers krijgen zelf een team. Uitzetten kan met /lowkey autoteam uit.", NamedTextColor.GRAY));
+                    lowkeyMsg(p, badgeLine("Auto team staat nu aan: nieuwe spelers krijgen zelf een team. Uitzetten kan met /lowkey autoteam uit.", NamedTextColor.GRAY));
                 }
             }
         }
@@ -10470,7 +10752,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         for (UUID id : eventLocked) {
             Player p = getServer().getPlayer(id);
             if (p != null) {
-                p.sendMessage(summary);
+                lowkeyMsg(p, summary);
             }
         }
     }
@@ -10839,7 +11121,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 return;
             }
             setRulesSeen(player.getUniqueId(), true);
-            player.sendMessage(Component.text()
+            lowkeyMsg(player, Component.text()
                     .append(glyph(LOWKEY_BADGE))
                     .append(Component.space())
                     .append(Component.text("Lees eerst de regels! Je kunt ze later altijd teruglezen in slot 9.",
@@ -10954,7 +11236,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             admin.sendMessage(Component.text("Je inventory is vol, maak eerst een plek vrij.", NamedTextColor.RED));
             return;
         }
-        admin.sendMessage(Component.text()
+        lowkeyMsg(admin, Component.text()
                 .append(glyph(LOWKEY_BADGE))
                 .append(Component.space())
                 .append(Component.text("Je hebt een Book and Quill met de huidige regels gekregen. Pas het aan en klik "
@@ -10993,7 +11275,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         rulesPages.addAll(pages);
         saveRules();
         refreshRulesBooks();
-        player.sendMessage(Component.text()
+        lowkeyMsg(player, Component.text()
                 .append(glyph(LOWKEY_BADGE))
                 .append(Component.space())
                 .append(Component.text(rulesPages.isEmpty()
@@ -11327,7 +11609,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             player.showTitle(Title.title(Component.text(name, color, TextDecoration.BOLD), Component.empty(),
                     Title.Times.times(Duration.ofMillis(200), Duration.ofMillis(3000), Duration.ofMillis(800))));
             player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, side == Side.NOORD ? 0.75f : 1.3f);
-            player.sendMessage(badgeLine("Je zit in team " + (side == Side.NOORD ? "Noord" : "Zuid") + ".", NamedTextColor.WHITE));
+            lowkeyMsg(player, badgeLine("Je zit in team " + (side == Side.NOORD ? "Noord" : "Zuid") + ".", NamedTextColor.WHITE));
         }, 36L);
     }
 
@@ -11565,12 +11847,12 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         boolean first = !anonConversations.containsKey(to.getUniqueId());
         anonConversations.put(to.getUniqueId(), sender instanceof Player ? ((Player) sender).getUniqueId() : ANON_CONSOLE);
         // a normal whisper partner no longer counts for /r: the newest talk wins
-        to.sendMessage(whisperLine("LowkeySMP", "Jij", text));
+        lowkeyMsg(to, whisperLine("LowkeySMP", "Jij", text));
         if (first) {
-            to.sendMessage(badgeLine("Je kunt antwoorden met /r <bericht>.", NamedTextColor.GRAY));
+            lowkeyMsg(to, badgeLine("Je kunt antwoorden met /r <bericht>.", NamedTextColor.GRAY));
         }
         to.playSound(to.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, 0.7f, 1.4f);
-        sender.sendMessage(whisperLine("Jij (als LowkeySMP)", to.getName(), text));
+        lowkeyMsg(sender, whisperLine("Jij (als LowkeySMP)", to.getName(), text));
         getLogger().info("[tell] " + sender.getName() + " as LowkeySMP -> " + to.getName() + ": " + text);
     }
 
@@ -11604,7 +11886,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         UUID adminId = anonConversations.get(from.getUniqueId());
         if (adminId != null) {
-            from.sendMessage(whisperLine("Jij", "LowkeySMP", text));
+            lowkeyMsg(from, whisperLine("Jij", "LowkeySMP", text));
             Component line = whisperLine(from.getName(), "LowkeySMP", text);
             Player admin = ANON_CONSOLE.equals(adminId) ? null : getServer().getPlayer(adminId);
             if (admin != null && admin.isOnline()) {
@@ -11614,7 +11896,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
                 // the admin who wrote is not there: every admin online sees the answer
                 for (Player p : getServer().getOnlinePlayers()) {
                     if (isAdmin(p) && !p.equals(from)) {
-                        p.sendMessage(line);
+                        lowkeyMsg(p, line);
                     }
                 }
             }
@@ -11685,7 +11967,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         Player p = (Player) sender;
         if (args.length >= 1 && (args[0].equalsIgnoreCase("leave") || args[0].equalsIgnoreCase("stop"))) {
             if (!finaleViewers.containsKey(p.getUniqueId())) {
-                p.sendMessage(badgeLine("Je kijkt nu niet mee.", NamedTextColor.RED));
+                lowkeyMsg(p, badgeLine("Je kijkt nu niet mee.", NamedTextColor.RED));
             } else {
                 endViewing(p);
             }
@@ -11693,16 +11975,16 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         World fw = finaleState == FinaleState.IDLE || finaleState == FinaleState.ENDED ? null : finaleWorld();
         if (fw == null) {
-            p.sendMessage(badgeLine("Er is nu geen finale om naar te kijken.", NamedTextColor.RED));
+            lowkeyMsg(p, badgeLine("Er is nu geen finale om naar te kijken.", NamedTextColor.RED));
             return true;
         }
         boolean out = isLosersOut(p) || (isEliminated(p) && !inLosers(p));
         if (!out) {
-            p.sendMessage(badgeLine(isEliminated(p) ? "Je speelt nog op het Verliezerseiland, daar kun je niet weg." : "Alleen spelers die al uitgeschakeld zijn kunnen meekijken.", NamedTextColor.RED));
+            lowkeyMsg(p, badgeLine(isEliminated(p) ? "Je speelt nog op het Verliezerseiland, daar kun je niet weg." : "Alleen spelers die al uitgeschakeld zijn kunnen meekijken.", NamedTextColor.RED));
             return true;
         }
         if (p.getWorld().equals(fw)) {
-            p.sendMessage(badgeLine("Je kijkt al mee.", NamedTextColor.YELLOW));
+            lowkeyMsg(p, badgeLine("Je kijkt al mee.", NamedTextColor.YELLOW));
             return true;
         }
         finaleViewers.put(p.getUniqueId(), p.getLocation().clone());
@@ -11715,7 +11997,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         }
         p.teleport(safeLocation(base.clone()));
         p.setGameMode(GameMode.SPECTATOR);
-        p.sendMessage(badgeLine("Je kijkt nu mee. Gebruik /spectate leave om te stoppen met kijken.", NamedTextColor.WHITE));
+        lowkeyMsg(p, badgeLine("Je kijkt nu mee. Gebruik /spectate leave om te stoppen met kijken.", NamedTextColor.WHITE));
         getServer().getScheduler().runTask(this, this::updateTablist);
         return true;
     }
@@ -11745,7 +12027,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             sendToLobby(p);
         }
         p.setGameMode(mode == null || mode == GameMode.SPECTATOR ? GameMode.ADVENTURE : mode);
-        p.sendMessage(badgeLine("Je kijkt niet meer mee.", NamedTextColor.GRAY));
+        lowkeyMsg(p, badgeLine("Je kijkt niet meer mee.", NamedTextColor.GRAY));
         getServer().getScheduler().runTask(this, this::updateTablist);
     }
 
@@ -11762,8 +12044,25 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         return !getConfig().getString("site.token", "").isBlank();
     }
 
+    /** The old netlify address is dead: whatever an old config.yml still says, it becomes lowkeysmp.be. */
+    private void migrateWebsiteUrls() {
+        boolean changed = false;
+        for (String key : new String[] {"website-url", "site.url"}) {
+            String value = getConfig().getString(key, "");
+            if (value != null && value.toLowerCase(Locale.ROOT).contains("netlify.app")) {
+                getConfig().set(key, DEFAULT_WEBSITE_URL);
+                getLogger().info(key + " stond nog op de oude site (" + value + ") en is nu " + DEFAULT_WEBSITE_URL);
+                changed = true;
+            }
+        }
+        if (changed) {
+            saveConfig();
+        }
+    }
+
     private void initSiteLink() {
-        getConfig().addDefault("site.url", "https://lowkeysmp.lovable.app");
+        migrateWebsiteUrls();
+        getConfig().addDefault("site.url", "https://lowkeysmp.be");
         getConfig().addDefault("site.token", "");
         getConfig().addDefault("site.stats-minutes", 5);
         getConfig().addDefault("site.stats-exclude", Arrays.asList("Lowkey_SMP"));
@@ -11884,7 +12183,9 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
     private String deathCause(Player player, Component msg) {
         if (msg != null) {
             try {
-                String text = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(msg).trim();
+                // badge and team icons are private-use characters in the pack font: they must not end up in the reason
+                String text = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(msg)
+                        .replaceAll("[\\uE000-\\uF8FF]", "").replaceAll("\\s+", " ").trim();
                 if (!text.isEmpty() && !text.startsWith("death.")) {
                     return text;
                 }
@@ -11928,9 +12229,6 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
 
     /** A real elimination: the site gets the exact time and cause and you approve it in the beheer. */
     private void reportDeath(Player player, Component msg, String location) {
-        if (!siteConfigured()) {
-            return;
-        }
         JsonObject o = new JsonObject();
         o.addProperty("type", "death");
         o.addProperty("eventId", UUID.randomUUID().toString());
@@ -11939,7 +12237,75 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
         o.addProperty("diedAt", java.time.OffsetDateTime.now().toString());
         o.addProperty("cause", deathCause(player, msg));
         o.addProperty("location", location);
+        appendDeathLog(gson.toJson(o)); // the server keeps its own copy, whatever happens to the site
         sitePost(o);
+    }
+
+    // ---- local death log: the website can lose its data, the server keeps every death (time, cause, where)
+
+    private final Object deathLogLock = new Object();
+
+    private File deathLogFile() {
+        return new File(getDataFolder(), "deaths-log.jsonl");
+    }
+
+    private void appendDeathLog(String json) {
+        synchronized (deathLogLock) {
+            try {
+                getDataFolder().mkdirs();
+                java.nio.file.Files.writeString(deathLogFile().toPath(), json + System.lineSeparator(),
+                        java.nio.charset.StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+            } catch (Exception ex) {
+                getLogger().warning("deaths-log.jsonl kon niet bijgewerkt worden: " + ex.getMessage());
+            }
+        }
+    }
+
+    private List<String> readDeathLog() {
+        List<String> lines = new ArrayList<>();
+        synchronized (deathLogLock) {
+            File f = deathLogFile();
+            if (!f.isFile()) {
+                return lines;
+            }
+            try {
+                for (String line : java.nio.file.Files.readAllLines(f.toPath(), java.nio.charset.StandardCharsets.UTF_8)) {
+                    if (!line.isBlank()) {
+                        lines.add(line);
+                    }
+                }
+            } catch (Exception ex) {
+                getLogger().warning("deaths-log.jsonl kon niet gelezen worden: " + ex.getMessage());
+            }
+        }
+        return lines;
+    }
+
+    /** /lowkey site deaths [resend]: shows the local death log, or sends every logged death to the site again. */
+    private void siteDeathsCommand(CommandSender sender, boolean resend) {
+        List<String> lines = readDeathLog();
+        if (!resend) {
+            sender.sendMessage(Component.text("Lokaal doodslog: " + lines.size() + " doodsberichten met tijd, reden en plek "
+                    + "(plugins/LowkeyCore/deaths-log.jsonl). Wachtrij naar de site: " + siteQueue.size() + ". "
+                    + "Typ /lowkey site deaths resend om alles opnieuw naar de site te sturen.", NamedTextColor.YELLOW));
+            return;
+        }
+        if (!siteConfigured()) {
+            sender.sendMessage(Component.text("Zet eerst site.token in plugins/LowkeyCore/config.yml.", NamedTextColor.RED));
+            return;
+        }
+        if (lines.isEmpty()) {
+            sender.sendMessage(Component.text("Het lokale doodslog is nog leeg.", NamedTextColor.GRAY));
+            return;
+        }
+        for (String line : lines) {
+            siteQueue.add(line);
+        }
+        saveSiteQueue();
+        getServer().getScheduler().runTaskAsynchronously(this, this::flushSiteQueue);
+        sender.sendMessage(Component.text(lines.size() + " doodsberichten worden opnieuw naar de site gestuurd (met hetzelfde "
+                + "eventId als eerst). Gebruik dit alleen als de site zijn deaths kwijt is.", NamedTextColor.GREEN));
     }
 
     private static final class StatRow {
@@ -12708,7 +13074,7 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return eyeOptions;
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("site")) {
-            List<String> siteOptions = new ArrayList<>(Arrays.asList("test", "stats", "queue", "reset"));
+            List<String> siteOptions = new ArrayList<>(Arrays.asList("test", "stats", "queue", "deaths", "reset"));
             siteOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
             return siteOptions;
         }
@@ -12736,9 +13102,13 @@ public final class LowkeyCore extends JavaPlugin implements Listener {
             return eventOptions;
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("finale")) {
-            List<String> finaleOptions = new ArrayList<>(Arrays.asList("menu", "start", "pauze", "hervat", "stop", "status", "wereld", "voorbereiding", "test"));
+            List<String> finaleOptions = new ArrayList<>(Arrays.asList("menu", "start", "eiland", "pauze", "hervat", "stop", "status", "wereld", "voorbereiding", "test"));
             finaleOptions.removeIf(o -> !o.startsWith(args[1].toLowerCase(Locale.ROOT)));
             return finaleOptions;
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("finale") && args[1].equalsIgnoreCase("eiland")) {
+            return Stream.of("menu", "start", "status", "pauze", "hervat", "stop")
+                    .filter(o -> o.startsWith(args[2].toLowerCase(Locale.ROOT))).collect(Collectors.toList());
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("finale") && args[1].equalsIgnoreCase("wereld")) {
             return Stream.of("maken", "tp", "middelpunt", "verwijder")
